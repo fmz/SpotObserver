@@ -1,0 +1,3 @@
+[submodule "extern/spot-cpp-sdk"]
+	path = extern/spot-cpp-sdk
+	url = https://github.com/boston-dynamics/spot-cpp-sdk

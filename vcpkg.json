@@ -1,0 +1,20 @@
+{
+  "dependencies": [
+    {
+      "name": "grpc",
+      "version>=": "1.51.1"
+    },
+    {
+      "name": "protobuf",
+      "version>=": "3.21.12"
+    },
+    {
+      "name": "eigen3",
+      "version>=": "3.4.0#2"
+    },
+    {
+      "name": "cli11",
+      "version>=": "2.3.1"
+    }
+  ]
+}
