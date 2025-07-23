@@ -75,7 +75,6 @@ public:
         }
     }
 
-
     /**
      * Connect to Spot robot
      */
@@ -123,6 +122,43 @@ public:
     }
 
     /**
+     * Create custom image request with specific format and quality
+     */
+    ::bosdyn::api::GetImageRequest createImageRequest() {
+        ::bosdyn::api::GetImageRequest request;
+
+        // RGB cameras with PIXEL_FORMAT_RGB_U8
+        std::vector<std::string> rgb_sources = {
+            "frontleft_fisheye_image",
+            "frontright_fisheye_image"
+        };
+
+        // Depth cameras with PIXEL_FORMAT_DEPTH_U16
+        std::vector<std::string> depth_sources = {
+            "frontleft_depth",
+            "frontright_depth"
+        };
+
+        // Add RGB image requests
+        for (const std::string& source : rgb_sources) {
+            ::bosdyn::api::ImageRequest* image_request = request.add_image_requests();
+            image_request->set_image_source_name(source);
+            image_request->set_quality_percent(100.0);
+            image_request->set_pixel_format(::bosdyn::api::Image::PIXEL_FORMAT_RGB_U8);
+        }
+
+        // Add depth image requests
+        for (const std::string& source : depth_sources) {
+            ::bosdyn::api::ImageRequest* image_request = request.add_image_requests();
+            image_request->set_image_source_name(source);
+            image_request->set_quality_percent(100.0);
+            image_request->set_pixel_format(::bosdyn::api::Image::PIXEL_FORMAT_DEPTH_U16);
+        }
+
+        return request;
+    }
+
+    /**
      * Main streaming loop
      */
     void streamCameras() {
@@ -132,12 +168,7 @@ public:
         }
 
         // Create camera image source list
-        std::vector<std::string> image_sources = {
-            "frontleft_fisheye_image",
-            "frontleft_depth",
-            "frontright_fisheye_image",
-            "frontright_depth"
-        };
+        ::bosdyn::api::GetImageRequest image_requests = createImageRequest();
 
         std::vector<std::string> window_names = {
             "Front Left RGB", 
@@ -151,7 +182,7 @@ public:
                 std::chrono::time_point<std::chrono::high_resolution_clock> start = std::chrono::high_resolution_clock::now();
                 
                 // Request images from all cameras
-                bosdyn::client::GetImageResultType response = image_client_->GetImage(image_sources);
+                bosdyn::client::GetImageResultType response = image_client_->GetImage(image_requests);
                 if (!response.status) {
                     std::cerr << "Failed to get images: " << response.status.message() 
                              << std::endl;
