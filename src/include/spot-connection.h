@@ -23,8 +23,8 @@ private:
     size_t n_images_per_response_{0}; // Number of images (rgb and depth should be equal) per response
 
     // Circular buffer data. CUDA memory
-    uint8_t* rgb_data_;
-    uint16_t* depth_data_;
+    uint8_t* rgb_data_{nullptr};
+    uint16_t* depth_data_{nullptr};
 
     const size_t max_size_; // Maximum size of the queue
 

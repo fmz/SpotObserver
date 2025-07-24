@@ -59,18 +59,14 @@ if(COPY_DLLS AND WIN32)
         endforeach()
     endif()
     # Copy the main library DLL
-    if(EXISTS ${PLUGIN_DLLS})
-        foreach(dll ${PLUGIN_DLLS})
-            if(EXISTS ${dll})
-                add_custom_command(TARGET integ-test POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${dll}"
-                    $<TARGET_FILE_DIR:integ-test>
-                    COMMENT "Copying ${dll} for test"
-                )
-            endif()
-        endforeach()
-    else()
-        message(WARNING "Main plugin DLL not found, cannot copy for test: $<TARGET_FILE:${PLUGIN_NAME}>")
-    endif()
+    foreach(dll ${PLUGIN_DLLS})
+        if(EXISTS ${dll})
+            add_custom_command(TARGET integ-test POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${dll}"
+                $<TARGET_FILE_DIR:integ-test>
+                COMMENT "Copying ${dll} for test"
+            )
+        endif()
+    endforeach()
 endif()

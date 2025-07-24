@@ -21,7 +21,7 @@ int main(int argc, char* argv[]) {
 
     int32_t spot_id = SOb_ConnectToSpot(robot_ip.c_str(), username.c_str(), password.c_str());
 
-    bool ret = SOb_ReadCameraFeeds(spot_id, 0x3f);
+    bool ret = SOb_ReadCameraFeeds(spot_id, 0x26);
     if (!ret) {
         std::cerr << "Failed to start reading camera feeds" << std::endl;
         SOb_DisconnectFromSpot(spot_id);

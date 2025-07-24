@@ -80,8 +80,8 @@ bool ReaderWriterCBuf::initialize(
     n_images_per_response_ = n_images_per_response;
 
     if (rgb_data_ != nullptr || depth_data_ != nullptr) {
-        checkCudaError(cudaFree(rgb_data_), "cudaFree for RGB data");
-        checkCudaError(cudaFree(depth_data_), "cudaFree for Depth data");
+        if (!rgb_data_)   checkCudaError(cudaFree(rgb_data_), "cudaFree for RGB data");
+        if (!depth_data_) checkCudaError(cudaFree(depth_data_), "cudaFree for Depth data");
 
         LogMessage("ReaderWriterCBuf::initialize: Re-initializing, freed existing buffers");
     }
@@ -248,7 +248,7 @@ static std::vector<std::string> get_depth_cam_names_from_bit_mask(uint32_t bitma
     if (bitmask & SpotCamera::FRONTRIGHT) cam_names.emplace_back("frontright_depth_in_visual_frame");
     if (bitmask & SpotCamera::LEFT)       cam_names.emplace_back("left_depth_in_visual_frame");
     if (bitmask & SpotCamera::RIGHT)      cam_names.emplace_back("right_depth_in_visual_frame");
-    if (bitmask & SpotCamera::HAND)       cam_names.emplace_back("hand_depth_in_visual_frame");
+    if (bitmask & SpotCamera::HAND)       cam_names.emplace_back("hand_depth_in_hand_color_frame");
 
     return cam_names;
 }
@@ -362,6 +362,16 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
         LogMessage("Creating a new Spot image request with mask: {:#x}", cam_mask);
         std::vector<std::string> rgb_sources = get_rgb_cam_names_from_bit_mask(cam_mask);
         std::vector<std::string> depth_sources = get_depth_cam_names_from_bit_mask(cam_mask);
+
+        LogMessage("Creating a request for {} RGB cameras and {} depth cameras",
+                   rgb_sources.size(), depth_sources.size());
+
+        for (int32_t i = 0; i < rgb_sources.size(); i++) {
+            LogMessage("RGB Camera {}: {}", i, rgb_sources[i]);
+        }
+        for (int32_t i = 0; i < depth_sources.size(); i++) {
+            LogMessage("Depth Camera {}: {}", i, depth_sources[i]);
+        }
 
         num_cams_requested = rgb_sources.size();
 

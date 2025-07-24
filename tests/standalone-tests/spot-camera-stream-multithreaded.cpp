@@ -233,13 +233,15 @@ public:
         // RGB cameras with PIXEL_FORMAT_RGB_U8
         std::vector<std::string> rgb_sources = {
             "frontleft_fisheye_image",
-            "frontright_fisheye_image"
+            "frontright_fisheye_image",
+            "hand_color_image"
         };
 
         // Depth cameras with PIXEL_FORMAT_DEPTH_U16
         std::vector<std::string> depth_sources = {
-            "frontleft_depth",
-            "frontright_depth"
+            "frontleft_depth_in_visual_frame",
+            "frontright_depth_in_visual_frame",
+            "hand_depth_in_hand_color_frame"
         };
 
         // Add RGB image requests
