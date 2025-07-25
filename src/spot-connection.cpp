@@ -104,12 +104,10 @@ bool ReaderWriterCBuf::initialize(
 
     write_idx_ = 0;
     read_idx_ = 0;
-    size_ = 0;
+    new_data_ = false;
 
     return true;
 }
-
-static int32_t dump_id = 0; // Global dump ID for debugging
 
 /**
  * Push image data to queue (non-blocking, drops oldest if full)
@@ -121,14 +119,14 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         throw std::runtime_error("ReaderWriterCBuf::push: n_elems_per_rgb_ == 0");
     }
 
-    static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
-    time_point<high_resolution_clock> end_time = high_resolution_clock::now();
-
-    auto duration = duration_cast<microseconds>(end_time - start_time);
-    double latency_ms = duration.count() / 1000.0;
-
-    LogMessage("ReaderWriterCBuf::push: latency: {:.4f} ms", latency_ms);
-    start_time = end_time; // Reset start time for next push
+    // static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
+    // time_point<high_resolution_clock> end_time = high_resolution_clock::now();
+    //
+    // auto duration = duration_cast<microseconds>(end_time - start_time);
+    // double latency_ms = duration.count() / 1000.0;
+    //
+    // LogMessage("ReaderWriterCBuf::push: latency: {:.4f} ms", latency_ms);
+    // start_time = end_time; // Reset start time for next push
 
     // Compute write pointer
     int write_idx = write_idx_.load(std::memory_order_relaxed);
@@ -167,13 +165,13 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "cudaMemcpyAsync"
             );
 
-            DumpRGBImageFromCuda(
-                rgb_write_ptr,
-                cv_img.cols,
-                cv_img.rows,
-                "rgb",
-                n_rgbs_written + write_idx * n_images_per_response_
-            );
+            // DumpRGBImageFromCuda(
+            //     rgb_write_ptr,
+            //     cv_img.cols,
+            //     cv_img.rows,
+            //     "rgb",
+            //     n_rgbs_written + write_idx * n_images_per_response_
+            // );
 
             rgb_write_ptr += n_elems_per_rgb_;
             n_rgbs_written++;
@@ -203,13 +201,13 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "cudaMemcpyAsync"
             );
 
-            DumpDepthImageFromCuda(
-                depth_write_ptr,
-                cv_img.cols,
-                cv_img.rows,
-                "depth",
-                n_depths_written + write_idx * n_images_per_response_
-            );
+            // DumpDepthImageFromCuda(
+            //     depth_write_ptr,
+            //     cv_img.cols,
+            //     cv_img.rows,
+            //     "depth",
+            //     n_depths_written + write_idx * n_images_per_response_
+            // );
 
             depth_write_ptr += n_elems_per_depth_;
             n_depths_written++;
@@ -226,14 +224,9 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     assert(n_rgbs_written == n_depths_written);
     // Update the read index to the write index we just wrote to.
     read_idx_.store(write_idx, std::memory_order_release);
+    new_data_.store(true, std::memory_order_release);
     write_idx = (write_idx + 1) % max_size_;
     write_idx_.store(write_idx, std::memory_order_release);
-    size_ = size_ + n_rgbs_written;
-
-    size_t sz = size_.load(std::memory_order_relaxed);
-
-    // LogMessage("Updated write index to {}, size is now {}",
-    //        write_idx, sz);
 
 }
 
@@ -242,9 +235,12 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
  * TODO: Use more of a LIFO approach here, so that we can pop the most recent data first.
  */
 std::pair<float*, float*> ReaderWriterCBuf::pop(int32_t count) {
-    while (size_ == 0) {
+    bool expected_new_data = true;
+    bool desired_new_data = false;
+    while (!new_data_.compare_exchange_weak(expected_new_data, desired_new_data)) {
         // Wait until there is data to consume
-        LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
+        expected_new_data = true;
+        //LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
@@ -254,6 +250,7 @@ std::pair<float*, float*> ReaderWriterCBuf::pop(int32_t count) {
     float* depth_data_out = depth_data_ + read_idx * n_elems_per_depth_ * n_images_per_response_;
 
     read_idx += count;
+    read_idx = read_idx % max_size_;
 
     read_idx_.store(read_idx, std::memory_order_release);
 
@@ -297,6 +294,7 @@ SpotConnection::SpotConnection()
     , image_client_(nullptr)
     , image_lifo_(25)
     , connected_(false)
+    , streaming_(false)
 {
     // Create SDK instance
     sdk_ = bosdyn::client::CreateStandardSDK("SpotObserverConnection");
@@ -542,13 +540,31 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
         }
 
         _startStreamingThread();
+        streaming_ = true;
 
     } catch (const std::exception& e) {
         LogMessage("SpotConnection::streamCameras: Exception while getting images: {}", e.what());
+        streaming_ = false;
         return false;
     }
 
     current_cam_mask_ = cam_mask;
+    current_num_cams_ = num_cams_requested;
+    return true;
+}
+
+bool SpotConnection::getCurrentImages(
+    int32_t n_images_requested,
+    float** images,
+    float** depths
+) {
+    auto [ret_images, ret_depths] = image_lifo_.pop(n_images_requested);
+
+    for (int32_t i = 0; i < n_images_requested; i++) {
+        images[i] = ret_images + i * image_lifo_.n_elems_per_rgb_;
+        depths[i] = ret_depths + i * image_lifo_.n_elems_per_depth_;
+    }
+
     return true;
 }
 

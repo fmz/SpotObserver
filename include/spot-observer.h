@@ -44,6 +44,14 @@ bool UNITY_INTERFACE_API SOb_DisconnectFromSpot(int32_t robot_id);
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ReadCameraFeeds(int32_t robot_id, uint32_t cam_bitmask);
 
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_GetNextImageSet(
+    int32_t robot_id,
+    int32_t cam_bitmask,
+    float** images,
+    float** depths
+);
+
 // Config calls
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ToggleDepthCompletion(bool enable);

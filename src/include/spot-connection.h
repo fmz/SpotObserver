@@ -18,7 +18,7 @@ class ReaderWriterCBuf {
 private:
     std::atomic<int> read_idx_{0}; // Head index for circular buffer
     std::atomic<int> write_idx_{0}; // Tail index for circular buffer
-    std::atomic<size_t> size_{0}; // Current size of the queue
+    std::atomic<bool> new_data_{false}; // Flag to indicate new data is available
 
     size_t n_elems_per_rgb_{0}; // Bytes per RGB image
     size_t n_elems_per_depth_{0}; // Bytes per depth image
@@ -53,6 +53,8 @@ public:
      * Consume image and depth data
      */
     std::pair<float*, float*>  pop(int32_t count);
+
+    friend class SpotConnection;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -69,8 +71,10 @@ private:
     std::atomic<bool> quit_requested_{false};
     std::atomic<int> num_samples_{0};
     bool connected_;
+    bool streaming_;
     // Camera feed params
     uint32_t current_cam_mask_;
+    int32_t current_num_cams_;
     bosdyn::api::GetImageRequest current_request_;
     std::unique_ptr<std::jthread> image_streamer_thread_ = nullptr;
 
@@ -99,6 +103,17 @@ public:
     );
 
     bool streamCameras(uint32_t cam_mask);
+    bool getCurrentImages(
+        int32_t n_images_requested,
+        float** images,
+        float** depths
+    );
+
+    bool     isConnected()       const { return connected_; }
+    bool     isStreaming()       const { return streaming_; }
+    uint32_t getCurrentCamMask() const { return current_cam_mask_; }
+    int32_t  getCurrentNumCams() const { return current_num_cams_; }
 
 };
+
 } // namespace SOb

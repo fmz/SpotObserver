@@ -187,8 +187,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     return TRUE;
 }
 
-
-
 static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& username, const std::string& password) {
     try {
         int32_t robot_id = __next_robot_id++;
@@ -207,6 +205,37 @@ static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& use
         LogMessage("SOb_ConnectToSpot: Exception while connecting to robot {}: {}", robot_ip, e.what());
         return -1;
     }
+}
+
+static bool GetNextImageSet(
+    int32_t robot_id,
+    int32_t n_images_requested,
+    float** images,
+    float** depths
+) {
+    auto it = __robot_connections.find(robot_id);
+    if (it == __robot_connections.end()) {
+        LogMessage("SOb_GetNextImageSet: Robot ID {} not found", robot_id);
+        return false;
+    }
+    SpotConnection& robot = it->second;
+    if (!robot.isConnected()) {
+        LogMessage("SOb_GetNextImageSet: Robot ID {} is not connected", robot_id);
+        return false;
+    }
+    if (!robot.isStreaming()) {
+        LogMessage("SOb_GetNextImageSet: Robot ID {} is not streaming", robot_id);
+        return false;
+    }
+    if (n_images_requested <= 0 || n_images_requested > robot.getCurrentNumCams()) {
+        LogMessage("SOb_GetNextImageSet: Invalid number of images requested: {}", n_images_requested);
+        return false;
+    }
+
+    // Pop images from the circular buffer
+    robot.getCurrentImages(n_images_requested, images, depths);
+
+    return true;
 }
 
 }
@@ -379,14 +408,22 @@ bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, uint32_t cam
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
-    int32_t cam_bitmask,
+    int32_t n_images_requested,
     float** images,
     float** depths
 ) {
-    return true;
+    try {
+        bool ret = SOb::GetNextImageSet(robot_id, n_images_requested, images, depths);
+        if (!ret) {
+            SOb::LogMessage("SOb_GetNextImageSet: Failed to get next image set for robot ID {}", robot_id);
+            return false; // Failed to get images
+        }
+        return ret;
+    } catch (const std::exception& e) {
+        SOb::LogMessage("SOb::GetNextImageSet: Exception while getting next image set for robot ID {}: {}", robot_id, e.what());
+        return false;
+    }
 }
-
-
 
 // Config calls
 UNITY_INTERFACE_EXPORT

@@ -27,6 +27,7 @@ target_link_directories(integ-test PRIVATE
 
 target_link_libraries(integ-test
     ${PLUGIN_NAME}
+    CUDA::cudart
 )
 
 # Copy only the DLLs needed for this test
