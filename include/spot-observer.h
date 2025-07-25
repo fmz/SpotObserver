@@ -47,7 +47,7 @@ bool UNITY_INTERFACE_API SOb_ReadCameraFeeds(int32_t robot_id, uint32_t cam_bitm
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
-    int32_t cam_bitmask,
+    int32_t n_images_requested,
     float** images,
     float** depths
 );

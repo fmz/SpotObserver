@@ -189,7 +189,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& username, const std::string& password) {
     try {
-        int32_t robot_id = __next_robot_id++;
+        int32_t robot_id = __next_robot_id;
+        __next_robot_id++;
         auto [it, inserted] = __robot_connections.try_emplace(robot_id);
         if (inserted) {
             bool success = it->second.connect(robot_ip, username, password);

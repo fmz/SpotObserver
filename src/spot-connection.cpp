@@ -100,7 +100,11 @@ bool ReaderWriterCBuf::initialize(
 
     LogMessage("Allocated {} bytes for RGB data and {} bytes for Depth data in ReaderWriterCBuf"
                 "({} bytes per RGB, {} bytes per Depth, {} images per response, max size {})",
-               total_size_rgb, total_size_depth, n_elems_per_rgb, n_elems_per_depth, n_images_per_response, max_size_);
+               total_size_rgb, total_size_depth, n_elems_per_rgb * sizeof(float), n_elems_per_depth * sizeof(float), n_images_per_response, max_size_);
+    LogMessage("Min RGB address = {:#x}, Max RGB address = {:#x}",
+               size_t(rgb_data_), size_t(rgb_data_) + total_size_rgb);
+    LogMessage("Min depth address = {:#x}, Max depth address = {:#x}",
+               size_t(depth_data_), size_t(depth_data_) + total_size_depth);
 
     write_idx_ = 0;
     read_idx_ = 0;
