@@ -8,6 +8,8 @@
 #include <bosdyn/client/robot/robot.h>
 #include <bosdyn/client/image/image_client.h>
 
+#include <stop_token>
+
 namespace SOb {
 /**
  * Thread-safe image queue for passing data between producer and consumer threads
@@ -18,13 +20,13 @@ private:
     std::atomic<int> write_idx_{0}; // Tail index for circular buffer
     std::atomic<size_t> size_{0}; // Current size of the queue
 
-    size_t n_bytes_per_rgb_{0}; // Bytes per RGB image
-    size_t n_bytes_per_depth_{0}; // Bytes per depth image
+    size_t n_elems_per_rgb_{0}; // Bytes per RGB image
+    size_t n_elems_per_depth_{0}; // Bytes per depth image
     size_t n_images_per_response_{0}; // Number of images (rgb and depth should be equal) per response
 
     // Circular buffer data. CUDA memory
-    uint8_t* rgb_data_{nullptr};
-    uint16_t* depth_data_{nullptr};
+    float* rgb_data_{nullptr};
+    float* depth_data_{nullptr};
 
     const size_t max_size_; // Maximum size of the queue
 
@@ -50,7 +52,7 @@ public:
     /**
      * Consume image and depth data
      */
-    std::pair<uint8_t*, uint16_t*> pop(int32_t count);
+    std::pair<float*, float*>  pop(int32_t count);
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -62,19 +64,28 @@ private:
 
     bosdyn::client::ImageClient* image_client_;
 
-    ReaderWriterCBuf rgb_cbuf_;
-
+    // Thread data
+    ReaderWriterCBuf image_lifo_;
+    std::atomic<bool> quit_requested_{false};
+    std::atomic<int> num_samples_{0};
     bool connected_;
-
     // Camera feed params
     uint32_t current_cam_mask_;
     bosdyn::api::GetImageRequest current_request_;
+    std::unique_ptr<std::jthread> image_streamer_thread_ = nullptr;
 
 private:
-    bosdyn::api::GetImageRequest createImageRequest(
+    bosdyn::api::GetImageRequest _createImageRequest(
         const std::vector<std::string>& rgb_sources,
         const std::vector<std::string>& depth_sources
     );
+
+    // Producer thread that requests images from the robot
+    void _spotCamReaderThread(std::stop_token stop_token);
+    // Launches the streaming thread
+    void _startStreamingThread();
+    // Stops the streaming thread
+    void _joinStreamingThread();
 
 public:
 

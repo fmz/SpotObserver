@@ -10,17 +10,20 @@
 #include <opencv2/opencv.hpp>
 
 #include <cuda_runtime.h>
-#include <cuda.h>
+
+#include <thread>
 
 namespace SOb {
 
-static cv::Mat convert_image_to_cv_mat(const bosdyn::api::ImageResponse& image_response) {
-    const auto& img = image_response.shot().image();
-
+static cv::Mat convert_image_to_cv_mat(const bosdyn::api::Image& img, double depth_scale = 1.0) {
     if (img.format() == bosdyn::api::Image::FORMAT_JPEG) {
         // Decode JPEG data
         std::vector<uchar> data(img.data().begin(), img.data().end());
-        return cv::imdecode(data, cv::IMREAD_COLOR);
+        cv::Mat image = cv::imdecode(data, cv::IMREAD_COLOR);
+        // Convert to float rgb
+        cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+        image.convertTo(image, CV_32F, 1.0 / 255.0); // Convert to float in range [0, 1]
+        return image;
     } else {
         // Handle raw pixel data based on pixel format
         cv::Mat image;
@@ -29,24 +32,26 @@ static cv::Mat convert_image_to_cv_mat(const bosdyn::api::ImageResponse& image_r
         case bosdyn::api::Image::PIXEL_FORMAT_RGB_U8:
             image = cv::Mat(img.rows(), img.cols(), CV_8UC3,
                           const_cast<char*>(img.data().data()));
-            cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
+            image.convertTo(image, CV_32F, 1.0 / 255.0); // Convert to float in range [0, 1]CV_32F
             break;
 
         case bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8:
             image = cv::Mat(img.rows(), img.cols(), CV_8UC4,
                           const_cast<char*>(img.data().data()));
-            cv::cvtColor(image, image, cv::COLOR_RGBA2BGR);
+            image.convertTo(image, CV_32F, 1.0 / 255.0); // Convert to float in range [0, 1]
             break;
 
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U8:
             image = cv::Mat(img.rows(), img.cols(), CV_8UC1,
-                          const_cast<char*>(img.data().data()));
+                          const_cast<char*>(img.data().data())  );
+            image.convertTo(image, CV_32F, 1.0 / 255.0); // Convert to float in range [0, 1]
             break;
 
         case bosdyn::api::Image::PIXEL_FORMAT_DEPTH_U16:
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U16:
             image = cv::Mat(img.rows(), img.cols(), CV_16UC1,
                           const_cast<char*>(img.data().data()));
+            image.convertTo(image, CV_32F, 1.0/depth_scale);
             break;
 
         default:
@@ -54,7 +59,7 @@ static cv::Mat convert_image_to_cv_mat(const bosdyn::api::ImageResponse& image_r
             return cv::Mat();
         }
 
-        return image;
+        return image.clone();
     }
 }
 
@@ -71,12 +76,12 @@ ReaderWriterCBuf::~ReaderWriterCBuf() {
 }
 
 bool ReaderWriterCBuf::initialize(
-    size_t n_bytes_per_rgb,
-    size_t n_bytes_per_depth,
+    size_t n_elems_per_rgb,
+    size_t n_elems_per_depth,
     size_t n_images_per_response
 ) {
-    n_bytes_per_rgb_ = n_bytes_per_rgb;
-    n_bytes_per_depth_ = n_bytes_per_depth;
+    n_elems_per_rgb_ = n_elems_per_rgb;
+    n_elems_per_depth_ = n_elems_per_depth;
     n_images_per_response_ = n_images_per_response;
 
     if (rgb_data_ != nullptr || depth_data_ != nullptr) {
@@ -87,11 +92,15 @@ bool ReaderWriterCBuf::initialize(
     }
 
     // Allocate CUDA memory for circular buffer
-    size_t total_size_rgb   = max_size_ * n_bytes_per_rgb;
-    size_t total_size_depth = max_size_ + n_bytes_per_depth;
+    size_t total_size_rgb   = max_size_ * n_elems_per_rgb * n_images_per_response_ * sizeof(float);
+    size_t total_size_depth = max_size_ * n_elems_per_depth * n_images_per_response_ * sizeof(float);
 
     checkCudaError(cudaMalloc(&rgb_data_, total_size_rgb), "cudaMalloc for RGB data");
     checkCudaError(cudaMalloc(&depth_data_, total_size_depth), "cudaMalloc for Depth data");
+
+    LogMessage("Allocated {} bytes for RGB data and {} bytes for Depth data in ReaderWriterCBuf"
+                "({} bytes per RGB, {} bytes per Depth, {} images per response, max size {})",
+               total_size_rgb, total_size_depth, n_elems_per_rgb, n_elems_per_depth, n_images_per_response, max_size_);
 
     write_idx_ = 0;
     read_idx_ = 0;
@@ -106,38 +115,53 @@ static int32_t dump_id = 0; // Global dump ID for debugging
  * Push image data to queue (non-blocking, drops oldest if full)
  */
 void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api::ImageResponse>& responses) {
-    if (n_bytes_per_rgb_ == 0 || n_bytes_per_depth_ == 0) {
-        throw std::runtime_error("ReaderWriterCBuf::push: n_bytes_per_rgb_ == 0");
+    using namespace std::chrono;
+
+    if (n_elems_per_rgb_ == 0 || n_elems_per_depth_ == 0) {
+        throw std::runtime_error("ReaderWriterCBuf::push: n_elems_per_rgb_ == 0");
     }
+
+    static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
+    time_point<high_resolution_clock> end_time = high_resolution_clock::now();
+
+    auto duration = duration_cast<microseconds>(end_time - start_time);
+    double latency_ms = duration.count() / 1000.0;
+
+    LogMessage("ReaderWriterCBuf::push: latency: {:.4f} ms", latency_ms);
+    start_time = end_time; // Reset start time for next push
 
     // Compute write pointer
     int write_idx = write_idx_.load(std::memory_order_relaxed);
-    uint8_t* rgb_write_ptr    = rgb_data_ + write_idx * n_bytes_per_rgb_;
-    uint16_t* depth_write_ptr = depth_data_ + write_idx * n_bytes_per_depth_;
+    float* rgb_write_ptr   = rgb_data_ + write_idx * n_elems_per_rgb_;
+    float* depth_write_ptr = depth_data_ + write_idx * n_elems_per_depth_;
 
     int32_t n_rgbs_written = 0;
     int32_t n_depths_written = 0;
 
     for (const auto& response : responses) {
-        cv::Mat cv_img = convert_image_to_cv_mat(response);
+        const auto& img = response.shot().image();
 
-        const auto& img_response = response.shot().image();
-
-        switch (img_response.pixel_format()) {
+        switch (img.pixel_format()) {
         case bosdyn::api::Image::PIXEL_FORMAT_RGB_U8:
         case bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8:
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U8:
         {
-            size_t image_size = cv_img.cols * cv_img.rows * (img_response.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
-            if (image_size != n_bytes_per_rgb_) {
-                LogMessage("Image size mismatch: expected {}, got {}", n_bytes_per_rgb_, image_size);
+            cv::Mat cv_img = convert_image_to_cv_mat(img);
+
+            size_t image_size = cv_img.cols * cv_img.rows * (img.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
+            if (image_size != n_elems_per_rgb_) {
+                LogMessage("Image size mismatch: expected {}, got {}", n_elems_per_rgb_, image_size);
                 throw std::runtime_error("ReaderWriterCBuf::push: Image size mismatch");
             }
+
+            // LogMessage("Copying RGB image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
+            //            image_size, write_idx, size_t(rgb_write_ptr));
+
             checkCudaError(
                 cudaMemcpyAsync(
                     rgb_write_ptr,
                     cv_img.data,
-                    image_size,
+                    image_size * sizeof(float),
                     cudaMemcpyHostToDevice
                 ),
                 "cudaMemcpyAsync"
@@ -148,10 +172,10 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 cv_img.cols,
                 cv_img.rows,
                 "rgb",
-                dump_id
+                n_rgbs_written + write_idx
             );
 
-            rgb_write_ptr += n_bytes_per_rgb_;
+            rgb_write_ptr += n_elems_per_rgb_;
             n_rgbs_written++;
         }
         break;
@@ -159,16 +183,21 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         case bosdyn::api::Image::PIXEL_FORMAT_DEPTH_U16:
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U16:
         {
-            size_t depth_size = cv_img.cols * cv_img.rows * sizeof(uint16_t);
-            if (depth_size != n_bytes_per_depth_) {
-                LogMessage("Depth size mismatch: expected {}, got {}", n_bytes_per_depth_, depth_size);
+            cv::Mat cv_img = convert_image_to_cv_mat(img, response.source().depth_scale());
+
+            size_t depth_size = cv_img.cols * cv_img.rows;
+            if (depth_size != n_elems_per_depth_) {
+                LogMessage("Depth size mismatch: expected {}, got {}", n_elems_per_depth_, depth_size);
                 throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
             }
+            // LogMessage("Copying depth image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
+            //            depth_size, write_idx, size_t(depth_write_ptr));
+
             checkCudaError(
                 cudaMemcpyAsync(
                     depth_write_ptr,
                     cv_img.data,
-                    depth_size,
+                    depth_size * sizeof(float),
                     cudaMemcpyHostToDevice
                 ),
                 "cudaMemcpyAsync"
@@ -179,10 +208,10 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 cv_img.cols,
                 cv_img.rows,
                 "depth",
-                dump_id++
+                n_depths_written + write_idx
             );
 
-            depth_write_ptr += n_bytes_per_depth_;
+            depth_write_ptr += n_elems_per_depth_;
             n_depths_written++;
         }
         break;
@@ -192,19 +221,25 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             throw std::runtime_error("ReaderWriterCBuf::push: Got an unsupported pixel format");
         }
     }
+
     // Update write index
     assert(n_rgbs_written == n_rgbs_written);
     write_idx = (write_idx + n_rgbs_written) % max_size_;
     write_idx_.store(write_idx, std::memory_order_release);
-
     size_ = size_ + n_rgbs_written;
+
+    size_t sz = size_.load(std::memory_order_relaxed);
+
+    // LogMessage("Updated write index to {}, size is now {}",
+    //        write_idx, sz);
+
 }
 
 /**
  * Consume image and depth data
  * TODO: Use more of a LIFO approach here, so that we can pop the most recent data first.
  */
-std::pair<uint8_t*, uint16_t*> ReaderWriterCBuf::pop(int32_t count) {
+std::pair<float*, float*> ReaderWriterCBuf::pop(int32_t count) {
     while (size_ == 0) {
         // Wait until there is data to consume
         LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
@@ -213,8 +248,8 @@ std::pair<uint8_t*, uint16_t*> ReaderWriterCBuf::pop(int32_t count) {
 
     int read_idx = read_idx_.load(std::memory_order_relaxed);
 
-    uint8_t* rgb_data_out = rgb_data_ + read_idx * n_bytes_per_rgb_;
-    uint16_t* depth_data_out = depth_data_ + read_idx * n_bytes_per_depth_;
+    float* rgb_data_out = rgb_data_ + read_idx * n_elems_per_rgb_;
+    float* depth_data_out = depth_data_ + read_idx * n_elems_per_depth_;
 
     read_idx += count;
 
@@ -258,7 +293,7 @@ static std::vector<std::string> get_depth_cam_names_from_bit_mask(uint32_t bitma
 SpotConnection::SpotConnection()
     : robot_(nullptr)
     , image_client_(nullptr)
-    , rgb_cbuf_(30)
+    , image_lifo_(100)
     , connected_(false)
 {
     // Create SDK instance
@@ -270,10 +305,11 @@ SpotConnection::SpotConnection()
 }
 
 SpotConnection::~SpotConnection() {
+    _joinStreamingThread();
     // TODO: figure out how to cleanup image_client_
 }
 
-bosdyn::api::GetImageRequest SpotConnection::createImageRequest(
+bosdyn::api::GetImageRequest SpotConnection::_createImageRequest(
     const std::vector<std::string>& rgb_sources,
     const std::vector<std::string>& depth_sources
 ) {
@@ -281,21 +317,83 @@ bosdyn::api::GetImageRequest SpotConnection::createImageRequest(
 
     // Add RGB image requests
     for (const std::string& source : rgb_sources) {
-        ::bosdyn::api::ImageRequest* image_request = request.add_image_requests();
+        bosdyn::api::ImageRequest* image_request = request.add_image_requests();
         image_request->set_image_source_name(source);
         image_request->set_quality_percent(100.0);
-        image_request->set_pixel_format(::bosdyn::api::Image::PIXEL_FORMAT_RGB_U8);
+        image_request->set_image_format(bosdyn::api::Image_Format_FORMAT_JPEG);
+        image_request->set_pixel_format(bosdyn::api::Image::PIXEL_FORMAT_RGB_U8);
     }
 
     // Add depth image requests
     for (const std::string& source : depth_sources) {
-        ::bosdyn::api::ImageRequest* image_request = request.add_image_requests();
+        bosdyn::api::ImageRequest* image_request = request.add_image_requests();
         image_request->set_image_source_name(source);
         image_request->set_quality_percent(100.0);
-        image_request->set_pixel_format(::bosdyn::api::Image::PIXEL_FORMAT_DEPTH_U16);
+        // TODO: Use FORMAT_RLE format for depth (compresses 0s)
+        image_request->set_image_format(bosdyn::api::Image_Format_FORMAT_RAW);
+        image_request->set_pixel_format(bosdyn::api::Image::PIXEL_FORMAT_DEPTH_U16);
     }
 
     return request;
+}
+
+// Image producer thread that requests images from the robot
+void SpotConnection::_spotCamReaderThread(std::stop_token stop_token) {
+    if (!image_client_) {
+        std::cerr << "Image client not initialized" << std::endl;
+        return;
+    }
+
+    std::cout << "Producer thread started" << std::endl;
+
+    while (!stop_token.stop_requested() && !quit_requested_.load()) {
+        try {
+            auto start = std::chrono::high_resolution_clock::now();
+
+            // Request images from all cameras
+            bosdyn::client::GetImageResultType response = image_client_->GetImage(current_request_);
+            if (!response.status) {
+                LogMessage("Failed to get images: {}", response.status.message());
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            // Update statistics atomically
+            num_samples_.fetch_add(1);
+
+            // Process and queue images
+            image_lifo_.push(response.response.image_responses());
+        } catch (const std::exception& e) {
+            LogMessage("Error in producer thread: {}", e.what());
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+    LogMessage("Exiting producer thread.");
+}
+
+void SpotConnection::_startStreamingThread() {
+    if (!image_client_) {
+        std::cerr << "Image client not initialized" << std::endl;
+        return;
+    }
+
+    // Create and start thread
+    image_streamer_thread_ = std::make_unique<std::jthread>([this](std::stop_token stop_token) {
+        _spotCamReaderThread(stop_token);
+    });
+}
+
+void SpotConnection::_joinStreamingThread() {
+    if (image_streamer_thread_) {
+        image_streamer_thread_->request_stop();
+        if (image_streamer_thread_->joinable()) {
+            image_streamer_thread_->join();
+        }
+        image_streamer_thread_.reset();
+    } else {
+        LogMessage("SpotConnection::_joinStreamingThread: No streaming thread to join");
+        return;
+    }
 }
 
 bool SpotConnection::connect(
@@ -375,7 +473,10 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
 
         num_cams_requested = rgb_sources.size();
 
-        current_request_ = createImageRequest(rgb_sources, depth_sources);
+        current_request_ = _createImageRequest(rgb_sources, depth_sources);
+        if (image_streamer_thread_ != nullptr) {
+            _joinStreamingThread();
+        }
     }
 
     try {
@@ -399,31 +500,36 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
                 return false;
             }
             // Read image sizes
-            size_t rgb_size = image_responses[0].shot().image().rows()*image_responses[0].shot().image().cols();
+            size_t rgb_ref_size = image_responses[0].shot().image().rows() * image_responses[0].shot().image().cols() *
+                                  (image_responses[0].shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);;
             // For debugging purposes, ensure that all RGB images have the same size
             for (int32_t j = 1; j < num_cams_requested; j++) {
                 const auto& img_response = image_responses[j];
-                if (img_response.shot().image().rows()*img_response.shot().image().cols() != rgb_size) {
-                    LogMessage("SpotConnection::streamCameras: Inconsistent RGB image sizes");
+                size_t rgb_size = img_response.shot().image().rows() * img_response.shot().image().cols() *
+                                  (img_response.shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
+                if (rgb_ref_size != rgb_size) {
+                    LogMessage("SpotConnection::streamCameras: Inconsistent RGB image sizes"
+                               "(expected {}, got {})", rgb_ref_size, rgb_size);
                     return false;
                 }
             }
             // Same thing for depth images
-            size_t depth_size = image_responses[num_cams_requested].shot().image().rows() *
-                                image_responses[num_cams_requested].shot().image().cols();
+            size_t depth_ref_size = image_responses[num_cams_requested].shot().image().rows() *
+                                    image_responses[num_cams_requested].shot().image().cols();
             for (int32_t j = num_cams_requested + 1; j < image_responses.size(); j++) {
                 const auto& img_response = image_responses[j];
-                if (img_response.shot().image().rows() * img_response.shot().image().cols() != depth_size) {
-                    LogMessage("SpotConnection::streamCameras: Inconsistent depth image sizes");
+                size_t depth_size = img_response.shot().image().rows() * img_response.shot().image().cols();
+                if (depth_ref_size != depth_size) {
+                    LogMessage("SpotConnection::streamCameras: Inconsistent depth image sizes"
+                               "(expected {}, got {})", depth_ref_size, depth_size);
                     return false;
                 }
             }
 
             // (Re)initialize circular buffer
-            // TODO: Un-hardcode the type sizes
-            if (!rgb_cbuf_.initialize(
-                    rgb_size * sizeof(uint8_t),
-                    depth_size * sizeof(uint16_t),
+            if (!image_lifo_.initialize(
+                    rgb_ref_size,
+                    depth_ref_size,
                     num_cams_requested
                 )) {
                 LogMessage("SpotConnection::streamCameras: Failed to initialize circular buffer");
@@ -432,6 +538,9 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
 
             break;
         }
+
+        _startStreamingThread();
+
     } catch (const std::exception& e) {
         LogMessage("SpotConnection::streamCameras: Exception while getting images: {}", e.what());
         return false;

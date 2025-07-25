@@ -5,6 +5,7 @@
 #include "logger.h"
 #include "spot-connection.h"
 #include "utils.h"
+#include "dumper.h"
 
 #include <stdexcept>
 #include <unordered_map>
@@ -417,6 +418,20 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_SetUnityLogCallback(const SOb::LogCallback callback) {
     SOb::unityLogCallback = callback;
     return true;
+}
+UNITY_INTERFACE_EXPORT
+void UNITY_INTERFACE_API SOb_ToggleDebugDumps(const char* dump_path) {
+    if (!dump_path) {
+        SOb::LogMessage("UB_ToggleDebugDumps called with empty path.");
+        return;
+    }
+
+    if (!SOb::ToggleDumping(dump_path)) {
+        SOb::LogMessage("Failed to enable debug dumps for path: {}", dump_path);
+        return;
+    }
+
+    SOb::LogMessage("Debug dumps enabled successfully");
 }
 
 } // extern "C"

@@ -85,10 +85,16 @@ void DumpRGBImageFromCuda(const float* image, int32_t width, int32_t height, con
     std::vector<uint8_t> h_image_u8(num_pixels * 3);
 
     // Convert float [0,1] to uint8 [0,255], and convert the format to HWC instead of CHW
+    // for (size_t i = 0; i < num_pixels; ++i) {
+    //     h_image_u8[i * 3 + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i])) * 255.0f);
+    //     h_image_u8[i * 3 + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + num_pixels])) * 255.0f);
+    //     h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + 2 * num_pixels])) * 255.0f);
+    // }
+    // Convert float [0,1] to uint8 [0,255]
     for (size_t i = 0; i < num_pixels; ++i) {
-        h_image_u8[i * 3 + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i])) * 255.0f);
-        h_image_u8[i * 3 + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + num_pixels])) * 255.0f);
-        h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + 2 * num_pixels])) * 255.0f);
+        h_image_u8[i * 3 + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i * 3 + 0])) * 255.0f);
+        h_image_u8[i * 3 + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i * 3 + 1])) * 255.0f);
+        h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i * 3 + 2])) * 255.0f);
     }
 
     // std::vector<float> h_image_hwc(num_pixels * 3);
@@ -133,6 +139,19 @@ void DumpRGBImageFromCuda(const uint8_t* image, int32_t width, int32_t height, c
     }
 
     std::vector<uint8_t> h_image_u8(num_pixels * 3);
+
+    uint8_t min = 255;
+    uint8_t max = 0;
+    uint64_t sum = 0;
+    // Find min and max pixel values for normalization
+    for (size_t i = 0; i < num_pixels * 3; ++i) {
+        if (h_image[i] < min) min = h_image[i];
+        if (h_image[i] > max) max = h_image[i];
+        h_image_u8[i] = h_image[i]; // Copy to output vector
+        sum += h_image[i];
+    }
+
+    LogMessage("min pixel value = {}, max pixel value = {}, average pixel_value = {}", min, max, sum / (num_pixels * 3));
 
     // Generate filename
     std::string file_path = m_dump_path + "/" + subdir + "/rgb_" + std::to_string(dump_id) + ".png";

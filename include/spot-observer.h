@@ -58,6 +58,9 @@ bool UNITY_INTERFACE_API SOb_ToggleLogging(bool enable);
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_SetUnityLogCallback(const SOb::LogCallback callback);
 
+UNITY_INTERFACE_EXPORT
+void UNITY_INTERFACE_API SOb_ToggleDebugDumps(const char* dump_path);
+
 }
 
 #endif //SPOT_OBSERVER_H
