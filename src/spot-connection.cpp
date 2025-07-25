@@ -132,8 +132,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
     // Compute write pointer
     int write_idx = write_idx_.load(std::memory_order_relaxed);
-    float* rgb_write_ptr   = rgb_data_ + write_idx * n_elems_per_rgb_;
-    float* depth_write_ptr = depth_data_ + write_idx * n_elems_per_depth_;
+    float* rgb_write_ptr   = rgb_data_ + write_idx * n_elems_per_rgb_ * n_images_per_response_;
+    float* depth_write_ptr = depth_data_ + write_idx * n_elems_per_depth_ * n_images_per_response_;
 
     int32_t n_rgbs_written = 0;
     int32_t n_depths_written = 0;
@@ -172,7 +172,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 cv_img.cols,
                 cv_img.rows,
                 "rgb",
-                n_rgbs_written + write_idx
+                n_rgbs_written + write_idx * n_images_per_response_
             );
 
             rgb_write_ptr += n_elems_per_rgb_;
@@ -208,7 +208,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 cv_img.cols,
                 cv_img.rows,
                 "depth",
-                n_depths_written + write_idx
+                n_depths_written + write_idx * n_images_per_response_
             );
 
             depth_write_ptr += n_elems_per_depth_;
@@ -223,8 +223,10 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     }
 
     // Update write index
-    assert(n_rgbs_written == n_rgbs_written);
-    write_idx = (write_idx + n_rgbs_written) % max_size_;
+    assert(n_rgbs_written == n_depths_written);
+    // Update the read index to the write index we just wrote to.
+    read_idx_.store(write_idx, std::memory_order_release);
+    write_idx = (write_idx + 1) % max_size_;
     write_idx_.store(write_idx, std::memory_order_release);
     size_ = size_ + n_rgbs_written;
 
@@ -248,8 +250,8 @@ std::pair<float*, float*> ReaderWriterCBuf::pop(int32_t count) {
 
     int read_idx = read_idx_.load(std::memory_order_relaxed);
 
-    float* rgb_data_out = rgb_data_ + read_idx * n_elems_per_rgb_;
-    float* depth_data_out = depth_data_ + read_idx * n_elems_per_depth_;
+    float* rgb_data_out = rgb_data_ + read_idx * n_elems_per_rgb_ * n_images_per_response_;
+    float* depth_data_out = depth_data_ + read_idx * n_elems_per_depth_ * n_images_per_response_;
 
     read_idx += count;
 
@@ -293,7 +295,7 @@ static std::vector<std::string> get_depth_cam_names_from_bit_mask(uint32_t bitma
 SpotConnection::SpotConnection()
     : robot_(nullptr)
     , image_client_(nullptr)
-    , image_lifo_(100)
+    , image_lifo_(25)
     , connected_(false)
 {
     // Create SDK instance
