@@ -44,22 +44,25 @@ int main(int argc, char* argv[]) {
     std::string username  = argv[3];
     std::string password  = argv[4];
 
-
     //SOb_ToggleDebugDumps("./spot_dump");
 
     int32_t spot_ids[2];
 
-    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT;
-    for (int32_t i = 0; i < 2; i++) {
-        spot_ids[i] = connect_to_spot_and_start_cam_feed(robot_ips[i], username, password, cam_bitmask);
-        if (spot_ids[i] < 0) {
-            std::cerr << "Failed to connect to Spot robot " << i << std::endl;
-            return -1;
+    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT | HAND;
+    for (size_t i = 0; i < 2; i++) {
+        if (robot_ips[i] == "0") {
+            spot_ids[i] = -1;
+        } else {
+            spot_ids[i] = connect_to_spot_and_start_cam_feed(robot_ips[i], username, password, cam_bitmask);
+            if (spot_ids[i] < 0) {
+                std::cerr << "Failed to connect to Spot robot " << i << std::endl;
+                return -1;
+            }
         }
     }
     std::cout << "Connected to Spot robots with IDs: " << spot_ids[0] << ", " << spot_ids[1] << std::endl;
 
-    // // TODO: Setup a listener for ctrl-c to gracefully stop the connection
+    // TODO: Setup a listener for ctrl-c to gracefully stop the connection
     // std::cout << "Press Ctrl-C to stop reading camera feeds..." << std::endl;
 
     float** images, **depths;
@@ -76,28 +79,34 @@ int main(int argc, char* argv[]) {
         time_point<high_resolution_clock> end_time = high_resolution_clock::now();
 
         auto duration = duration_cast<microseconds>(end_time - start_time);
-        double latency_ms = duration.count() / 1000.0f;
+        double latency_ms = double(duration.count()) / 1000.0;
 
         std::cout << std::format("integ-test: {}-rgbd read latency: {:.4f} ms\n", num_images_requested, latency_ms);
         start_time = end_time; // Reset start time for next push
         for (int32_t spot = 0; spot < 2; spot++) {
+            if (spot_ids[spot] < 0) {
+                std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
+                continue;
+            }
+
             SOb_GetNextImageSet(spot_ids[spot], int32_t(num_images_requested), images, depths);
             for (uint32_t i = 0; i < num_images_requested; i++) {
                 // std::cout << "SPOT " << spot << " Image batch " << img_batch_id <<" Image " << i << ": ";
                 // std::cout << images[i] << " ";
                 // std::cout << depths[i] << std::endl;
-                cudaMemcpy(
+                cudaMemcpyAsync(
                     image_cpu_buffer.data(),
                     images[i],
                     3 * 640 * 480 * sizeof(float),
                     cudaMemcpyDeviceToHost
                 );
-                cudaMemcpy(
+                cudaMemcpyAsync(
                     depth_cpu_buffer.data(),
                     depths[i],
                     640 * 480 * sizeof(float),
                     cudaMemcpyDeviceToHost
                 );
+                cudaStreamSynchronize(0); // Wait for the copy to complete
 
                 cv::Mat image(480, 640, CV_32FC3, image_cpu_buffer.data());
                 cv::Mat depth(480, 640, CV_32FC1, depth_cpu_buffer.data());

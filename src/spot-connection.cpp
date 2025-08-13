@@ -1,5 +1,5 @@
 //
-// Created by brown on 7/23/2025.
+// Created by fmz on 7/23/2025.
 //
 #include "spot-observer.h"
 #include "spot-connection.h"
@@ -236,7 +236,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
 /**
  * Consume image and depth data
- * TODO: Use more of a LIFO approach here, so that we can pop the most recent data first.
+ * Using more of a LIFO approach here, so that we can pop the most recent data first (see push function)
  */
 std::pair<float*, float*> ReaderWriterCBuf::pop(int32_t count) {
     bool expected_new_data = true;
@@ -344,11 +344,11 @@ bosdyn::api::GetImageRequest SpotConnection::_createImageRequest(
 // Image producer thread that requests images from the robot
 void SpotConnection::_spotCamReaderThread(std::stop_token stop_token) {
     if (!image_client_) {
-        std::cerr << "Image client not initialized" << std::endl;
+        LogMessage("Image client not initialized");
         return;
     }
 
-    std::cout << "Producer thread started" << std::endl;
+    LogMessage("Producer thread started");
 
     while (!stop_token.stop_requested() && !quit_requested_.load()) {
         try {
@@ -531,14 +531,11 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
             }
 
             // (Re)initialize circular buffer
-            if (!image_lifo_.initialize(
-                    rgb_ref_size,
-                    depth_ref_size,
-                    num_cams_requested
-                )) {
-                LogMessage("SpotConnection::streamCameras: Failed to initialize circular buffer");
-                return false;
-            }
+            image_lifo_.initialize(
+                rgb_ref_size,
+                depth_ref_size,
+                num_cams_requested
+            );
 
             break;
         }

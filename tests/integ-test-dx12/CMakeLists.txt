@@ -1,13 +1,13 @@
 # Tests CMakeLists.txt for SpotObserver
 
 # Standalone camera streaming test executable
-add_executable(integ-test
-    integ-test.cpp
+add_executable(integ-test-dx12
+    integ-test-dx12.cpp
 )
 
 # Apply Windows compile definitions if needed
 if(WIN32)
-    target_compile_definitions(integ-test PRIVATE
+    target_compile_definitions(integ-test-dx12 PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         _HAS_EXCEPTIONS=1
@@ -15,17 +15,17 @@ if(WIN32)
 endif()
 
 # Apply compile options
-target_compile_options(integ-test PRIVATE
+target_compile_options(integ-test-dx12 PRIVATE
     -Wall
 )
 
 # Link directories
-target_link_directories(integ-test PRIVATE
+target_link_directories(integ-test-dx12 PRIVATE
     ${SPOT_SDK_ROOT}/lib
     ${OpenCV_LIBS_DIR}
 )
 
-target_link_libraries(integ-test
+target_link_libraries(integ-test-dx12
     ${PLUGIN_NAME}
     CUDA::cudart
 )
@@ -36,10 +36,10 @@ if(COPY_DLLS AND WIN32)
     if(VCPKG_DLL_DIR AND EXISTS "${VCPKG_DLL_DIR}")
         foreach(dll ${VCPKG_DLLS})
             if(EXISTS "${VCPKG_DLL_DIR}/${dll}")
-                add_custom_command(TARGET integ-test POST_BUILD
+                add_custom_command(TARGET integ-test-dx12 POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${VCPKG_DLL_DIR}/${dll}"
-                    $<TARGET_FILE_DIR:integ-test>
+                    $<TARGET_FILE_DIR:integ-test-dx12>
                     COMMENT "Copying ${dll} for test"
                 )
             endif()
@@ -50,10 +50,10 @@ if(COPY_DLLS AND WIN32)
     if(EXISTS "${OPENCV_DLL_DIR}")
         foreach(dll ${OPENCV_DLLS})
             if(EXISTS "${OPENCV_DLL_DIR}/${dll}")
-                add_custom_command(TARGET integ-test POST_BUILD
+                add_custom_command(TARGET integ-test-dx12 POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${OPENCV_DLL_DIR}/${dll}"
-                    $<TARGET_FILE_DIR:integ-test>
+                    $<TARGET_FILE_DIR:integ-test-dx12>
                     COMMENT "Copying ${dll} for test"
                 )
             endif()
@@ -61,10 +61,10 @@ if(COPY_DLLS AND WIN32)
     endif()
     # Copy the main library DLL
     if(EXISTS ${PLUGIN_DLLS})
-        add_custom_command(TARGET integ-test POST_BUILD
+        add_custom_command(TARGET integ-test-dx12 POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${PLUGIN_DLLS}"
-            $<TARGET_FILE_DIR:integ-test>
+            $<TARGET_FILE_DIR:integ-test-dx12>
             COMMENT "Copying ${dll} for test"
         )
     endif()

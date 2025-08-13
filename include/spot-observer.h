@@ -45,12 +45,28 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ReadCameraFeeds(int32_t robot_id, uint32_t cam_bitmask);
 
 UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, uint32_t cam_bitmask);
+
+UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
     int32_t n_images_requested,
     float** images,
     float** depths
 );
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_RegisterOutputTextures(
+    int32_t robot_id,
+    uint32_t cam_bit,         // Single bit only
+    void* out_img_tex,        // ID3D12Resource* (aka texture)
+    void* out_depth_tex,      // ID3D12Resource* (aka texture)
+    int32_t img_buffer_size,  // In bytes
+    int32_t depth_buffer_size // In bytes
+);
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_UploadNextImageSetToUnity(int32_t robot_id);
 
 // Config calls
 UNITY_INTERFACE_EXPORT

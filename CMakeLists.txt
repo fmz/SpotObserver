@@ -54,6 +54,8 @@ add_library(${PLUGIN_NAME} SHARED
     src/spot-observer.cpp
     src/spot-connection.cpp
     src/dumper.cpp
+    src/include/unity-cuda-interop.h
+    src/unity-cuda-interop.cpp
 )
 
 # Unity Native-plugin API includes TODO: cleanup

@@ -8,6 +8,10 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace SOb {
 
 inline void checkCudaError(cudaError_t error, const std::string& operation) {
@@ -34,6 +38,10 @@ inline bool checkCUDA(cudaError_t err, const std::string& fmt)
         return false;
     }
     return true;
+}
+
+inline uint32_t __num_set_bits(uint32_t bitmask) {
+    return __popcnt(bitmask);
 }
 
 }
