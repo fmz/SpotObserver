@@ -101,7 +101,7 @@ static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& use
 static bool GetNextImageSet(
     int32_t robot_id,
     int32_t n_images_requested,
-    float** images,
+    uint8_t** images,
     float** depths
 ) {
     auto it = __robot_connections.find(robot_id);
@@ -124,7 +124,13 @@ static bool GetNextImageSet(
     }
 
     // Pop images from the circular buffer
-    robot.getCurrentImages(n_images_requested, images, depths);
+    if (robot.getCurrentImages(n_images_requested, images, depths)) {
+        LogMessage("SOb_GetNextImageSet: Successfully retrieved {} images for robot ID {}", n_images_requested, robot_id);
+        return true;
+    } else {
+        LogMessage("SOb_GetNextImageSet: Failed to retrieve images for robot ID {}", robot_id);
+        return false;
+    }
 
     return true;
 }
@@ -193,7 +199,7 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, uint32_t cam_bitmask);
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_RegisterOutputTextures(
+bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
     int32_t robot_id,
     uint32_t cam_bit,         // Single bit only
     void* out_img_tex,        // ID3D12Resource* (aka texture)
@@ -226,7 +232,7 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
     int32_t n_images_requested,
-    float** images,
+    uint8_t** images,
     float** depths
 ) {
     try {
@@ -243,7 +249,7 @@ bool UNITY_INTERFACE_API SOb_GetNextImageSet(
 }
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_UploadNextImageSetToUnity(int32_t robot_id) {
+bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id) {
     try {
         bool ret = SOb::uploadNextImageSetToUnity(robot_id);
         if (!ret) {

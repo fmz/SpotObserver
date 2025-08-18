@@ -28,10 +28,8 @@ enum SpotCamera {
 };
 
 // Unity Stuff
-UNITY_INTERFACE_EXPORT
-void UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* unity);
-UNITY_INTERFACE_EXPORT
-void UNITY_INTERFACE_API UnityPluginUnload();
+void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* unity);
+void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginUnload();
 
 // Connect to a spot robot. Returns a newly assigned ID, or -1 in case of an error.
 UNITY_INTERFACE_EXPORT
@@ -51,22 +49,22 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
     int32_t n_images_requested,
-    float** images,
+    uint8_t** images,
     float** depths
 );
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_RegisterOutputTextures(
+bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
     int32_t robot_id,
     uint32_t cam_bit,         // Single bit only
-    void* out_img_tex,        // ID3D12Resource* (aka texture)
-    void* out_depth_tex,      // ID3D12Resource* (aka texture)
+    void* out_img_buf,        // ID3D12Resource* (aka tensor)
+    void* out_depth_buf,      // ID3D12Resource* (aka tensor)
     int32_t img_buffer_size,  // In bytes
     int32_t depth_buffer_size // In bytes
 );
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_UploadNextImageSetToUnity(int32_t robot_id);
+bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id);
 
 // Config calls
 UNITY_INTERFACE_EXPORT

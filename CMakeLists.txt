@@ -59,7 +59,7 @@ add_library(${PLUGIN_NAME} SHARED
 )
 
 # Unity Native-plugin API includes TODO: cleanup
-set(UnityPluginAPI_INCLUDE "C:/Program Files/Unity/Hub/Editor/6000.1.7f1/Editor/Data/PluginAPI")
+set(UnityPluginAPI_INCLUDE "C:/Program Files/Unity/Hub/Editor/6000.2.0f1/Editor/Data/PluginAPI")
 
 # Include directories
 # TODO: Use target_include_directories instead of include_directories

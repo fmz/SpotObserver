@@ -25,8 +25,8 @@ private:
     size_t n_images_per_response_{0}; // Number of images (rgb and depth should be equal) per response
 
     // Circular buffer data. CUDA memory
-    float* rgb_data_{nullptr};
-    float* depth_data_{nullptr};
+    uint8_t* rgb_data_{nullptr};
+    float*   depth_data_{nullptr};
 
     const size_t max_size_; // Maximum size of the queue
 
@@ -52,7 +52,7 @@ public:
     /**
      * Consume image and depth data
      */
-    std::pair<float*, float*>  pop(int32_t count);
+    std::pair<uint8_t*, float*> pop(int32_t count);
 
     friend class SpotConnection;
 };
@@ -105,7 +105,7 @@ public:
     bool streamCameras(uint32_t cam_mask);
     bool getCurrentImages(
         int32_t n_images_requested,
-        float** images,
+        uint8_t** images,
         float** depths
     );
 

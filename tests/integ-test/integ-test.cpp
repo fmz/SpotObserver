@@ -22,6 +22,10 @@ static int32_t connect_to_spot_and_start_cam_feed(
 ) {
     std::cout << "Connecting to Spot robot at " << robot_ip << " with user " << username << std::endl;
     int32_t spot_id = SOb_ConnectToSpot(robot_ip.c_str(), username.c_str(), password.c_str());
+    if (spot_id < 0) {
+        std::cerr << "Failed to connect to Spot robot" << std::endl;
+        return -1;
+    }
     bool ret = SOb_ReadCameraFeeds(spot_id, cam_bitmask);
     if (!ret) {
         std::cerr << "Failed to start reading camera feeds" << std::endl;
@@ -65,31 +69,43 @@ int main(int argc, char* argv[]) {
     // TODO: Setup a listener for ctrl-c to gracefully stop the connection
     // std::cout << "Press Ctrl-C to stop reading camera feeds..." << std::endl;
 
-    float** images, **depths;
+    uint8_t** images;
+    float** depths;
+
     uint32_t num_images_requested = __num_set_bits(cam_bitmask);
-    images = new float*[num_images_requested];
+    images = new uint8_t*[num_images_requested];
     depths = new float*[num_images_requested];
 
     std::vector<float> image_cpu_buffer(640 * 480 * 3);
     std::vector<float> depth_cpu_buffer(640 * 480);
 
     int32_t img_batch_id = 0;
+    bool new_images = false;
     while (true) {
         static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
-        time_point<high_resolution_clock> end_time = high_resolution_clock::now();
 
-        auto duration = duration_cast<microseconds>(end_time - start_time);
-        double latency_ms = double(duration.count()) / 1000.0;
+        if (new_images) {
+            time_point<high_resolution_clock> end_time = high_resolution_clock::now();
+            auto duration = duration_cast<microseconds>(end_time - start_time);
+            double latency_ms = double(duration.count()) / 1000.0;
 
-        std::cout << std::format("integ-test: {}-rgbd read latency: {:.4f} ms\n", num_images_requested, latency_ms);
-        start_time = end_time; // Reset start time for next push
+            std::cout << std::format("integ-test: {}-rgbd read latency: {:.4f} ms\n", num_images_requested, latency_ms);
+            start_time = end_time; // Reset start time for next push
+            new_images = false;
+        }
+
         for (int32_t spot = 0; spot < 2; spot++) {
             if (spot_ids[spot] < 0) {
                 std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
                 continue;
             }
 
-            SOb_GetNextImageSet(spot_ids[spot], int32_t(num_images_requested), images, depths);
+            if (!SOb_GetNextImageSet(spot_ids[spot], int32_t(num_images_requested), images, depths)) {
+                std::cout << "No new images from Spot " << spot << ", skipping." << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            new_images = true;
             for (uint32_t i = 0; i < num_images_requested; i++) {
                 // std::cout << "SPOT " << spot << " Image batch " << img_batch_id <<" Image " << i << ": ";
                 // std::cout << images[i] << " ";
@@ -97,7 +113,7 @@ int main(int argc, char* argv[]) {
                 cudaMemcpyAsync(
                     image_cpu_buffer.data(),
                     images[i],
-                    3 * 640 * 480 * sizeof(float),
+                    3 * 640 * 480,
                     cudaMemcpyDeviceToHost
                 );
                 cudaMemcpyAsync(
@@ -108,7 +124,7 @@ int main(int argc, char* argv[]) {
                 );
                 cudaStreamSynchronize(0); // Wait for the copy to complete
 
-                cv::Mat image(480, 640, CV_32FC3, image_cpu_buffer.data());
+                cv::Mat image(480, 640, CV_8UC3, image_cpu_buffer.data());
                 cv::Mat depth(480, 640, CV_32FC1, depth_cpu_buffer.data());
 
                 cv::cvtColor(image, image, cv::COLOR_RGB2BGR);

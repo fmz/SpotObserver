@@ -22,7 +22,7 @@ static cv::Mat convert_image_to_cv_mat(const bosdyn::api::Image& img, double dep
         cv::Mat image = cv::imdecode(data, cv::IMREAD_COLOR);
         // Convert to float rgb
         cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
-        image.convertTo(image, CV_32F, 1.0 / 255.0); // Convert to float in range [0, 1]
+        // image.convertTo(image, CV_32F, 1.0 / 255.0); // Convert to float in range [0, 1]
         return image;
     } else {
         // Handle raw pixel data based on pixel format
@@ -92,7 +92,7 @@ bool ReaderWriterCBuf::initialize(
     }
 
     // Allocate CUDA memory for circular buffer
-    size_t total_size_rgb   = max_size_ * n_elems_per_rgb * n_images_per_response_ * sizeof(float);
+    size_t total_size_rgb   = max_size_ * n_elems_per_rgb * n_images_per_response_ * sizeof(uint8_t);
     size_t total_size_depth = max_size_ * n_elems_per_depth * n_images_per_response_ * sizeof(float);
 
     checkCudaError(cudaMalloc(&rgb_data_, total_size_rgb), "cudaMalloc for RGB data");
@@ -100,7 +100,7 @@ bool ReaderWriterCBuf::initialize(
 
     LogMessage("Allocated {} bytes for RGB data and {} bytes for Depth data in ReaderWriterCBuf"
                 "({} bytes per RGB, {} bytes per Depth, {} images per response, max size {})",
-               total_size_rgb, total_size_depth, n_elems_per_rgb * sizeof(float), n_elems_per_depth * sizeof(float), n_images_per_response, max_size_);
+               total_size_rgb, total_size_depth, n_elems_per_rgb * sizeof(uint8_t), n_elems_per_depth * sizeof(float), n_images_per_response, max_size_);
     LogMessage("Min RGB address = {:#x}, Max RGB address = {:#x}",
                size_t(rgb_data_), size_t(rgb_data_) + total_size_rgb);
     LogMessage("Min depth address = {:#x}, Max depth address = {:#x}",
@@ -134,7 +134,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
     // Compute write pointer
     int write_idx = write_idx_.load(std::memory_order_relaxed);
-    float* rgb_write_ptr   = rgb_data_ + write_idx * n_elems_per_rgb_ * n_images_per_response_;
+    uint8_t* rgb_write_ptr = rgb_data_   + write_idx * n_elems_per_rgb_   * n_images_per_response_;
     float* depth_write_ptr = depth_data_ + write_idx * n_elems_per_depth_ * n_images_per_response_;
 
     int32_t n_rgbs_written = 0;
@@ -163,7 +163,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 cudaMemcpyAsync(
                     rgb_write_ptr,
                     cv_img.data,
-                    image_size * sizeof(float),
+                    image_size * sizeof(uint8_t),
                     cudaMemcpyHostToDevice
                 ),
                 "cudaMemcpyAsync"
@@ -231,32 +231,39 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     new_data_.store(true, std::memory_order_release);
     write_idx = (write_idx + 1) % max_size_;
     write_idx_.store(write_idx, std::memory_order_release);
-
 }
 
 /**
  * Consume image and depth data
  * Using more of a LIFO approach here, so that we can pop the most recent data first (see push function)
  */
-std::pair<float*, float*> ReaderWriterCBuf::pop(int32_t count) {
-    bool expected_new_data = true;
-    bool desired_new_data = false;
-    while (!new_data_.compare_exchange_weak(expected_new_data, desired_new_data)) {
-        // Wait until there is data to consume
-        expected_new_data = true;
-        //LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) {
+    // bool expected_new_data = true;
+    // bool desired_new_data = false;
+    // while (!new_data_.compare_exchange_weak(expected_new_data, desired_new_data)) {
+    //     // Wait until there is data to consume
+    //     expected_new_data = true;
+    //     //LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
+    //     std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // }
+    if (!new_data_.load()) {
+        // LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
+        return std::make_pair(nullptr, nullptr);
     }
 
     int read_idx = read_idx_.load(std::memory_order_relaxed);
 
-    float* rgb_data_out = rgb_data_ + read_idx * n_elems_per_rgb_ * n_images_per_response_;
+    uint8_t* rgb_data_out = rgb_data_   + read_idx * n_elems_per_rgb_   * n_images_per_response_;
     float* depth_data_out = depth_data_ + read_idx * n_elems_per_depth_ * n_images_per_response_;
 
-    read_idx += count;
-    read_idx = read_idx % max_size_;
+    // read_idx += 1;
+    // read_idx = read_idx % max_size_;
 
-    read_idx_.store(read_idx, std::memory_order_release);
+    LogMessage("ReaderWriterCBuf::pop, popping {} images from index {}, new read index is {}",
+               count, read_idx_.load(std::memory_order_relaxed), read_idx);
+    //read_idx_.store(read_idx, std::memory_order_release);
+
+    new_data_.store(false, std::memory_order_release);
 
     return std::make_pair(rgb_data_out, depth_data_out);
 }
@@ -556,10 +563,14 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
 
 bool SpotConnection::getCurrentImages(
     int32_t n_images_requested,
-    float** images,
+    uint8_t** images,
     float** depths
 ) {
     auto [ret_images, ret_depths] = image_lifo_.pop(n_images_requested);
+    if (ret_images == nullptr || ret_depths == nullptr) {
+        LogMessage("SpotConnection::getCurrentImages: No images available in the buffer");
+        return false;
+    }
 
     for (int32_t i = 0; i < n_images_requested; i++) {
         images[i] = ret_images + i * image_lifo_.n_elems_per_rgb_;

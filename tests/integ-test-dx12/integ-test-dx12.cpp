@@ -29,7 +29,7 @@ using namespace std::chrono;
 static constexpr int WIDTH = 640;
 static constexpr int HEIGHT = 480;
 static constexpr int CHANNELS = 3;
-static constexpr UINT64 IMAGE_BUFSIZE = WIDTH * HEIGHT * CHANNELS * sizeof(float);
+static constexpr UINT64 IMAGE_BUFSIZE = WIDTH * HEIGHT * CHANNELS * sizeof(uint8_t);
 static constexpr UINT64 DEPTH_BUFSIZE = WIDTH * HEIGHT * sizeof(float);
 
 // ---- Test Logger --------------------------------------------------------------------------
@@ -233,11 +233,10 @@ int main(int argc, char* argv[]) {
     for (size_t robot = 0; robot < 2; robot++) {
         if (spot_ids[robot] < 0) continue;
 
-        uint32_t cam_bits[] = {FRONTLEFT, FRONTRIGHT, HAND};
         for (uint32_t cam = 0; cam < num_cameras; cam++) {
-            bool reg_result = SOb_RegisterOutputTextures(
+            bool reg_result = SOb_RegisterUnityReadbackBuffers(
                 spot_ids[robot],
-                cam_bits[cam],
+                1 << cam, // Single bit for camera
                 robot_resources[robot][cam].image_texture.Get(),
                 robot_resources[robot][cam].depth_texture.Get(),
                 static_cast<int32_t>(IMAGE_BUFSIZE),
@@ -259,27 +258,29 @@ int main(int argc, char* argv[]) {
 
     int32_t frame_count = 0;
     bool should_quit = false;
+    bool new_images = false;
 
     auto start_time = high_resolution_clock::now();
+    auto frame_start = start_time;
+
 
     while (!should_quit) {
-        auto frame_start = high_resolution_clock::now();
-
         for (size_t robot = 0; robot < 2; robot++) {
             if (spot_ids[robot] < 0) continue;
 
             // Upload next image batch to Unity textures
-            bool upload_result = SOb_UploadNextImageSetToUnity(spot_ids[robot]);
+            bool upload_result = SOb_PushNextImageSetToUnityBuffers(spot_ids[robot]);
             if (!upload_result) {
-                std::cerr << "Failed to upload image batch for robot " << robot << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
+            new_images = true;
             std::cout << "Successfully uploaded image batch for robot " << robot << " at frame " << frame_count << std::endl;
 
             // Read back and display all camera data
             for (uint32_t cam = 0; cam < num_cameras; cam++) {
-                float* image_data = nullptr;
-                float* depth_data = nullptr;
+                uint8_t* image_data = nullptr;
+                float*   depth_data = nullptr;
 
                 D3D12_RANGE image_read_range = {0, IMAGE_BUFSIZE};
                 D3D12_RANGE depth_read_range = {0, DEPTH_BUFSIZE};
@@ -294,7 +295,7 @@ int main(int argc, char* argv[]) {
                 ), "Map depth readback");
 
                 // Create OpenCV matrices from D3D12 readback data
-                cv::Mat image(HEIGHT, WIDTH, CV_32FC3, image_data);
+                cv::Mat image(HEIGHT, WIDTH, CV_8UC3, image_data);
                 cv::Mat depth(HEIGHT, WIDTH, CV_32FC1, depth_data);
 
                 // Convert RGB to BGR for OpenCV display
@@ -315,22 +316,18 @@ int main(int argc, char* argv[]) {
 
                 // Analyze data for stats (only for first camera for brevity)
                 if (cam == 0 && frame_count % 10 == 0) {
-                    float img_sum = 0.0f, depth_sum = 0.0f;
                     int img_nonzero = 0, depth_nonzero = 0;
 
                     for (int i = 0; i < WIDTH * HEIGHT * CHANNELS; i++) {
-                        img_sum += image_data[i];
                         if (std::abs(image_data[i]) > 1e-6) img_nonzero++;
                     }
 
                     for (int i = 0; i < WIDTH * HEIGHT; i++) {
-                        depth_sum += depth_data[i];
                         if (std::abs(depth_data[i]) > 1e-6) depth_nonzero++;
                     }
 
-                    std::cout << std::format("Robot {}, Frame {}: Image avg={:.3f}, nonzero={}, Depth avg={:.3f}, nonzero={}\n",
-                        robot, frame_count, img_sum / (WIDTH * HEIGHT * CHANNELS), img_nonzero,
-                        depth_sum / (WIDTH * HEIGHT), depth_nonzero);
+                    std::cout << std::format("Robot {}, Frame {}: Image nonzero={}, Depth nonzero={}\n",
+                        robot, frame_count, img_nonzero, depth_nonzero);
                 }
             }
 
@@ -342,12 +339,17 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        auto frame_end = high_resolution_clock::now();
-        auto frame_duration = duration_cast<microseconds>(frame_end - frame_start);
+        if (new_images) {
+            auto frame_end = high_resolution_clock::now();
+            auto frame_duration = duration_cast<microseconds>(frame_end - frame_start);
 
-        if (frame_count % 10 == 0) {
-            std::cout << std::format("Frame {} processing time: {:.2f} ms\n",
-                frame_count, double(frame_duration.count()) / 1000.0);
+            if (frame_count % 10 == 0) {
+                std::cout << std::format("Frame {} processing time: {:.2f} ms\n",
+                    frame_count, double(frame_duration.count()) / 1000.0);
+            }
+            frame_start = frame_end;
+
+            new_images = false;
         }
 
         frame_count++;
