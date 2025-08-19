@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "spot-observer.h"
+
 #include <bosdyn/client/sdk/client_sdk.h>
 #include <bosdyn/client/robot/robot.h>
 #include <bosdyn/client/image/image_client.h>
@@ -22,7 +24,9 @@ private:
 
     size_t n_elems_per_rgb_{0}; // Bytes per RGB image
     size_t n_elems_per_depth_{0}; // Bytes per depth image
-    size_t n_images_per_response_{0}; // Number of images (rgb and depth should be equal) per response
+
+    std::vector<SpotCamera> cameras_;
+    size_t n_images_per_response_{0}; // Number of images per response
 
     // Circular buffer data. CUDA memory
     uint8_t* rgb_data_{nullptr};
@@ -41,7 +45,7 @@ public:
     bool initialize(
         size_t n_bytes_per_rgb,
         size_t n_bytes_per_depth,
-        size_t n_images_per_response
+        const std::vector<SpotCamera>& cameras
     );
 
     /**
@@ -76,6 +80,8 @@ private:
     uint32_t current_cam_mask_;
     int32_t current_num_cams_;
     bosdyn::api::GetImageRequest current_request_;
+    std::vector<SpotCamera> camera_order_;
+
     std::unique_ptr<std::jthread> image_streamer_thread_ = nullptr;
 
 private:

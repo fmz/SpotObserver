@@ -28,7 +28,7 @@ using namespace std::chrono;
 // ---- constants ----------------------------------------------------------------------------
 static constexpr int WIDTH = 640;
 static constexpr int HEIGHT = 480;
-static constexpr int CHANNELS = 3;
+static constexpr int CHANNELS = 4;
 static constexpr UINT64 IMAGE_BUFSIZE = WIDTH * HEIGHT * CHANNELS * sizeof(uint8_t);
 static constexpr UINT64 DEPTH_BUFSIZE = WIDTH * HEIGHT * sizeof(float);
 
@@ -52,6 +52,21 @@ void ThrowIfFailed(HRESULT hr, const std::string& context = "") {
 
 static uint32_t __num_set_bits(uint32_t bitmask) {
     return __popcnt(bitmask);
+}
+
+static std::vector<SpotCamera> convert_bitmask_to_spot_cam_vector(uint32_t bitmask) {
+    std::vector<SpotCamera> cams;
+
+    cams.reserve(__num_set_bits(bitmask));
+
+    if (bitmask & SpotCamera::BACK)       cams.emplace_back(SpotCamera::BACK);
+    if (bitmask & SpotCamera::FRONTLEFT)  cams.emplace_back(SpotCamera::FRONTLEFT);
+    if (bitmask & SpotCamera::FRONTRIGHT) cams.emplace_back(SpotCamera::FRONTRIGHT);
+    if (bitmask & SpotCamera::LEFT)       cams.emplace_back(SpotCamera::LEFT);
+    if (bitmask & SpotCamera::RIGHT)      cams.emplace_back(SpotCamera::RIGHT);
+    if (bitmask & SpotCamera::HAND)       cams.emplace_back(SpotCamera::HAND);
+
+    return cams;
 }
 
 static int32_t connect_to_spot_and_start_cam_feed(
@@ -160,7 +175,8 @@ int main(int argc, char* argv[]) {
     // 3. Connect to Spot robots
     // ---------------------------------------------------------------------------------------
     int32_t spot_ids[2];
-    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT | HAND;
+    uint32_t cam_bitmask = HAND | FRONTLEFT | FRONTRIGHT | RIGHT | LEFT | BACK;
+    std::vector<SpotCamera> cams = convert_bitmask_to_spot_cam_vector(cam_bitmask);
 
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
@@ -295,12 +311,22 @@ int main(int argc, char* argv[]) {
                 ), "Map depth readback");
 
                 // Create OpenCV matrices from D3D12 readback data
-                cv::Mat image(HEIGHT, WIDTH, CV_8UC3, image_data);
-                cv::Mat depth(HEIGHT, WIDTH, CV_32FC1, depth_data);
+                size_t actual_width = WIDTH;
+                size_t actual_height = HEIGHT;
+                // switch (cams[cam]) {
+                // case SpotCamera::FRONTLEFT:
+                // case SpotCamera::FRONTRIGHT:
+                //     actual_width = HEIGHT;
+                //     actual_height = WIDTH;
+                //     break;
+                // }
+
+                cv::Mat image(actual_height, actual_width, CV_8UC4, image_data);
+                cv::Mat depth(actual_height, actual_width, CV_32FC1, depth_data);
 
                 // Convert RGB to BGR for OpenCV display
                 cv::Mat image_bgr;
-                cv::cvtColor(image, image_bgr, cv::COLOR_RGB2BGR);
+                cv::cvtColor(image, image_bgr, cv::COLOR_RGBA2BGR);
 
                 // Create window names
                 std::string image_window = "SPOT " + std::to_string(robot) + " RGB" + std::to_string(cam);

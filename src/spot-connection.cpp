@@ -21,7 +21,7 @@ static cv::Mat convert_image_to_cv_mat(const bosdyn::api::Image& img, double dep
         std::vector<uchar> data(img.data().begin(), img.data().end());
         cv::Mat image = cv::imdecode(data, cv::IMREAD_COLOR);
         // Convert to float rgb
-        cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+        cv::cvtColor(image, image, cv::COLOR_BGR2RGBA);
         // image.convertTo(image, CV_32F, 1.0 / 255.0); // Convert to float in range [0, 1]
         return image;
     } else {
@@ -78,11 +78,12 @@ ReaderWriterCBuf::~ReaderWriterCBuf() {
 bool ReaderWriterCBuf::initialize(
     size_t n_elems_per_rgb,
     size_t n_elems_per_depth,
-    size_t n_images_per_response
+    const std::vector<SpotCamera>& cameras
 ) {
     n_elems_per_rgb_ = n_elems_per_rgb;
     n_elems_per_depth_ = n_elems_per_depth;
-    n_images_per_response_ = n_images_per_response;
+    cameras_ = cameras;
+    n_images_per_response_ = cameras.size();
 
     if (rgb_data_ != nullptr || depth_data_ != nullptr) {
         if (!rgb_data_)   checkCudaError(cudaFree(rgb_data_), "cudaFree for RGB data");
@@ -100,7 +101,7 @@ bool ReaderWriterCBuf::initialize(
 
     LogMessage("Allocated {} bytes for RGB data and {} bytes for Depth data in ReaderWriterCBuf"
                 "({} bytes per RGB, {} bytes per Depth, {} images per response, max size {})",
-               total_size_rgb, total_size_depth, n_elems_per_rgb * sizeof(uint8_t), n_elems_per_depth * sizeof(float), n_images_per_response, max_size_);
+               total_size_rgb, total_size_depth, n_elems_per_rgb * sizeof(uint8_t), n_elems_per_depth * sizeof(float), n_images_per_response_, max_size_);
     LogMessage("Min RGB address = {:#x}, Max RGB address = {:#x}",
                size_t(rgb_data_), size_t(rgb_data_) + total_size_rgb);
     LogMessage("Min depth address = {:#x}, Max depth address = {:#x}",
@@ -150,10 +151,22 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         {
             cv::Mat cv_img = convert_image_to_cv_mat(img);
 
-            size_t image_size = cv_img.cols * cv_img.rows * (img.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
+            size_t image_size = cv_img.cols * cv_img.rows * 4;//(img.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
             if (image_size != n_elems_per_rgb_) {
                 LogMessage("Image size mismatch: expected {}, got {}", n_elems_per_rgb_, image_size);
                 throw std::runtime_error("ReaderWriterCBuf::push: Image size mismatch");
+            }
+
+            // See if we need to do any cam-specific preprocessing:
+            switch (cameras_[n_depths_written]) {
+            case SpotCamera::FRONTLEFT:
+            case SpotCamera::FRONTRIGHT:
+                // Mirror image
+                cv::flip(cv_img, cv_img, 0); // Flip horizontally
+                break;
+            case SpotCamera::RIGHT:
+                //cv::rotate(cv_img, cv_img, cv::ROTATE_180);
+                break;
             }
 
             // LogMessage("Copying RGB image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
@@ -192,6 +205,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 LogMessage("Depth size mismatch: expected {}, got {}", n_elems_per_depth_, depth_size);
                 throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
             }
+
             // LogMessage("Copying depth image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
             //            depth_size, write_idx, size_t(depth_write_ptr));
 
@@ -272,7 +286,7 @@ std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) {
 
 static std::vector<std::string> get_rgb_cam_names_from_bit_mask(uint32_t bitmask) {
     std::vector<std::string> cam_names;
-    cam_names.reserve(6);
+    cam_names.reserve(__num_set_bits(bitmask));
 
     if (bitmask & SpotCamera::BACK)       cam_names.emplace_back("back_fisheye_image");
     if (bitmask & SpotCamera::FRONTLEFT)  cam_names.emplace_back("frontleft_fisheye_image");
@@ -286,7 +300,7 @@ static std::vector<std::string> get_rgb_cam_names_from_bit_mask(uint32_t bitmask
 
 static std::vector<std::string> get_depth_cam_names_from_bit_mask(uint32_t bitmask) {
     std::vector<std::string> cam_names;
-    cam_names.reserve(6);
+    cam_names.reserve(__num_set_bits(bitmask));
 
     if (bitmask & SpotCamera::BACK)       cam_names.emplace_back("back_depth_in_visual_frame");
     if (bitmask & SpotCamera::FRONTLEFT)  cam_names.emplace_back("frontleft_depth_in_visual_frame");
@@ -296,6 +310,21 @@ static std::vector<std::string> get_depth_cam_names_from_bit_mask(uint32_t bitma
     if (bitmask & SpotCamera::HAND)       cam_names.emplace_back("hand_depth_in_hand_color_frame");
 
     return cam_names;
+}
+
+static std::vector<SpotCamera> convert_bitmask_to_spot_cam_vector(uint32_t bitmask) {
+    std::vector<SpotCamera> cams;
+
+    cams.reserve(__num_set_bits(bitmask));
+
+    if (bitmask & SpotCamera::BACK)       cams.emplace_back(SpotCamera::BACK);
+    if (bitmask & SpotCamera::FRONTLEFT)  cams.emplace_back(SpotCamera::FRONTLEFT);
+    if (bitmask & SpotCamera::FRONTRIGHT) cams.emplace_back(SpotCamera::FRONTRIGHT);
+    if (bitmask & SpotCamera::LEFT)       cams.emplace_back(SpotCamera::LEFT);
+    if (bitmask & SpotCamera::RIGHT)      cams.emplace_back(SpotCamera::RIGHT);
+    if (bitmask & SpotCamera::HAND)       cams.emplace_back(SpotCamera::HAND);
+
+    return cams;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -471,6 +500,7 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
         LogMessage("Creating a new Spot image request with mask: {:#x}", cam_mask);
         std::vector<std::string> rgb_sources = get_rgb_cam_names_from_bit_mask(cam_mask);
         std::vector<std::string> depth_sources = get_depth_cam_names_from_bit_mask(cam_mask);
+        camera_order_ = convert_bitmask_to_spot_cam_vector(cam_mask);
 
         LogMessage("Creating a request for {} RGB cameras and {} depth cameras",
                    rgb_sources.size(), depth_sources.size());
@@ -511,13 +541,13 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
                 return false;
             }
             // Read image sizes
-            size_t rgb_ref_size = image_responses[0].shot().image().rows() * image_responses[0].shot().image().cols() *
-                                  (image_responses[0].shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);;
+            size_t rgb_ref_size = image_responses[0].shot().image().rows() * image_responses[0].shot().image().cols() * 4;
+                                  //(image_responses[0].shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);;
             // For debugging purposes, ensure that all RGB images have the same size
             for (int32_t j = 1; j < num_cams_requested; j++) {
                 const auto& img_response = image_responses[j];
-                size_t rgb_size = img_response.shot().image().rows() * img_response.shot().image().cols() *
-                                  (img_response.shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
+                size_t rgb_size = img_response.shot().image().rows() * img_response.shot().image().cols() * 4;
+                                  //(img_response.shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
                 if (rgb_ref_size != rgb_size) {
                     LogMessage("SpotConnection::streamCameras: Inconsistent RGB image sizes"
                                "(expected {}, got {})", rgb_ref_size, rgb_size);
@@ -541,7 +571,7 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
             image_lifo_.initialize(
                 rgb_ref_size,
                 depth_ref_size,
-                num_cams_requested
+                camera_order_
             );
 
             break;

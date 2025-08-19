@@ -202,8 +202,12 @@ bool registerOutputTextures(
         TextureFootprintInfo& rgb_info = s_TextureFootprints[rgb_resource];
         s_Device->GetCopyableFootprints(&rgb_desc, 0, 1, 0,
             &rgb_info.footprint, &rgb_info.numRows, &rgb_info.rowSizeInBytes, &rgb_info.totalBytes);
-        LogMessage("RGB texture footprint: totalBytes={}, rowPitch={}",
-            rgb_info.totalBytes, rgb_info.footprint.Footprint.RowPitch);
+        LogMessage("RGB texture footprint: totalBytes={}, numRows={}, rowSizeInBytes={}, depth={}, rowPitch={}",
+            rgb_info.totalBytes,
+            rgb_info.numRows,
+            rgb_info.rowSizeInBytes,
+            rgb_info.footprint.Footprint.Depth,
+            rgb_info.footprint.Footprint.RowPitch);
 
         // Use the actual required buffer size for texture data
         img_buffer_size = static_cast<int32_t>(rgb_info.totalBytes);
@@ -330,7 +334,7 @@ bool uploadNextImageSetToUnity(int32_t robot_id) {
 
             // TODO: Your CUDA data might need reformatting to match the texture layout
             // For now, assuming the CUDA data is tightly packed RGB
-            size_t src_size = 3 * 640 * 480; // Assuming RGB data
+            size_t src_size = 4 * 640 * 480; // Assuming RGB data
 
             checkCudaError(
                 cudaMemcpyAsync(
@@ -343,7 +347,7 @@ bool uploadNextImageSetToUnity(int32_t robot_id) {
             );
         } else {
             // Buffer copy (original behavior)
-            size_t rgb_buf_size = 3 * 640 * 480 * sizeof(uint8_t);
+            size_t rgb_buf_size = 4 * 640 * 480 * sizeof(uint8_t);
             checkCudaError(
                 cudaMemcpyAsync(
                     reinterpret_cast<uint8_t*>(rgb_entry.cudaPtr),
