@@ -158,14 +158,11 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             }
 
             // See if we need to do any cam-specific preprocessing:
-            switch (cameras_[n_depths_written]) {
+            switch (cameras_[n_rgbs_written]) {
             case SpotCamera::FRONTLEFT:
             case SpotCamera::FRONTRIGHT:
                 // Mirror image
                 cv::flip(cv_img, cv_img, 0); // Flip horizontally
-                break;
-            case SpotCamera::RIGHT:
-                //cv::rotate(cv_img, cv_img, cv::ROTATE_180);
                 break;
             }
 

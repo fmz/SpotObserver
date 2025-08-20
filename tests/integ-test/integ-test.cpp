@@ -113,7 +113,7 @@ int main(int argc, char* argv[]) {
                 cudaMemcpyAsync(
                     image_cpu_buffer.data(),
                     images[i],
-                    3 * 640 * 480,
+                    4 * 640 * 480,
                     cudaMemcpyDeviceToHost
                 );
                 cudaMemcpyAsync(
@@ -124,7 +124,7 @@ int main(int argc, char* argv[]) {
                 );
                 cudaStreamSynchronize(0); // Wait for the copy to complete
 
-                cv::Mat image(480, 640, CV_8UC3, image_cpu_buffer.data());
+                cv::Mat image(480, 640, CV_8UC4, image_cpu_buffer.data());
                 cv::Mat depth(480, 640, CV_32FC1, depth_cpu_buffer.data());
 
                 cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
