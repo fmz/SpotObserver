@@ -11,7 +11,8 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_ARCHITECTURES native)
 
-#set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH};${CMAKE_CURRENT_SOURCE_DIR}/extern/libtorch)
+set(Protobuf_ROOT "${CMAKE_PREFIX_PATH}")
+set(CMAKE_PREFIX_PATH ${CMAKE_CURRENT_SOURCE_DIR}/extern/libtorch;${CMAKE_PREFIX_PATH})
 message(STATUS "Using CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
 
 # Find required packages
@@ -21,22 +22,37 @@ if (NOT CUDAToolkit_FOUND)
 endif()
 message(STATUS "CUDAToolkit found: ${CUDAToolkit_VERSION}")
 
-set(USE_SYSTEM_NVTX ON)
-#find_package(Torch REQUIRED)
-#if(NOT Torch_FOUND)
-#    message(FATAL_ERROR "Libtorch not found. Please set CMAKE_PREFIX_PATH to the libtorch directory (e.g., extern/libtorch) containing the Torch cmake files.")
-#endif()
-#message(STATUS "Found libtorch: ${TORCH_LIBRARIES}")
-#message(STATUS "Torch install prefix: ${TORCH_INSTALL_PREFIX}")
-
 set(SPOT_SDK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/extern/spot-sdk-install)
 set(OpenCV_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/extern/opencv/include)
 set(OpenCV_LIBS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/opencv/x64/vc16/lib)
 set(OpenCV_LIBS opencv_world4110.lib)
 
-find_package(Protobuf REQUIRED)
+# Force protobuf to come from vcpkg, not libtorch
+find_package(Protobuf REQUIRED PATHS "${Protobuf_ROOT}" NO_DEFAULT_PATH)
 find_package(gRPC REQUIRED)
 find_package(Threads REQUIRED)
+
+set(USE_SYSTEM_NVTX ON)
+find_package(Torch REQUIRED)
+if(NOT Torch_FOUND)
+    message(FATAL_ERROR "Libtorch not found. Please set CMAKE_PREFIX_PATH to the libtorch directory (e.g., extern/libtorch) containing the Torch cmake files.")
+endif()
+message(STATUS "Found libtorch: ${TORCH_LIBRARIES}")
+message(STATUS "Torch install prefix: ${TORCH_INSTALL_PREFIX}")
+
+set(ONNX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/onnxruntime-win-x64-gpu-1.22.1)
+# Check if ONNX_DIR exists
+if(NOT EXISTS ${ONNX_DIR})
+    message(FATAL_ERROR "ONNX directory not found: ${ONNX_DIR}. Please ensure ONNX Runtime is correctly extracted.")
+endif()
+set(ONNX_INCLUDE_DIR ${ONNX_DIR}/include)
+set(ONNX_LIB_DIR ${ONNX_DIR}/lib)
+if(NOT EXISTS ${ONNX_INCLUDE_DIR} OR NOT EXISTS ${ONNX_LIB_DIR})
+    message(FATAL_ERROR "ONNX include or lib directory not found: ${ONNX_INCLUDE_DIR} or ${ONNX_LIB_DIR}. Please ensure ONNX Runtime is correctly extracted.")
+else()
+    message(STATUS "Using ONNX library: ${ONNX_LIB_DIR}")
+endif()
+
 
 # Add DirectX 12 dependencies
 if(WIN32)
@@ -56,6 +72,10 @@ add_library(${PLUGIN_NAME} SHARED
     src/dumper.cpp
     src/include/unity-cuda-interop.h
     src/unity-cuda-interop.cpp
+    src/model.cpp
+    src/include/vision-pipeline.h
+    src/vision-pipeline.cpp
+    src/cuda_kernels.cu
 )
 
 # Unity Native-plugin API includes TODO: cleanup
@@ -69,6 +89,7 @@ include_directories(
     ${OpenCV_INCLUDES}
     ${SPOT_SDK_ROOT}/include
     ${UnityPluginAPI_INCLUDE}
+    ${ONNX_INCLUDE_DIR}
 )
 
 message(STATUS "OpenCV_LIBS_DIR: ${OpenCV_LIBS_DIR}")
@@ -85,7 +106,6 @@ target_link_directories(${PLUGIN_NAME} PRIVATE
 target_link_libraries(${PLUGIN_NAME}
     CUDA::cudart
     CUDA::cuda_driver
-    #${TORCH_LIBRARIES}
     ${DX12_LIBS}
     ${OpenCV_LIBS}
     bosdyn_client_static
@@ -93,6 +113,8 @@ target_link_libraries(${PLUGIN_NAME}
     protobuf::libprotobuf
     gRPC::grpc++
     gRPC::grpc
+    ${TORCH_LIBRARIES}
+    ${ONNX_LIB_DIR}/onnxruntime.lib
 )
 
 # Add interface compile definitions for Windows
@@ -133,79 +155,109 @@ if(COPY_DLLS)
         endforeach()
     endif()
 
-set(OPENCV_DLL_DIR "${CMAKE_SOURCE_DIR}/extern/opencv/x64/vc16/bin")
+    set(OPENCV_DLL_DIR "${CMAKE_SOURCE_DIR}/extern/opencv/x64/vc16/bin")
 
-# List of required DLLs from vcpkg
-set(VCPKG_DLLS
-    "re2.dll"
-    "libprotobuf.dll"
-    "libprotobuf-lite.dll"
-    "abseil_dll.dll"
-    "cares.dll"
-    "libcrypto-3-x64.dll"
-    "libssl-3-x64.dll"
-    "zlib1.dll"
-)
+    # List of required DLLs from vcpkg
+    set(VCPKG_DLLS
+        "re2.dll"
+        "libprotobuf.dll"
+        "libprotobuf-lite.dll"
+        "abseil_dll.dll"
+        "cares.dll"
+        "libcrypto-3-x64.dll"
+        "libssl-3-x64.dll"
+        "zlib1.dll"
+    )
 
-# List of required OpenCV DLLs
-set(OPENCV_DLLS
-    "opencv_world4110.dll"
-)
+    # List of required OpenCV DLLs
+    set(OPENCV_DLLS
+        "opencv_world4110.dll"
+    )
 
-set(PLUGIN_DLLS
-    ${CMAKE_CURRENT_BINARY_DIR}/${PLUGIN_NAME}.dll
-)
+    set(PLUGIN_DLLS
+        ${CMAKE_CURRENT_BINARY_DIR}/${PLUGIN_NAME}.dll
+    )
 
-# Copy vcpkg DLLs (only if vcpkg directory was found)
-if(VCPKG_DLL_DIR AND EXISTS "${VCPKG_DLL_DIR}")
-    message(STATUS "Found vcpkg DLL directory: ${VCPKG_DLL_DIR}")
-    foreach(dll ${VCPKG_DLLS})
-        if(EXISTS "${VCPKG_DLL_DIR}/${dll}")
+    set(MLLIB_DLLS)
+
+    # Use GLOB to find all DLLs in the libtorch/lib directory
+    file(GLOB LIBTORCH_DLLS "${TORCH_INSTALL_PREFIX}/lib/*.dll")
+    message(STATUS "Found LibTorch DLLs via GLOB: ${LIBTORCH_DLLS}")
+    list(APPEND MLLIB_DLLS ${LIBTORCH_DLLS})
+
+    # Find ONNX Runtime DLLs
+    file(GLOB ONNX_DLLS "${ONNX_LIB_DIR}/*.dll")
+    message(STATUS "Found ONNX Runtime DLLs via GLOB: ${ONNX_DLLS}")
+    list(APPEND MLLIB_DLLS ${ONNX_DLLS})
+
+    # Copy vcpkg DLLs (only if vcpkg directory was found)
+    if(VCPKG_DLL_DIR AND EXISTS "${VCPKG_DLL_DIR}")
+        message(STATUS "Found vcpkg DLL directory: ${VCPKG_DLL_DIR}")
+        foreach(dll ${VCPKG_DLLS})
+            if(EXISTS "${VCPKG_DLL_DIR}/${dll}")
+                add_custom_command(TARGET ${PLUGIN_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${VCPKG_DLL_DIR}/${dll}"
+                    $<TARGET_FILE_DIR:${PLUGIN_NAME}>
+                    COMMENT "Copying ${dll}"
+                )
+            else()
+                message(WARNING "vcpkg DLL not found: ${VCPKG_DLL_DIR}/${dll}")
+            endif()
+        endforeach()
+    else()
+        message(WARNING "vcpkg DLL directory not found. DLLs will need to be copied manually.")
+    endif()
+
+    # Copy OpenCV DLLs (only if OpenCV directory exists)
+    if(EXISTS "${OPENCV_DLL_DIR}")
+        message(STATUS "Found OpenCV DLL directory: ${OPENCV_DLL_DIR}")
+        foreach(dll ${OPENCV_DLLS})
+            if(EXISTS "${OPENCV_DLL_DIR}/${dll}")
+                add_custom_command(TARGET ${PLUGIN_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${OPENCV_DLL_DIR}/${dll}"
+                    $<TARGET_FILE_DIR:${PLUGIN_NAME}>
+                    COMMENT "Copying ${dll}"
+                )
+            else()
+                message(WARNING "OpenCV DLL not found: ${OPENCV_DLL_DIR}/${dll}")
+            endif()
+        endforeach()
+    else()
+        message(WARNING "OpenCV DLL directory not found: ${OPENCV_DLL_DIR}")
+    endif()
+
+    # Copy ML library DLLs (Libtorch, ONNX Runtime, etc.)
+    foreach(dll ${MLLIB_DLLS})
+        if(EXISTS "${dll}")
             add_custom_command(TARGET ${PLUGIN_NAME} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${VCPKG_DLL_DIR}/${dll}"
+                "${dll}"
                 $<TARGET_FILE_DIR:${PLUGIN_NAME}>
                 COMMENT "Copying ${dll}"
             )
         else()
-            message(WARNING "vcpkg DLL not found: ${VCPKG_DLL_DIR}/${dll}")
+            message(WARNING "ML library DLL not found: ${dll}")
         endif()
     endforeach()
-else()
-    message(WARNING "vcpkg DLL directory not found. DLLs will need to be copied manually.")
-endif()
-
-# Copy OpenCV DLLs (only if OpenCV directory exists)
-if(EXISTS "${OPENCV_DLL_DIR}")
-    message(STATUS "Found OpenCV DLL directory: ${OPENCV_DLL_DIR}")
-    foreach(dll ${OPENCV_DLLS})
-        if(EXISTS "${OPENCV_DLL_DIR}/${dll}")
-            add_custom_command(TARGET ${PLUGIN_NAME} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${OPENCV_DLL_DIR}/${dll}"
-                $<TARGET_FILE_DIR:${PLUGIN_NAME}>
-                COMMENT "Copying ${dll}"
-            )
-        else()
-            message(WARNING "OpenCV DLL not found: ${OPENCV_DLL_DIR}/${dll}")
-        endif()
-    endforeach()
-else()
-    message(WARNING "OpenCV DLL directory not found: ${OPENCV_DLL_DIR}")
-endif()
-
 endif() # COPY_DLLS
 
 if (BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-
-# Install target
+## Output directories
+#set_target_properties(${PLUGIN_NAME}
+#    PROPERTIES
+#    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+#    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+#    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+#)
+#
+## INSTALL
 #install(TARGETS ${PLUGIN_NAME}
-#    EXPORT SpotObserverLibTargets
-#    LIBRARY DESTINATION lib
-#    ARCHIVE DESTINATION lib
-#    RUNTIME DESTINATION bin
-#    INCLUDES DESTINATION include
+#    RUNTIME DESTINATION "Plugins"
+#    LIBRARY DESTINATION "Plugins"
+#    ARCHIVE DESTINATION "Plugins"
 #)

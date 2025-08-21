@@ -39,8 +39,8 @@ static int32_t connect_to_spot_and_start_cam_feed(
 int main(int argc, char* argv[]) {
     using namespace std::chrono;
 
-    if (argc != 5) {
-        std::cerr << "Usage: " << argv[0] << " <ROBOT1_IP> <ROBOT2_IP> <username> <password>" << std::endl;
+    if (argc < 5 || argc > 6) {
+        std::cerr << "Usage: " << argv[0] << " <ROBOT1_IP> <ROBOT2_IP> <username> <password> [model_path]" << std::endl;
         return 1;
     }
 
@@ -52,7 +52,7 @@ int main(int argc, char* argv[]) {
 
     int32_t spot_ids[2];
 
-    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT | HAND;
+    uint32_t cam_bitmask = FRONTLEFT;
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -69,12 +69,42 @@ int main(int argc, char* argv[]) {
     // TODO: Setup a listener for ctrl-c to gracefully stop the connection
     // std::cout << "Press Ctrl-C to stop reading camera feeds..." << std::endl;
 
-    uint8_t** images;
-    float** depths;
+    bool using_vision_pipeline = (argc == 6);
+    SObModel model = nullptr;
+    if (using_vision_pipeline) {
+        const char* model_path = argv[5];
+        std::cout << "Loading model from: " << model_path << std::endl;
+        model = SOb_LoadModel(model_path, "cuda");
+        if (!model) {
+            std::cerr << "Failed to load model from: " << argv[5] << std::endl;
+            for (int32_t spot = 0; spot < 2; spot++) {
+                cv::destroyAllWindows();
+                SOb_DisconnectFromSpot(spot_ids[spot]);
+            }
+            return -1;
+        }
+        std::cout << "Model loaded successfully!" << std::endl;
+
+        // Launch vision pipeline on both robots
+        for (size_t i = 0; i < 2; i++) {
+            if (spot_ids[i] < 0) continue;
+            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], model);
+            if (!ret) {
+                std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
+                for (int32_t spot = 0; spot < 2; spot++) {
+                    cv::destroyAllWindows();
+                    SOb_DisconnectFromSpot(spot_ids[spot]);
+                }
+                SOb_UnloadModel(model);
+                return -1;
+            }
+            std::cout << "Vision pipeline launched on robot " << i << std::endl;
+        }
+    }
 
     uint32_t num_images_requested = __num_set_bits(cam_bitmask);
-    images = new uint8_t*[num_images_requested];
-    depths = new float*[num_images_requested];
+    uint8_t** images = new uint8_t*[num_images_requested];
+    float** depths = new float*[num_images_requested];
 
     std::vector<float> image_cpu_buffer(640 * 480 * 3);
     std::vector<float> depth_cpu_buffer(640 * 480);
@@ -100,10 +130,16 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            if (!SOb_GetNextImageSet(spot_ids[spot], int32_t(num_images_requested), images, depths)) {
-                std::cout << "No new images from Spot " << spot << ", skipping." << std::endl;
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
+            if (using_vision_pipeline) {
+                if (!SOb_GetNextVisionPipelineImageSet(spot_ids[spot], int32_t(num_images_requested), images, depths)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
+            } else {
+                if (!SOb_GetNextImageSet(spot_ids[spot], int32_t(num_images_requested), images, depths)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
             }
             new_images = true;
             for (uint32_t i = 0; i < num_images_requested; i++) {
@@ -141,8 +177,11 @@ int main(int argc, char* argv[]) {
 
     for (int32_t spot = 0; spot < 2; spot++) {
         cv::destroyAllWindows();
-        SOb_DisconnectFromSpot(spot_ids[0]);
+        SOb_DisconnectFromSpot(spot_ids[spot]);
     }
+    if (model) SOb_UnloadModel(model);
+    if (images) delete[] images;
+    if (depths) delete[] depths;
 
     return 0;
 }

@@ -1,5 +1,8 @@
-#include <cuda_runtime.h>
+#include "utils.h"
 #include "cuda_kernels.cuh"
+
+#include <cuda_runtime.h>
+
 
 // Configuration constants
 #define TILE_SIZE 32
@@ -678,6 +681,59 @@ __global__ void rotateDepth_fast_kernel(
     getRotatedCoords<R>(x, y, width, height, dst_x, dst_y, dst_w, dst_h);
 
     dst[dst_y * dst_w + dst_x] = src[y * width + x];
+}
+
+// Needed for preprocessing RGB images from 4-channel uint8_t to 3-channel float
+__global__ void convert_uint8_to_float_3ch(
+    const uint8_t* input,
+    float* output,
+    int batch_size,
+    int input_channels,
+    int height,
+    int width
+) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_pixels = batch_size * height * width;
+
+    if (idx < total_pixels) {
+        int input_offset = idx * input_channels; // should be able to handle 3 or 4 channels
+        int output_offset = idx * 3; // 3 channels output
+
+        // Convert uint8 to float and normalize (0-255 -> 0.0-1.0)
+        output[output_offset + 0] = input[input_offset + 0] / 255.0f; // R
+        output[output_offset + 1] = input[input_offset + 1] / 255.0f; // G
+        output[output_offset + 2] = input[input_offset + 2] / 255.0f; // B
+        // Skip alpha channel (input_offset + 3)
+    }
+}
+
+void convert_uint8_img_to_float_img(
+    const uint8_t* input_data,
+    float* output_data,
+    int batch_size,
+    int input_channels,
+    int height,
+    int width,
+    cudaStream_t stream
+) {
+    if (input_channels != 4) {
+        throw std::invalid_argument("Input channels must be 4 for this conversion.");
+    }
+    int32_t total_pixels = batch_size * height * width;
+    int32_t block_size = 256;
+    int32_t grid_size = (total_pixels + block_size - 1) / block_size;
+
+    convert_uint8_to_float_3ch<<<grid_size, block_size, 0, stream>>>(
+        input_data,
+        output_data,
+        batch_size,
+        input_channels,
+        height,
+        width
+    );
+
+    checkCudaError(cudaGetLastError(), "Failed to launch convert_uint8_to_float_3ch kernel");
 }
 
 }

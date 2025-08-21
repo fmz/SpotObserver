@@ -63,6 +63,19 @@ static cv::Mat convert_image_to_cv_mat(const bosdyn::api::Image& img, double dep
     }
 }
 
+ReaderWriterCBuf::ReaderWriterCBuf(size_t max_size)
+    : max_size_(max_size)
+    , rgb_data_(nullptr)
+    , depth_data_(nullptr)
+{
+    checkCudaError(
+        cudaStreamCreate(&cuda_stream_),
+        "cudaStreamCreate for SpotConnection"
+    );
+    LogMessage("Created ReaderWriterCBuf with max size {} and CUDA stream {:#x}",
+               max_size, size_t(cuda_stream_));
+}
+
 ReaderWriterCBuf::~ReaderWriterCBuf() {
     if (rgb_data_) {
         cudaFree(rgb_data_);
@@ -71,6 +84,10 @@ ReaderWriterCBuf::~ReaderWriterCBuf() {
     if (depth_data_) {
         cudaFree(depth_data_);
         depth_data_ = nullptr;
+    }
+    if (cuda_stream_) {
+        cudaStreamDestroy(cuda_stream_);
+        cuda_stream_ = nullptr;
     }
     LogMessage("Destroyed ReaderWriterCBuf");
 }
@@ -174,7 +191,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     rgb_write_ptr,
                     cv_img.data,
                     image_size * sizeof(uint8_t),
-                    cudaMemcpyHostToDevice
+                    cudaMemcpyHostToDevice,
+                    cuda_stream_
                 ),
                 "cudaMemcpyAsync"
             );
@@ -211,7 +229,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     depth_write_ptr,
                     cv_img.data,
                     depth_size * sizeof(float),
-                    cudaMemcpyHostToDevice
+                    cudaMemcpyHostToDevice,
+                    cuda_stream_
                 ),
                 "cudaMemcpyAsync"
             );
@@ -240,6 +259,9 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     // Update the read index to the write index we just wrote to.
     read_idx_.store(write_idx, std::memory_order_release);
     new_data_.store(true, std::memory_order_release);
+    LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
+               write_idx, (write_idx + 1) % max_size_);
+
     write_idx = (write_idx + 1) % max_size_;
     write_idx_.store(write_idx, std::memory_order_release);
 }
@@ -248,19 +270,13 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
  * Consume image and depth data
  * Using more of a LIFO approach here, so that we can pop the most recent data first (see push function)
  */
-std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) {
-    // bool expected_new_data = true;
-    // bool desired_new_data = false;
-    // while (!new_data_.compare_exchange_weak(expected_new_data, desired_new_data)) {
-    //     // Wait until there is data to consume
-    //     expected_new_data = true;
-    //     //LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
-    //     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    // }
-    if (!new_data_.load()) {
-        // LogMessage("ReaderWriterCBuf::pop: Buffer is empty, waiting for data...");
+std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) const {
+    bool expected_new_data = true;
+    bool desired_new_data = false;
+    if (!new_data_.compare_exchange_weak(expected_new_data, desired_new_data)) {
         return std::make_pair(nullptr, nullptr);
     }
+    new_data_.store(false, std::memory_order_release);
 
     int read_idx = read_idx_.load(std::memory_order_relaxed);
 
@@ -270,11 +286,9 @@ std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) {
     // read_idx += 1;
     // read_idx = read_idx % max_size_;
 
-    LogMessage("ReaderWriterCBuf::pop, popping {} images from index {}, new read index is {}",
-               count, read_idx_.load(std::memory_order_relaxed), read_idx);
+    LogMessage("ReaderWriterCBuf::pop, popping {} images from index {}",
+               count, read_idx);
     //read_idx_.store(read_idx, std::memory_order_release);
-
-    new_data_.store(false, std::memory_order_release);
 
     return std::make_pair(rgb_data_out, depth_data_out);
 }
@@ -592,7 +606,7 @@ bool SpotConnection::getCurrentImages(
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
-) {
+) const {
     auto [ret_images, ret_depths] = image_lifo_.pop(n_images_requested);
     if (ret_images == nullptr || ret_depths == nullptr) {
         LogMessage("SpotConnection::getCurrentImages: No images available in the buffer");

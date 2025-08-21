@@ -11,6 +11,7 @@
 #include <bosdyn/client/image/image_client.h>
 
 #include <stop_token>
+#include <cuda_runtime.h>
 
 namespace SOb {
 /**
@@ -20,7 +21,7 @@ class ReaderWriterCBuf {
 private:
     std::atomic<int> read_idx_{0}; // Head index for circular buffer
     std::atomic<int> write_idx_{0}; // Tail index for circular buffer
-    std::atomic<bool> new_data_{false}; // Flag to indicate new data is available
+    mutable std::atomic<bool> new_data_{false}; // Flag to indicate new data is available
 
     size_t n_elems_per_rgb_{0}; // Bytes per RGB image
     size_t n_elems_per_depth_{0}; // Bytes per depth image
@@ -34,8 +35,10 @@ private:
 
     const size_t max_size_; // Maximum size of the queue
 
+    cudaStream_t cuda_stream_;
+
 public:
-    explicit ReaderWriterCBuf(size_t max_size = 30) : max_size_(max_size) {}
+    explicit ReaderWriterCBuf(size_t max_size);
 
     ReaderWriterCBuf(const ReaderWriterCBuf&) = delete;
     ReaderWriterCBuf& operator=(const ReaderWriterCBuf&) = delete;
@@ -56,7 +59,7 @@ public:
     /**
      * Consume image and depth data
      */
-    std::pair<uint8_t*, float*> pop(int32_t count);
+    std::pair<uint8_t*, float*> pop(int32_t count) const;
 
     friend class SpotConnection;
 };
@@ -113,12 +116,16 @@ public:
         int32_t n_images_requested,
         uint8_t** images,
         float** depths
-    );
+    ) const;
 
     bool     isConnected()       const { return connected_; }
     bool     isStreaming()       const { return streaming_; }
     uint32_t getCurrentCamMask() const { return current_cam_mask_; }
     int32_t  getCurrentNumCams() const { return current_num_cams_; }
+
+    const cudaStream_t getCudaStream() const {
+        return image_lifo_.cuda_stream_;
+    }
 
 };
 
