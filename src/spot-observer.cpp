@@ -559,12 +559,27 @@ bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id) {
     try {
         bool ret = SOb::uploadNextImageSetToUnity(robot_id);
         if (!ret) {
-            SOb::LogMessage("SOb_UploadNextImageSetToUnity: Failed to get next image set for robot ID {}", robot_id);
+            SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers: Failed to upload next image set for robot ID {}", robot_id);
             return false; // Failed to get images
         }
         return ret;
     } catch (const std::exception& e) {
-        SOb::LogMessage("SOb_UploadNextImageSetToUnity: Exception while getting next image set for robot ID {}: {}", robot_id, e.what());
+        SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers: Exception while uploading next image set for robot ID {}: {}", robot_id, e.what());
+        return false;
+    }
+}
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id) {
+    try {
+        bool ret = SOb::uploadNextVisionPipelineImageSetToUnity(robot_id);
+        if (!ret) {
+            SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers: Failed to upload next vision pipeline image set for robot ID {}", robot_id);
+            return false; // Failed to get images
+        }
+        return ret;
+    } catch (const std::exception& e) {
+        SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers: Exception while uploading next vision pipeline image set for robot ID {}: {}", robot_id, e.what());
         return false;
     }
 }

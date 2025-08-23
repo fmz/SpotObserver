@@ -246,7 +246,11 @@ bool registerOutputTextures(
     return true;
 }
 
-bool uploadNextImageSetToUnity(int32_t robot_id) {
+// Helper function type for getting images
+typedef bool (*GetImageSetFunc)(int32_t robot_id, int32_t n_images_requested, uint8_t** images, float** depths);
+
+// Common implementation for uploading image sets to Unity buffers
+static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getImageSetFunc, const char* operation_name) {
     // Sanity checks
     if (robot_id < 0) {
         LogMessage("Invalid robot ID: {}", robot_id);
@@ -304,12 +308,12 @@ bool uploadNextImageSetToUnity(int32_t robot_id) {
         return false;
     }
 
-    // Grab the latest image set from the robot
+    // Grab the latest image set using the provided function
     uint8_t* rgb_images[NUM_CAMERAS];
     float* depth_images[NUM_CAMERAS];
-    bool ret = SOb_GetNextImageSet(robot_id, num_textures, rgb_images, depth_images);
+    bool ret = getImageSetFunc(robot_id, num_textures, rgb_images, depth_images);
     if (!ret) {
-        LogMessage("No new images ready for robot: {}", robot_id);
+        LogMessage("No new images ready for {}: {}", operation_name, robot_id);
         return false;
     }
 
@@ -390,7 +394,7 @@ bool uploadNextImageSetToUnity(int32_t robot_id) {
 
     checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize()");
 
-    LogMessage("Copied images to shared buffers for robot ID: {}", robot_id);
+    LogMessage("Copied images to shared buffers for {} robot ID: {}", operation_name, robot_id);
 
     // Copy to Unity resources
     s_CmdAlloc->Reset();
@@ -491,9 +495,17 @@ bool uploadNextImageSetToUnity(int32_t robot_id) {
     }
     s_FenceValue++;
 
-    LogMessage("Copied images to d3d12 resources for robot: {}", robot_id);
+    LogMessage("Copied images to d3d12 resources for {} robot: {}", operation_name, robot_id);
 
     return true;
+}
+
+bool uploadNextImageSetToUnity(int32_t robot_id) {
+    return uploadImageSetToUnityCommon(robot_id, SOb_GetNextImageSet, "robot");
+}
+
+bool uploadNextVisionPipelineImageSetToUnity(int32_t robot_id) {
+    return uploadImageSetToUnityCommon(robot_id, SOb_GetNextVisionPipelineImageSet, "vision pipeline");
 }
 
 }

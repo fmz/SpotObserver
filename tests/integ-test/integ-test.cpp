@@ -52,7 +52,7 @@ int main(int argc, char* argv[]) {
 
     int32_t spot_ids[2];
 
-    uint32_t cam_bitmask = FRONTLEFT;
+    uint32_t cam_bitmask = FRONTRIGHT | FRONTLEFT;
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -164,6 +164,7 @@ int main(int argc, char* argv[]) {
                 cv::Mat depth(480, 640, CV_32FC1, depth_cpu_buffer.data());
 
                 cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
+                cv::normalize(depth, depth, 0, 1, cv::NORM_MINMAX);
 
                 cv::imshow("SPOT " + std::to_string(spot) + " RGB" + std::to_string(i), image);
                 cv::imshow("SPOT " + std::to_string(spot) + " Depth" + std::to_string(i), depth);

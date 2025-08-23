@@ -3,14 +3,16 @@
 //
 
 #include "include/vision-pipeline.h"
-#include <chrono>
-#include <algorithm>
-#include <iostream>
-
 #include "cuda_kernels.cuh"
 #include "utils.h"
+#include "dumper.h"
+
+#include <chrono>
+#include <algorithm>
 
 namespace SOb {
+
+static int32_t dump_id = 900;
 
 VisionPipeline::VisionPipeline(
     MLModel& model,
@@ -77,26 +79,46 @@ void VisionPipeline::stop() {
     }
     
     running_.store(false);
-    
+    LogMessage("Vision pipeline stopping...");
+
     if (pipeline_thread_ && pipeline_thread_->joinable()) {
         pipeline_thread_->request_stop();
         pipeline_thread_->join();
+        LogMessage("Vision pipeline thread joined");
     }
 }
 
 bool VisionPipeline::allocateCudaBuffers() {
     deallocateCudaBuffers();
 
-    size_t rgb_size = max_size_ * input_shape_.N * input_shape_.C * input_shape_.H * input_shape_.W * sizeof(uint8_t);
-    checkCudaError(cudaMalloc(&d_rgb_data_, rgb_size), "cudaMalloc for vision pipeline RGB data");
+    size_t rgb_image_size_batch = input_shape_.N * input_shape_.C * input_shape_.H * input_shape_.W * sizeof(uint8_t);
+    size_t rgb_buffer_size = max_size_ * rgb_image_size_batch;
+
+    checkCudaError(cudaMalloc(&d_rgb_data_, rgb_buffer_size), "cudaMalloc for vision pipeline RGB data");
+    checkCudaError(cudaMalloc(&cuda_ws_.d_rgb_float_data_, rgb_image_size_batch * sizeof(float)), "cudaMalloc for vision pipeline RGB float data");
+
+    size_t depth_size = depth_shape_.N * depth_shape_.C * depth_shape_.H * depth_shape_.W * sizeof(float);
+    checkCudaError(cudaMalloc(&cuda_ws_.d_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data");
+
+    size_t depth_workspace_size = depth_preprocessor_get_workspace_size(depth_shape_.W, depth_shape_.H);
+    checkCudaError(cudaMalloc(&cuda_ws_.d_depth_preprocessor_workspace_, depth_workspace_size), "cudaMalloc for vision pipeline depth preprocessor workspace");
 
     size_t output_size = max_size_ * output_shape_.N * output_shape_.C * output_shape_.H * output_shape_.W * sizeof(float);
     checkCudaError(cudaMalloc(&d_output_buffer_, output_size),"cudaMalloc for vision pipeline output");
 
-    LogMessage("VisionPipeline: Allocated CUDA buffers: "
-               "d_rgb_data_ = {}, d_output_buffer_ = {}, with sizes: {} bytes and {} bytes",
-                (void*)d_rgb_data_, (void*)d_output_buffer_,
-                rgb_size, output_size);
+    LogMessage("Allocated CUDA buffers for vision pipeline:"
+        "\n  RGB data: {} bytes"
+        "\n  RGB float data: {} bytes"
+        "\n  Depth data: {} bytes"
+        "\n  Depth preprocessor workspace: {} bytes"
+        "\n  Output buffer: {} bytes",
+        rgb_buffer_size,
+        rgb_image_size_batch * sizeof(float),
+        depth_size,
+        depth_workspace_size,
+        output_size
+    );
+
     return true;
 }
 
@@ -104,6 +126,18 @@ void VisionPipeline::deallocateCudaBuffers() {
     if (d_rgb_data_) {
         cudaFree(d_rgb_data_);
         d_rgb_data_ = nullptr;
+    }
+    if (cuda_ws_.d_rgb_float_data_) {
+        cudaFree(cuda_ws_.d_rgb_float_data_);
+        cuda_ws_.d_rgb_float_data_ = nullptr;
+    }
+    if (cuda_ws_.d_depth_data_) {
+        cudaFree(cuda_ws_.d_depth_data_);
+        cuda_ws_.d_depth_data_ = nullptr;
+    }
+    if (cuda_ws_.d_depth_preprocessor_workspace_) {
+        cudaFree(cuda_ws_.d_depth_preprocessor_workspace_);
+        cuda_ws_.d_depth_preprocessor_workspace_ = nullptr;
     }
     if (d_output_buffer_) {
         cudaFree(d_output_buffer_);
@@ -118,6 +152,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
     float** depth_images = new float*[num_images_per_iter];
 
     size_t num_rgb_elemenets   = input_shape_.N * input_shape_.C * input_shape_.H * input_shape_.W;
+    size_t num_depth_elements  = depth_shape_.N * depth_shape_.C * depth_shape_.H * depth_shape_.W;
     size_t num_output_elements = output_shape_.N * output_shape_.C * output_shape_.H * output_shape_.W;
 
     while (!stop_token.stop_requested() && running_.load()) {
@@ -134,39 +169,92 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
             // Prepare device pointers
             uint8_t* d_rgb_ptr = d_rgb_data_ + write_idx_ * num_rgb_elemenets;
-            float* depth_write_ptr = d_output_buffer_ + write_idx_ * num_output_elements;
+            float*   d_depth_output_ptr = d_output_buffer_ + write_idx_ * num_output_elements;
 
-            // Copy RGB images to device (in order to ensure synchronization between processed depth and RGB images)
+            // Copy inputs to our local locations (in order to ensure synchronization between processed depth and RGB images)
             checkCudaError(cudaMemcpyAsync(
                 d_rgb_ptr,
                 rgb_images[0],
                 num_rgb_elemenets * sizeof(uint8_t),
-                cudaMemcpyDeviceToDevice,
-                cuda_stream_
-            ), "cudaMemcpyAsync for RGB images");
+                cudaMemcpyDeviceToDevice
+                ), "cudaMemcpyAsync for RGB images");
+
+            checkCudaError(cudaMemcpyAsync(
+                cuda_ws_.d_depth_data_,
+                depth_images[0],
+                num_depth_elements * sizeof(float),
+                cudaMemcpyDeviceToDevice
+                ), "cudaMemcpyAsync for RGB images");
+
+            // Convert RGB images to float and normalize to [0,1]
+            convert_uint8_img_to_float_img(
+                d_rgb_ptr,
+                cuda_ws_.d_rgb_float_data_,
+                input_shape_.N,
+                input_shape_.H,
+                input_shape_.W,
+                input_shape_.C
+            );
 
             // Preprocess depth images
-            // for (size_t i = 0; i < num_images_per_iter; i++) {
-            //     checkCudaError(preprocess_depth_image(
-            //         depth_images[i],
-            //         depth_shape_.W,
-            //         depth_shape_.H
-            //     ), "preprocess_depth_image");
-            // }
+            LogMessage("num_images_per_iter = {}", num_images_per_iter);
+            for (size_t i = 0; i < num_images_per_iter; i++) {
+                float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
+                float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
+                float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
 
-            // Run inference on all images at ONCE ^^
-            bool inference_success = model_.runInference(
-                d_rgb_ptr,
-                depth_images[0],
-                depth_write_ptr,
-                input_shape_,
-                depth_shape_,
-                output_shape_
-            );
-            
-            if (!inference_success) {
-                LogMessage("Inference failed");
-                continue;
+                checkCudaError(preprocess_depth_image2(
+                    cur_depth_input_ptr,
+                    depth_shape_.W,
+                    depth_shape_.H,
+                    cuda_ws_.d_depth_preprocessor_workspace_
+                ), "preprocess_depth_image");
+
+                TensorShape input_shape_float = input_shape_;
+                input_shape_float.N = 1; // Process one image at a time
+                input_shape_float.C = 3; // float RGB has 3 channels
+                TensorShape depth_shape_single = depth_shape_;
+                depth_shape_single.N = 1; // Process one image at a time
+                TensorShape output_shape_single = output_shape_;
+                output_shape_single.N = 1; // Process one image at a time
+
+                // Run inference
+                bool inference_success = model_.runInference(
+                    cur_rgb_input_ptr,
+                    cur_depth_input_ptr,
+                    cur_depth_output_ptr,
+                    input_shape_float,
+                    depth_shape_single,
+                    output_shape_single
+                );
+
+                if (!inference_success) {
+                    LogMessage("Inference failed");
+                    continue;
+                }
+
+                DumpRGBImageFromCudaCHW(
+                    cur_rgb_input_ptr,
+                    input_shape_.W,
+                    input_shape_.H,
+                    "input-rgb",
+                    dump_id
+                );
+                DumpDepthImageFromCuda(
+                    cur_depth_input_ptr,
+                    depth_shape_.W,
+                    depth_shape_.H,
+                    "input-depth",
+                    dump_id
+                );
+                DumpDepthImageFromCuda(
+                    d_depth_output_ptr,
+                    depth_shape_.W,
+                    depth_shape_.H,
+                    "output-depth",
+                    dump_id
+                );
+                dump_id++;
             }
 
             // Update read index
@@ -174,12 +262,12 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             new_data_.store(true, std::memory_order_release);
 
             // Update write index (circular)
-            LogMessage("Updating write index from {} to {}",
+            LogMessage("VisionPipeline: Updating write index from {} to {}",
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
 
         } catch (const std::exception& e) {
-            std::cerr << "Exception in pipeline worker: " << e.what() << std::endl;
+            LogMessage("Exception in pipeline worker: {}", e.what());
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }

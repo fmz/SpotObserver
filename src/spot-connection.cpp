@@ -179,7 +179,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             case SpotCamera::FRONTLEFT:
             case SpotCamera::FRONTRIGHT:
                 // Mirror image
-                cv::flip(cv_img, cv_img, 0); // Flip horizontally
+                //cv::flip(cv_img, cv_img, 0); // Flip horizontally
                 break;
             }
 
@@ -191,8 +191,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     rgb_write_ptr,
                     cv_img.data,
                     image_size * sizeof(uint8_t),
-                    cudaMemcpyHostToDevice,
-                    cuda_stream_
+                    cudaMemcpyHostToDevice
                 ),
                 "cudaMemcpyAsync"
             );
@@ -229,8 +228,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     depth_write_ptr,
                     cv_img.data,
                     depth_size * sizeof(float),
-                    cudaMemcpyHostToDevice,
-                    cuda_stream_
+                    cudaMemcpyHostToDevice
                 ),
                 "cudaMemcpyAsync"
             );
@@ -439,8 +437,10 @@ void SpotConnection::_joinStreamingThread() {
         image_streamer_thread_->request_stop();
         if (image_streamer_thread_->joinable()) {
             image_streamer_thread_->join();
+            LogMessage("Joined streaming thread");
         }
         image_streamer_thread_.reset();
+        LogMessage("Streaming thread stopped");
     } else {
         LogMessage("SpotConnection::_joinStreamingThread: No streaming thread to join");
         return;

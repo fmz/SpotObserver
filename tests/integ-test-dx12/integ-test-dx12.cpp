@@ -96,8 +96,8 @@ static int32_t connect_to_spot_and_start_cam_feed(
 //  main
 // ===========================================================================================
 int main(int argc, char* argv[]) {
-    if (argc != 5) {
-        std::cerr << "Usage: " << argv[0] << " <ROBOT1_IP> <ROBOT2_IP> <username> <password>" << std::endl;
+    if (argc < 5 || argc > 6) {
+        std::cerr << "Usage: " << argv[0] << " <ROBOT1_IP> <ROBOT2_IP> <username> <password> [model_path]" << std::endl;
         return 1;
     }
 
@@ -112,7 +112,7 @@ int main(int argc, char* argv[]) {
     SOb_SetUnityLogCallback(TestLogCallback);
     SOb_ToggleLogging(true);
 
-    //SOb_ToggleDebugDumps("./spot_dump");
+    SOb_ToggleDebugDumps("./spot-dump-dx12");
 
     // ---------------------------------------------------------------------------------------
     // 2. Initialize D3D12
@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
     // 3. Connect to Spot robots
     // ---------------------------------------------------------------------------------------
     int32_t spot_ids[2];
-    uint32_t cam_bitmask = HAND | FRONTLEFT | FRONTRIGHT | RIGHT | LEFT | BACK;
+    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT;
     std::vector<SpotCamera> cams = convert_bitmask_to_spot_cam_vector(cam_bitmask);
 
     for (size_t i = 0; i < 2; i++) {
@@ -266,6 +266,39 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    bool using_vision_pipeline = (argc == 6);
+    SObModel model = nullptr;
+    if (using_vision_pipeline) {
+        const char* model_path = argv[5];
+        std::cout << "Loading model from: " << model_path << std::endl;
+        model = SOb_LoadModel(model_path, "cuda");
+        if (!model) {
+            std::cerr << "Failed to load model from: " << argv[5] << std::endl;
+            for (int32_t spot = 0; spot < 2; spot++) {
+                cv::destroyAllWindows();
+                SOb_DisconnectFromSpot(spot_ids[spot]);
+            }
+            return -1;
+        }
+        std::cout << "Model loaded successfully!" << std::endl;
+
+        // Launch vision pipeline on both robots
+        for (size_t i = 0; i < 2; i++) {
+            if (spot_ids[i] < 0) continue;
+            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], model);
+            if (!ret) {
+                std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
+                for (int32_t spot = 0; spot < 2; spot++) {
+                    cv::destroyAllWindows();
+                    SOb_DisconnectFromSpot(spot_ids[spot]);
+                }
+                SOb_UnloadModel(model);
+                return -1;
+            }
+            std::cout << "Vision pipeline launched on robot " << i << std::endl;
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // 6. Main camera reading loop with OpenCV display
     // ---------------------------------------------------------------------------------------
@@ -285,7 +318,12 @@ int main(int argc, char* argv[]) {
             if (spot_ids[robot] < 0) continue;
 
             // Upload next image batch to Unity textures
-            bool upload_result = SOb_PushNextImageSetToUnityBuffers(spot_ids[robot]);
+            bool upload_result;
+            if (using_vision_pipeline) {
+                upload_result = SOb_PushNextVisionPipelineImageSetToUnityBuffers(spot_ids[robot]);
+            } else {
+                upload_result = SOb_PushNextImageSetToUnityBuffers(spot_ids[robot]);
+            }
             if (!upload_result) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;

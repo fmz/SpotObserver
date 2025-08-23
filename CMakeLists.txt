@@ -40,7 +40,7 @@ endif()
 message(STATUS "Found libtorch: ${TORCH_LIBRARIES}")
 message(STATUS "Torch install prefix: ${TORCH_INSTALL_PREFIX}")
 
-set(ONNX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/onnxruntime-win-x64-gpu-1.22.1)
+set(ONNX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/onnxruntime-win-x64-gpu-1.22.0)
 # Check if ONNX_DIR exists
 if(NOT EXISTS ${ONNX_DIR})
     message(FATAL_ERROR "ONNX directory not found: ${ONNX_DIR}. Please ensure ONNX Runtime is correctly extracted.")
@@ -76,6 +76,7 @@ add_library(${PLUGIN_NAME} SHARED
     src/include/vision-pipeline.h
     src/vision-pipeline.cpp
     src/cuda_kernels.cu
+    src/load_image_to_cuda.cu
 )
 
 # Unity Native-plugin API includes TODO: cleanup

@@ -21,6 +21,12 @@ namespace SOb {
 
 class VisionPipeline {
 private:
+    struct CudaWorkspace {
+        float*   d_depth_data_{nullptr};
+        float*   d_rgb_float_data_{nullptr};
+        uint8_t* d_depth_preprocessor_workspace_{nullptr};
+    };
+
     MLModel& model_;
     const SpotConnection& spot_connection_;
     
@@ -39,20 +45,12 @@ private:
     TensorShape depth_shape_;
     TensorShape output_shape_;
 
-    uint8_t* d_rgb_data_{nullptr};
-    float*   d_output_buffer_{nullptr};
-
-    // Frame tracking
-    std::atomic<uint64_t> frame_counter_{0};
-    
     // CUDA resources
     cudaStream_t cuda_stream_;
+    CudaWorkspace cuda_ws_;
+    float* d_output_buffer_{nullptr};
+    uint8_t* d_rgb_data_{nullptr};
 
-    // Statistics
-    std::atomic<uint64_t> frames_processed_{0};
-    std::atomic<uint64_t> frames_dropped_{0};
-    
-private:
     void pipelineWorker(std::stop_token stop_token);
     bool allocateCudaBuffers();
     void deallocateCudaBuffers();

@@ -74,6 +74,9 @@ bool UNITY_INTERFACE_API SOb_GetNextVisionPipelineImageSet(
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id);
 
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id);
+
 // Model stuff
 UNITY_INTERFACE_EXPORT
 SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* backend);
