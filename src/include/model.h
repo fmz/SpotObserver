@@ -77,7 +77,6 @@ public:
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 class ONNXModel : public MLModel {
-
     struct CudaMemoryDeleter {
         explicit CudaMemoryDeleter(Ort::Allocator* alloc) {
             alloc_ = alloc;
@@ -109,10 +108,6 @@ class ONNXModel : public MLModel {
 
     bool m_use_cuda;
     bool m_is_warmed_up = false;
-
-    // Temporary buffers for converting 8-bit RGBA to float RGB
-    float* d_tmp_rgb = nullptr;
-    size_t tmp_rgb_allocated_size = 0;
 
     void _warmupModel();
 

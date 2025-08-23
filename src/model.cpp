@@ -6,6 +6,7 @@
 #include "logger.h"
 #include "utils.h"
 #include "cuda_kernels.cuh"
+#include "dumper.h"
 
 #include <filesystem>
 #include <cuda_runtime.h>
@@ -229,6 +230,7 @@ bool TorchModel::runInference(
             LogMessage("Input tensor must have 3 or 4 channels (RGB or RGBA).");
             throw std::runtime_error("Invalid input tensor channels.");
         }
+
         // Convert to float32
         rgb_tensor = rgb_tensor.to(torch::kFloat32).div_(255.0);
 
@@ -457,9 +459,7 @@ ONNXModel::~ONNXModel() {
     // if (m_output_buffer) {
     //     m_allocator->Free(m_output_buffer);
     // }
-    if (d_tmp_rgb) {
-        cudaFree(d_tmp_rgb);
-    }
+
     LogMessage("ONNXModel destroyed.");
 }
 
@@ -582,6 +582,26 @@ bool ONNXModel::runInference(
     TensorShape depth_shape,
     TensorShape output_shape
 ) {
+    // std::string img_path = "C:/Users/brown/Documents/fmz/test.jpg";
+    // int32_t out_w, out_h;
+    // static float* d_image = nullptr;
+    // static float* d_depth = nullptr;
+    // if (!d_image) {
+    //     size_t image_size = input_shape.N * input_shape.C * input_shape.H * input_shape.W * sizeof(float);
+    //     cudaMalloc(&d_image, image_size);
+    //     cudaMalloc(&d_depth, image_size);
+    // }
+    // loadImageToCudaFloatRGB(img_path, out_w, out_h, d_image);
+    //
+    static int32_t dump_id = 500;
+    DumpRGBImageFromCudaCHW(
+        input_data,
+        input_shape.W,
+        input_shape.H,
+        "rgb",
+        dump_id
+    );
+
     try {
         // Create input tensor
         std::vector<int64_t> input_tensor_shape = {
@@ -611,12 +631,6 @@ bool ONNXModel::runInference(
 
         LogMessage("About to run ONNX inference...");
 
-        // cudaError_t err = cudaMemcpy(m_input_buffer, input_data, input_tensor_size * sizeof(float), cudaMemcpyDeviceToDevice);
-        // if (err != cudaSuccess) {
-        //     LogMessage("CUDA memcpy failed: {}", cudaGetErrorString(err));
-        //     return false;
-        // }    
-        
         // Create input tensor
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
             m_memory_info,
@@ -640,7 +654,7 @@ bool ONNXModel::runInference(
         // Create output tensor
         Ort::Value output_tensor = Ort::Value::CreateTensor<float>(
             m_memory_info,
-            output_data,
+            const_cast<float*>(output_data),
             output_size,
             output_tensor_shape.data(),
             output_tensor_shape.size()
@@ -662,6 +676,23 @@ bool ONNXModel::runInference(
             checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
         }
 
+
+        DumpDepthImageFromCuda(
+            depth_data,
+            input_shape.W,
+            input_shape.H,
+            "preprocessed-depth",
+            dump_id
+        );
+
+        DumpDepthImageFromCuda(
+            output_data,
+            input_shape.W,
+            input_shape.H,
+            "output",
+            dump_id
+        );
+        dump_id++;
         LogMessage("ONNX inference completed successfully.");
     } catch (const std::exception& e) {
         LogMessage("Error during ONNX inference: {}", e.what());
@@ -679,71 +710,75 @@ bool ONNXModel::runInference(
     TensorShape    depth_shape,
     TensorShape    output_shape
 ) {
-    try {
-        // Convert tensor to RGB float
-        size_t total_output_size = input_shape.N * input_shape.H * input_shape.W * 3 * sizeof(float);
-        if (!d_tmp_rgb || tmp_rgb_allocated_size < total_output_size) {
-            if (d_tmp_rgb) {
-                cudaFree(d_tmp_rgb);
-            }
-            checkCudaError(cudaMalloc(&d_tmp_rgb, total_output_size), "Failed to allocate memory for RGB conversion");
-            tmp_rgb_allocated_size = total_output_size;
-        }
-        convert_uint8_img_to_float_img(
-            input_data,
-            d_tmp_rgb,
-            input_shape.N,
-            input_shape.C,
-            input_shape.H,
-            input_shape.W
-        );
-        TensorShape input_shape_float = {
-            input_shape.N,
-            3, // RGB channels
-            input_shape.H,
-            input_shape.W
-        };
+    // try {
+    //     // Convert tensor to RGB float
+    //     size_t total_output_size = input_shape.N * input_shape.H * input_shape.W * 3 * sizeof(float);
+    //     if (!d_tmp_rgb || tmp_rgb_allocated_size < total_output_size) {
+    //         if (d_tmp_rgb) {
+    //             cudaFree(d_tmp_rgb);
+    //         }
+    //         checkCudaError(cudaMalloc(&d_tmp_rgb, total_output_size), "Failed to allocate memory for RGB conversion");
+    //         tmp_rgb_allocated_size = total_output_size;
+    //     }
+    //     convert_uint8_img_to_float_img(
+    //         input_data,
+    //         d_tmp_rgb,
+    //         input_shape.N,
+    //         input_shape.H,
+    //         input_shape.W,
+    //         input_shape.C
+    //     );
+    //
+    //     TensorShape input_shape_float = {
+    //         input_shape.N,
+    //         3, // RGB channels
+    //         input_shape.H,
+    //         input_shape.W
+    //     };
+    //
+    //     // Hack:
+    //     TensorShape hackinputshape = {
+    //         1,
+    //         3, // RGB channels
+    //         input_shape.H,
+    //         input_shape.W
+    //     };
+    //     TensorShape hackdepthshape = {
+    //         1,
+    //         depth_shape.C,
+    //         depth_shape.H,
+    //         depth_shape.W
+    //     };
+    //     TensorShape hackoutputshape = {
+    //         1,
+    //         output_shape.C,
+    //         output_shape.H,
+    //         output_shape.W
+    //     };
+    //
+    //     // return runInference(
+    //     //     reinterpret_cast<const float*>(d_tmp_rgb),
+    //     //     depth_data,
+    //     //     output_data,
+    //     //     input_shape_float,
+    //     //     depth_shape,
+    //     //     output_shape
+    //     // );
+    //     return runInference(
+    //         reinterpret_cast<const float*>(d_tmp_rgb),
+    //         depth_data,
+    //         output_data,
+    //         hackinputshape,
+    //         hackdepthshape,
+    //         hackoutputshape
+    //     );
+    // } catch (const std::exception& e) {
+    //     LogMessage("ONNXModel::runInference: Error during uint8 to float conversion: {}", e.what());
+    //     return false;
+    // }
 
-        // Hack:
-        TensorShape hackinputshape = {
-            1,
-            3, // RGB channels
-            input_shape.H,
-            input_shape.W
-        };
-        TensorShape hackdepthshape = {
-            1,
-            depth_shape.C,
-            depth_shape.H,
-            depth_shape.W
-        };
-        TensorShape hackoutputshape = {
-            1,
-            output_shape.C,
-            output_shape.H,
-            output_shape.W
-        };
-
-        // return runInference(
-        //     reinterpret_cast<const float*>(d_tmp_rgb),
-        //     depth_data,
-        //     output_data,
-        //     input_shape_float,
-        //     depth_shape,
-        //     output_shape
-        // );
-        return runInference(
-            reinterpret_cast<const float*>(d_tmp_rgb),
-            depth_data,
-            output_data,
-            hackinputshape,
-            hackdepthshape,
-            hackoutputshape
-        );
-    } catch (const std::exception& e) {
-        LogMessage("ONNXModel::runInference: Error during uint8 to float conversion: {}", e.what());
-        return false;
-    }
+    LogMessage("ONNXModel::runInference with uint8 input is not implemented yet!");
+    throw std::runtime_error("Not implemented yet!");
 
     return true;
 }

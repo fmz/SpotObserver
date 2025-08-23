@@ -64,7 +64,31 @@ bool ToggleDumping(const std::string& dump_path) {
     return true;
 }
 
-void DumpRGBImageFromCuda(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
+static void _dump_RGB_image(
+    const std::vector<uint8_t>& hwc_image,
+    int32_t width,
+    int32_t height,
+    int32_t channels,
+    const std::string& subdir,
+    int32_t dump_id
+) {
+    // Generate filename
+    std::string subdir_path = m_dump_path + "/" + subdir;
+    if (!create_directory_if_not_exists(subdir_path)) {
+        LogMessage("_dump_RGB_image: Failed to create directory: {}", subdir_path);
+        return;
+    }
+    std::string file_path = m_dump_path + "/" + subdir + "/rgb_" + std::to_string(dump_id) + ".png";
+
+    // Write image to file
+    const int stride_in_bytes = width * channels;
+    if (!stbi_write_png(file_path.c_str(), width, height, channels, hwc_image.data(), stride_in_bytes)) {
+        LogMessage("Failed to write RGB image to: {}", file_path);
+    }
+}
+
+
+void DumpRGBImageFromCudaHWC(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
     if (!m_dumps_enabled) {
         return;
     }
@@ -84,12 +108,6 @@ void DumpRGBImageFromCuda(const float* image, int32_t width, int32_t height, con
 
     std::vector<uint8_t> h_image_u8(num_pixels * 3);
 
-    // Convert float [0,1] to uint8 [0,255], and convert the format to HWC instead of CHW
-    // for (size_t i = 0; i < num_pixels; ++i) {
-    //     h_image_u8[i * 3 + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i])) * 255.0f);
-    //     h_image_u8[i * 3 + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + num_pixels])) * 255.0f);
-    //     h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + 2 * num_pixels])) * 255.0f);
-    // }
     // Convert float [0,1] to uint8 [0,255]
     for (size_t i = 0; i < num_pixels; ++i) {
         h_image_u8[i * 3 + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i * 3 + 0])) * 255.0f);
@@ -97,36 +115,54 @@ void DumpRGBImageFromCuda(const float* image, int32_t width, int32_t height, con
         h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i * 3 + 2])) * 255.0f);
     }
 
-    // std::vector<float> h_image_hwc(num_pixels * 3);
-
-    // // Convert float [0,1] to uint8 [0,255], and convert the format to HWC instead of CHW
-    // for (size_t i = 0; i < num_pixels; ++i) {
-    //     h_image_hwc[i * 3 + 0] = h_image[i];
-    //     h_image_hwc[i * 3 + 1] = h_image[i + num_pixels];
-    //     h_image_hwc[i * 3 + 2] = h_image[i + 2 * num_pixels];
-    // }
-
-    // Generate filename
-    std::string file_path = m_dump_path + "/" + subdir + "/rgb_" + std::to_string(dump_id) + ".png";
-
-    // Write image to file
-    const int channels = 3;
-    const int stride_in_bytes = width * channels;
-    if (!stbi_write_png(file_path.c_str(), width, height, channels, h_image_u8.data(), stride_in_bytes)) {
-        LogMessage("Failed to write RGB image to: {}", file_path);
-    }       
-    // if (!stbi_write_hdr(file_path.c_str(), width, height, channels, h_image_hwc.data())) {
-    //     LogMessage("Failed to write RGB image to: {}", file_path);
-    // }   
+   return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id);
 }
 
-void DumpRGBImageFromCuda(const uint8_t* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
+void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
     if (!m_dumps_enabled) {
         return;
     }
 
     const size_t num_pixels = width * height;
-    const size_t byte_size = num_pixels * 3;
+    const size_t float_size = num_pixels * 3 * sizeof(float);
+
+    // Allocate host memory for float image
+    std::vector<float> h_image(num_pixels * 3);
+
+    // Copy image from device to host
+    cudaError_t err = cudaMemcpy(h_image.data(), image, float_size, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        LogMessage("Failed to copy RGB image from device to host: {}", cudaGetErrorString(err));
+        return;
+    }
+
+    std::vector<uint8_t> h_image_u8(num_pixels * 3);
+
+    // Convert float [0,1] to uint8 [0,255], and convert the format to HWC instead of CHW
+    for (size_t i = 0; i < num_pixels; ++i) {
+        h_image_u8[i * 3 + 0] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i])) * 255.0f);
+        h_image_u8[i * 3 + 1] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + num_pixels])) * 255.0f);
+        h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + 2 * num_pixels])) * 255.0f);
+    }
+
+    return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id);
+}
+
+void DumpRGBImageFromCuda(
+    const uint8_t* image,
+    int32_t width,
+    int32_t height,
+    int32_t num_channels,
+    const std::string& subdir,
+    int32_t dump_id
+) {
+    if (!m_dumps_enabled) {
+        return;
+    }
+
+    const size_t num_pixels = width * height;
+    const size_t num_elements = num_pixels * num_channels;
+    const size_t byte_size = num_elements;
 
     // Allocate host memory
     std::vector<uint8_t> h_image(byte_size);
@@ -137,31 +173,8 @@ void DumpRGBImageFromCuda(const uint8_t* image, int32_t width, int32_t height, c
         LogMessage("Failed to copy RGB image from device to host: {}", cudaGetErrorString(err));
         return;
     }
+    return _dump_RGB_image(h_image, width, height, num_channels, subdir, dump_id);
 
-    std::vector<uint8_t> h_image_u8(num_pixels * 3);
-
-    uint8_t min = 255;
-    uint8_t max = 0;
-    uint64_t sum = 0;
-    // Find min and max pixel values for normalization
-    for (size_t i = 0; i < num_pixels * 3; ++i) {
-        if (h_image[i] < min) min = h_image[i];
-        if (h_image[i] > max) max = h_image[i];
-        h_image_u8[i] = h_image[i]; // Copy to output vector
-        sum += h_image[i];
-    }
-
-    LogMessage("min pixel value = {}, max pixel value = {}, average pixel_value = {}", min, max, sum / (num_pixels * 3));
-
-    // Generate filename
-    std::string file_path = m_dump_path + "/" + subdir + "/rgb_" + std::to_string(dump_id) + ".png";
-
-    // Write image to file
-    const int channels = 3;
-    const int stride_in_bytes = width * channels;
-    if (!stbi_write_png(file_path.c_str(), width, height, channels, h_image_u8.data(), stride_in_bytes)) {
-        LogMessage("Failed to write RGB image to: {}", file_path);
-    }
 }
 
 void DumpDepthImageFromCuda(const float* depth, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
@@ -205,6 +218,11 @@ void DumpDepthImageFromCuda(const float* depth, int32_t width, int32_t height, c
     }
 
     // Generate filename
+    std::string subdir_path = m_dump_path + "/" + subdir;
+    if (!create_directory_if_not_exists(subdir_path)) {
+        LogMessage("Failed to create directory: {}", subdir_path);
+        return;
+    }
     std::string file_path = m_dump_path + "/" + subdir + "/depth_" + std::to_string(dump_id) + ".png";
 
     // Write image to file
@@ -215,55 +233,55 @@ void DumpDepthImageFromCuda(const float* depth, int32_t width, int32_t height, c
     }
 }
 
-void DumpDepthImageFromCuda(const uint16_t* depth, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
-    if (!m_dumps_enabled) {
-        return;
-    }
-
-    const size_t num_pixels = width * height;
-    const size_t byte_size = num_pixels * sizeof(uint16_t);
-
-    // Allocate host memory for float depth image
-    std::vector<uint16_t> h_depth(num_pixels);
-
-    // Copy depth image from device to host
-    cudaError_t err = cudaMemcpy(h_depth.data(), depth, byte_size, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        LogMessage("Failed to copy depth image from device to host: {}", cudaGetErrorString(err));
-        return;
-    }
-
-    // Find min and max depth values for normalization
-    uint16_t min_val = h_depth[0];
-    uint16_t max_val = h_depth[0];
-    for (size_t i = 1; i < num_pixels; ++i) {
-        if (h_depth[i] < min_val) min_val = h_depth[i];
-        if (h_depth[i] > max_val) max_val = h_depth[i];
-    }
-
-    // Allocate host memory for 8-bit grayscale image
-    std::vector<uint8_t> h_depth_u8(num_pixels);
-    uint16_t range = max_val - min_val;
-
-    // Normalize and convert to uint8
-    if (range > 0) {
-        for (size_t i = 0; i < num_pixels; ++i) {
-            h_depth_u8[i] = static_cast<uint8_t>(((h_depth[i] - min_val) / range) * 255.0f);
-        }
-    } else {
-        // If range is zero, the image is constant. Set to mid-gray.
-        std::fill(h_depth_u8.begin(), h_depth_u8.end(), 128);
-    }
-
-    // Generate filename
-    std::string file_path = m_dump_path + "/" + subdir + "/depth_" + std::to_string(dump_id) + ".png";
-
-    // Write image to file
-    const int channels = 1; // Grayscale
-    const int stride_in_bytes = width * channels;
-    if (!stbi_write_png(file_path.c_str(), width, height, channels, h_depth_u8.data(), stride_in_bytes)) {
-        LogMessage("Failed to write depth image to: {}", file_path);
-    }
-}
+// void DumpDepthImageFromCuda(const uint16_t* depth, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
+//     if (!m_dumps_enabled) {
+//         return;
+//     }
+//
+//     const size_t num_pixels = width * height;
+//     const size_t byte_size = num_pixels * sizeof(uint16_t);
+//
+//     // Allocate host memory for float depth image
+//     std::vector<uint16_t> h_depth(num_pixels);
+//
+//     // Copy depth image from device to host
+//     cudaError_t err = cudaMemcpy(h_depth.data(), depth, byte_size, cudaMemcpyDeviceToHost);
+//     if (err != cudaSuccess) {
+//         LogMessage("Failed to copy depth image from device to host: {}", cudaGetErrorString(err));
+//         return;
+//     }
+//
+//     // Find min and max depth values for normalization
+//     uint16_t min_val = h_depth[0];
+//     uint16_t max_val = h_depth[0];
+//     for (size_t i = 1; i < num_pixels; ++i) {
+//         if (h_depth[i] < min_val) min_val = h_depth[i];
+//         if (h_depth[i] > max_val) max_val = h_depth[i];
+//     }
+//
+//     // Allocate host memory for 8-bit grayscale image
+//     std::vector<uint8_t> h_depth_u8(num_pixels);
+//     uint16_t range = max_val - min_val;
+//
+//     // Normalize and convert to uint8
+//     if (range > 0) {
+//         for (size_t i = 0; i < num_pixels; ++i) {
+//             h_depth_u8[i] = static_cast<uint8_t>(((h_depth[i] - min_val) / range) * 255.0f);
+//         }
+//     } else {
+//         // If range is zero, the image is constant. Set to mid-gray.
+//         std::fill(h_depth_u8.begin(), h_depth_u8.end(), 128);
+//     }
+//
+//     // Generate filename
+//     std::string file_path = m_dump_path + "/" + subdir + "/depth_" + std::to_string(dump_id) + ".png";
+//
+//     // Write image to file
+//     const int channels = 1; // Grayscale
+//     const int stride_in_bytes = width * channels;
+//     if (!stbi_write_png(file_path.c_str(), width, height, channels, h_depth_u8.data(), stride_in_bytes)) {
+//         LogMessage("Failed to write depth image to: {}", file_path);
+//     }
+// }
 
 } // namespace STb
