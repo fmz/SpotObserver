@@ -32,6 +32,9 @@ private:
     // Circular buffer data. CUDA memory
     uint8_t* rgb_data_{nullptr};
     float*   depth_data_{nullptr};
+    float*   cached_depth_{nullptr};
+
+    bool first_run_{true};
 
     const size_t max_size_; // Maximum size of the queue
 

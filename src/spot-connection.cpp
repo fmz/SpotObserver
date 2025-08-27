@@ -6,6 +6,7 @@
 #include "logger.h"
 #include "utils.h"
 #include "dumper.h"
+#include "cuda_kernels.cuh"
 
 #include <opencv2/opencv.hpp>
 
@@ -111,10 +112,12 @@ bool ReaderWriterCBuf::initialize(
 
     // Allocate CUDA memory for circular buffer
     size_t total_size_rgb   = max_size_ * n_elems_per_rgb * n_images_per_response_ * sizeof(uint8_t);
-    size_t total_size_depth = max_size_ * n_elems_per_depth * n_images_per_response_ * sizeof(float);
+    size_t size_depth_per_response = n_elems_per_depth * n_images_per_response_ * sizeof(float);
+    size_t total_size_depth = max_size_ * size_depth_per_response;
 
     checkCudaError(cudaMalloc(&rgb_data_, total_size_rgb), "cudaMalloc for RGB data");
     checkCudaError(cudaMalloc(&depth_data_, total_size_depth), "cudaMalloc for Depth data");
+    checkCudaError(cudaMalloc(&cached_depth_, size_depth_per_response), "cudaMalloc for Cached Depth data");
 
     LogMessage("Allocated {} bytes for RGB data and {} bytes for Depth data in ReaderWriterCBuf"
                 "({} bytes per RGB, {} bytes per Depth, {} images per response, max size {})",
@@ -154,6 +157,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     int write_idx = write_idx_.load(std::memory_order_relaxed);
     uint8_t* rgb_write_ptr = rgb_data_   + write_idx * n_elems_per_rgb_   * n_images_per_response_;
     float* depth_write_ptr = depth_data_ + write_idx * n_elems_per_depth_ * n_images_per_response_;
+    float* depth_cache_ptr = cached_depth_;
 
     int32_t n_rgbs_written = 0;
     int32_t n_depths_written = 0;
@@ -179,7 +183,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             case SpotCamera::FRONTLEFT:
             case SpotCamera::FRONTRIGHT:
                 // Mirror image
-                //cv::flip(cv_img, cv_img, 0); // Flip horizontally
+                //cv::flip(cv_img, cv_img, 0); // Flip vertically
                 break;
             }
 
@@ -213,8 +217,10 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U16:
         {
             cv::Mat cv_img = convert_image_to_cv_mat(img, response.source().depth_scale());
+            int depth_width = cv_img.cols;
+            int depth_height = cv_img.rows;
 
-            size_t depth_size = cv_img.cols * cv_img.rows;
+            size_t depth_size = depth_width * depth_height;
             if (depth_size != n_elems_per_depth_) {
                 LogMessage("Depth size mismatch: expected {}, got {}", n_elems_per_depth_, depth_size);
                 throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
@@ -232,16 +238,32 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 ),
                 "cudaMemcpyAsync"
             );
+            DumpDepthImageFromCuda(
+                depth_write_ptr,
+                cv_img.cols,
+                cv_img.rows,
+                "pre-depth-cache",
+                n_depths_written + write_idx * n_images_per_response_
+            );
 
-            // DumpDepthImageFromCuda(
-            //     depth_write_ptr,
-            //     cv_img.cols,
-            //     cv_img.rows,
-            //     "depth",
-            //     n_depths_written + write_idx * n_images_per_response_
-            // );
+            checkCudaError(update_depth_cache(
+                depth_write_ptr,          // Input/output: current frame depth (gaps will be filled in-place)
+                depth_cache_ptr,          // Input/output: running average buffer
+                first_run_,
+                depth_width,
+                depth_height
+            ), "update_depth_cache");
+
+            DumpDepthImageFromCuda(
+                depth_write_ptr,
+                cv_img.cols,
+                cv_img.rows,
+                "post-depth-cache",
+                n_depths_written + write_idx * n_images_per_response_
+            );
 
             depth_write_ptr += n_elems_per_depth_;
+            depth_cache_ptr += n_elems_per_depth_;
             n_depths_written++;
         }
         break;
@@ -263,6 +285,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
     write_idx = (write_idx + 1) % max_size_;
     write_idx_.store(write_idx, std::memory_order_release);
+    first_run_ = false;
 }
 
 /**

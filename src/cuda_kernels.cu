@@ -1228,4 +1228,66 @@ void convert_uint8_img_to_float_img(
     checkCudaError(cudaGetLastError(), "Failed to launch convert_uint8_to_float_3ch kernel");
 }
 
+// CUDA kernel for maintaining running average of depth values
+// new_depth: current frame depth values
+// avg_depth: running average depth buffer (input/output)
+// first_run: whether this is the first frame (if true, avg_depth is initialized)
+// width, height: image dimensions
+// alpha: learning rate for exponential moving average (0 < alpha <= 1)
+//        alpha = 1 means replace completely, alpha = 0.1 means slow update
+__global__ void update_depth_cache_kernel(
+    float* __restrict__ new_depth,
+    float* __restrict__ cached_depth,
+    bool first_run,
+    int width,
+    int height,
+    float min_valid_depth,
+    float max_valid_depth
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= width || y >= height) return;
+    
+    int idx = y * width + x;
+    float new_val = new_depth[idx];
+    float old_val = cached_depth[idx];
+    
+    // Check if new depth value is valid
+    bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
+    bool old_valid = (old_val >= min_valid_depth && old_val <= max_valid_depth);
+    
+    if (new_valid || first_run) {
+        cached_depth[idx] = new_val;
+    }
+    
+    // Update the new_depth buffer in-place to have gaps filled
+    if (!new_valid && old_valid) {
+        new_depth[idx] = old_val;
+    }
+}
+
+// Host function wrapper for depth cache update
+cudaError_t update_depth_cache(
+    float* new_depth,          // Input/output: current frame depth (gaps will be filled in-place)
+    float* cached_depth,          // Input/output: running average buffer
+    bool first_run,            // Whether this is the first frame (if true, avg_depth is initialized)
+    int width,
+    int height,
+    float min_valid_depth,     // Minimum valid depth threshold, default 0.01
+    float max_valid_depth      // Maximum valid depth threshold, default 100.0
+) {
+    dim3 block(32, 8);
+    dim3 grid((width + block.x - 1) / block.x,
+              (height + block.y - 1) / block.y);
+              
+    update_depth_cache_kernel<<<grid, block>>>(
+        new_depth, cached_depth, first_run,
+        width, height,
+        min_valid_depth, max_valid_depth
+    );
+    
+    return cudaGetLastError();
+}
+
 }

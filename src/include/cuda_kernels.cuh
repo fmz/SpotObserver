@@ -47,5 +47,15 @@ void convert_uint8_img_to_float_img(
 
 void loadImageToCudaFloatRGB(const std::string& path, int& outW, int& outH, float* d_image);
 
+// Running average depth maintenance
+cudaError_t update_depth_cache(
+    float* new_depth,          // Input/output: current frame depth (gaps will be filled in-place)
+    float* avg_depth,          // Input/output: running average buffer
+    bool first_run,
+    int width,
+    int height,
+    float min_valid_depth = 0.01f,  // Minimum valid depth threshold
+    float max_valid_depth = 100.0f  // Maximum valid depth threshold
+);
 
 }
