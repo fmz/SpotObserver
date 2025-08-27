@@ -530,7 +530,7 @@ static __global__ void update_valid_mask_kernel(
 size_t depth_preprocessor_get_workspace_size(int width, int height) {
     // Calculate size needed for depth preprocessing
     size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-    return pixel_count * (sizeof(float) + sizeof(uint8_t) * 4); // depth + update mask + valid mask
+    return pixel_count * (sizeof(float) + sizeof(uint8_t) * 2); // depth + update mask + valid mask
 }
 
 // Main preprocessing function
@@ -795,7 +795,8 @@ size_t depth_preprocessor2_get_workspace_size(int width, int height) {
 
 // In-place fill of invalid pixels (< threshold) with the nearest valid pixel value.
 cudaError_t preprocess_depth_image2(
-    float* depth_image,
+    float* depth_image_in,
+    float* depth_image_out,
     int width,
     int height,
     int downscale_factor,
@@ -818,7 +819,7 @@ cudaError_t preprocess_depth_image2(
     cudaError_t err = cudaSuccess;
 
     // Copy original depth to output buffer (preserve valid pixels)
-    err = cudaMemcpyAsync(d_out, depth_image, N * sizeof(float), cudaMemcpyDeviceToDevice);
+    err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice);
     if (err != cudaSuccess) return err;
 
     { // kernel launch scope – prevents goto from bypassing initializations
@@ -827,7 +828,7 @@ cudaError_t preprocess_depth_image2(
                   (H + block.y - 1) / block.y);
 
         // Initialize seeds from valid pixels
-        init_seeds_kernel<<<grid, block>>>(depth_image, seeds_a, W, H, threshold);
+        init_seeds_kernel<<<grid, block>>>(depth_image_in, seeds_a, W, H, threshold);
         err = cudaGetLastError();
         if (err != cudaSuccess)  return err;
 
@@ -858,7 +859,7 @@ cudaError_t preprocess_depth_image2(
 
         // Finalize: copy nearest valid pixel values into invalid locations
         const int2_* final_seeds = ping ? seeds_a : seeds_b;
-        finalize_fill_kernel<<<grid, block>>>(final_seeds, depth_image, d_out, W, H, threshold);
+        finalize_fill_kernel<<<grid, block>>>(final_seeds, depth_image_in, d_out, W, H, threshold);
         err = cudaGetLastError();
         if (err != cudaSuccess) return err;
     }
@@ -877,7 +878,7 @@ cudaError_t preprocess_depth_image2(
             dim3 block(tile_size, tile_size);
             dim3 grid((width / downscale_factor + tile_size - 1) / tile_size,
                       (height / downscale_factor + tile_size - 1) / tile_size);
-            kernel_func<<<grid, block>>>(d_out, depth_image, width, height);
+            kernel_func<<<grid, block>>>(d_out, depth_image_out, width, height);
         };
 
         // Launch appropriate kernel based on scale factor
@@ -912,10 +913,10 @@ cudaError_t preprocess_depth_image2(
             dim3 block(TILE_SIZE, TILE_SIZE);
             dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
                       (height + TILE_SIZE - 1) / TILE_SIZE);
-            rotateDepth_fast_kernel<Rotation::CW_90><<<grid, block>>>(d_out, depth_image, width, height);
+            rotateDepth_fast_kernel<Rotation::CW_90><<<grid, block>>>(d_out, depth_image_out, width, height);
             err = cudaGetLastError();
         } else {
-            err = cudaMemcpyAsync(depth_image, d_out, N * sizeof(float), cudaMemcpyDeviceToDevice);
+            err = cudaMemcpyAsync(depth_image_out, d_out, N * sizeof(float), cudaMemcpyDeviceToDevice);
         }
     }
 
@@ -1233,12 +1234,60 @@ void convert_uint8_img_to_float_img(
 // avg_depth: running average depth buffer (input/output)
 // first_run: whether this is the first frame (if true, avg_depth is initialized)
 // width, height: image dimensions
-// alpha: learning rate for exponential moving average (0 < alpha <= 1)
-//        alpha = 1 means replace completely, alpha = 0.1 means slow update
-__global__ void update_depth_cache_kernel(
+__global__ void prefill_depth_from_cache(
     float* __restrict__ new_depth,
+    float* __restrict__ output_depth,
     float* __restrict__ cached_depth,
-    bool first_run,
+    int width,
+    int height,
+    float min_valid_depth,
+    float max_valid_depth
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    float new_val = new_depth[idx];
+    float old_val = cached_depth[idx];
+
+    // Check if new depth value is valid
+    bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
+    // Update the new_depth buffer in-place to have gaps filled
+    output_depth[idx] = new_valid ? old_val : new_val;
+}
+cudaError_t prefill_invalid_depth(
+    float* d_depth_data,
+    float* d_depth_out,
+    float* d_depth_cache,
+    int width,
+    int height,
+    float min_valid_depth,
+    float max_valid_depth
+) {
+    dim3 block(32, 8);
+    dim3 grid((width + block.x - 1) / block.x,
+              (height + block.y - 1) / block.y);
+
+    prefill_depth_from_cache<<<grid, block>>>(
+        d_depth_data, d_depth_out, d_depth_cache,
+        width, height,
+        min_valid_depth, max_valid_depth
+    );
+
+    return cudaGetLastError();
+}
+
+// CUDA kernel for maintaining running average of depth values
+// new_depth: current frame depth values
+// avg_depth: running average depth buffer (input/output)
+// width, height: image dimensions
+
+__global__ void update_depth_cache_kernel(
+    const float* __restrict__ generated_depth,
+    const float* __restrict__ sparse_depth,
+    float* __restrict__ cached_depth,
     int width,
     int height,
     float min_valid_depth,
@@ -1250,28 +1299,28 @@ __global__ void update_depth_cache_kernel(
     if (x >= width || y >= height) return;
     
     int idx = y * width + x;
-    float new_val = new_depth[idx];
-    float old_val = cached_depth[idx];
+    float generated_val = generated_depth[idx];
+    float new_val       = sparse_depth[idx];
+    float old_val       = cached_depth[idx];
     
     // Check if new depth value is valid
     bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
     bool old_valid = (old_val >= min_valid_depth && old_val <= max_valid_depth);
     
-    if (new_valid || first_run) {
+    if (new_valid) {
         cached_depth[idx] = new_val;
-    }
-    
-    // Update the new_depth buffer in-place to have gaps filled
-    if (!new_valid && old_valid) {
-        new_depth[idx] = old_val;
+    } else if (old_valid) {
+        cached_depth[idx] = old_val * 0.5f + generated_val * 0.5f;
+    } else {
+        cached_depth[idx] = generated_val;
     }
 }
 
 // Host function wrapper for depth cache update
 cudaError_t update_depth_cache(
-    float* new_depth,          // Input/output: current frame depth (gaps will be filled in-place)
-    float* cached_depth,          // Input/output: running average buffer
-    bool first_run,            // Whether this is the first frame (if true, avg_depth is initialized)
+    const float* generated_depth,
+    const float* sparse_depth,
+    float* cached_depth,
     int width,
     int height,
     float min_valid_depth,     // Minimum valid depth threshold, default 0.01
@@ -1282,7 +1331,7 @@ cudaError_t update_depth_cache(
               (height + block.y - 1) / block.y);
               
     update_depth_cache_kernel<<<grid, block>>>(
-        new_depth, cached_depth, first_run,
+        generated_depth, sparse_depth, cached_depth,
         width, height,
         min_valid_depth, max_valid_depth
     );

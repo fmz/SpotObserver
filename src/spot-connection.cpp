@@ -246,13 +246,12 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 n_depths_written + write_idx * n_images_per_response_
             );
 
-            checkCudaError(update_depth_cache(
-                depth_write_ptr,          // Input/output: current frame depth (gaps will be filled in-place)
-                depth_cache_ptr,          // Input/output: running average buffer
-                first_run_,
-                depth_width,
-                depth_height
-            ), "update_depth_cache");
+            // checkCudaError(update_depth_cache(
+            //     depth_write_ptr,          // Input/output: current frame depth (gaps will be filled in-place)
+            //     depth_cache_ptr,          // Input/output: running average buffer
+            //     depth_width,
+            //     depth_height
+            // ), "update_depth_cache");
 
             DumpDepthImageFromCuda(
                 depth_write_ptr,

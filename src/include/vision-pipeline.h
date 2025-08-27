@@ -22,13 +22,16 @@ namespace SOb {
 class VisionPipeline {
 private:
     struct CudaWorkspace {
-        float*   d_depth_data_{nullptr};
         float*   d_rgb_float_data_{nullptr};
+        float*   d_depth_data_{nullptr};
+        float*   d_preprocessed_depth_data_{nullptr};
+        float*   d_depth_cached_{nullptr};
         uint8_t* d_depth_preprocessor_workspace_{nullptr};
     };
 
     MLModel& model_;
     const SpotConnection& spot_connection_;
+    bool first_run_{true};
     
     // Threading
     std::unique_ptr<std::jthread> pipeline_thread_;

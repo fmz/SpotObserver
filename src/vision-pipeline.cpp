@@ -99,6 +99,8 @@ bool VisionPipeline::allocateCudaBuffers() {
 
     size_t depth_size = depth_shape_.N * depth_shape_.C * depth_shape_.H * depth_shape_.W * sizeof(float);
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data");
+    checkCudaError(cudaMalloc(&cuda_ws_.d_preprocessed_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data preprocessed");
+    checkCudaError(cudaMalloc(&cuda_ws_.d_depth_cached_, depth_size), "cudaMalloc for vision pipeline input depth cached");
 
     size_t depth_workspace_size = depth_preprocessor2_get_workspace_size(depth_shape_.W, depth_shape_.H);
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_preprocessor_workspace_, depth_workspace_size), "cudaMalloc for vision pipeline depth preprocessor workspace");
@@ -135,9 +137,17 @@ void VisionPipeline::deallocateCudaBuffers() {
         cudaFree(cuda_ws_.d_depth_data_);
         cuda_ws_.d_depth_data_ = nullptr;
     }
+    if (cuda_ws_.d_preprocessed_depth_data_) {
+        cudaFree(cuda_ws_.d_preprocessed_depth_data_);
+        cuda_ws_.d_preprocessed_depth_data_ = nullptr;
+    }
     if (cuda_ws_.d_depth_preprocessor_workspace_) {
         cudaFree(cuda_ws_.d_depth_preprocessor_workspace_);
         cuda_ws_.d_depth_preprocessor_workspace_ = nullptr;
+    }
+    if (cuda_ws_.d_depth_cached_) {
+        cudaFree(cuda_ws_.d_depth_cached_);
+        cuda_ws_.d_depth_cached_ = nullptr;
     }
     if (d_output_buffer_) {
         cudaFree(d_output_buffer_);
@@ -206,21 +216,45 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             for (size_t i = 0; i < num_images_per_iter; i++) {
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
+                float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
+                float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
 
-
                 int32_t depth_scale_factor = 4;
-                checkCudaError(preprocess_depth_image2(
-                    cur_depth_input_ptr,
-                    depth_shape_.W,
-                    depth_shape_.H,
-                    depth_scale_factor,
-                    cuda_ws_.d_depth_preprocessor_workspace_,
-                    do_rotate_90_cw
-                ), "preprocess_depth_image");
+                if (!first_run_) {
+                    checkCudaError(prefill_invalid_depth(
+                        cur_depth_input_ptr,
+                        cur_preprocessed_depth_ptr,
+                        depth_cache_ptr,
+                        depth_shape_.W,
+                        depth_shape_.H
+                    ), "prefill_invalid_depth");
+
+                    checkCudaError(preprocess_depth_image2(
+                        cur_preprocessed_depth_ptr,
+                        cur_preprocessed_depth_ptr,
+                        depth_shape_.W,
+                        depth_shape_.H,
+                        depth_scale_factor,
+                        cuda_ws_.d_depth_preprocessor_workspace_,
+                        do_rotate_90_cw
+                    ), "preprocess_depth_image");
+
+                } else {
+                    checkCudaError(preprocess_depth_image2(
+                        cur_depth_input_ptr,
+                        cur_preprocessed_depth_ptr,
+                        depth_shape_.W,
+                        depth_shape_.H,
+                        depth_scale_factor,
+                        cuda_ws_.d_depth_preprocessor_workspace_,
+                        do_rotate_90_cw
+                    ), "preprocess_depth_image");
+
+                }
 
 
                 TensorShape input_shape_float = input_shape_;
@@ -258,7 +292,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
                 bool inference_success = model_.runInference(
                     cur_rgb_input_ptr,
-                    cur_depth_input_ptr,
+                    cur_preprocessed_depth_ptr,
                     cur_depth_output_ptr,
                     input_shape_float,
                     depth_shape_single,
@@ -281,6 +315,13 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     do_rotate_90_cw
                 ), "postprocess_depth_image");
 
+                checkCudaError(update_depth_cache(
+                    cur_depth_output_ptr,
+                    cur_preprocessed_depth_ptr,
+                    depth_cache_ptr,
+                    output_shape_single.W,
+                    output_shape_single.H
+                ), "update_depth_cache");
                 LogMessage("Done postprocessing depth image");
 
                 DumpRGBImageFromCudaCHW(

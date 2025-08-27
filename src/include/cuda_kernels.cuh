@@ -20,7 +20,8 @@ cudaError_t preprocess_depth_image(
 
 size_t depth_preprocessor2_get_workspace_size(int width, int height);
 cudaError_t preprocess_depth_image2(
-    float* depth_image,
+    float* depth_image_in,
+    float* depth_image_out,
     int width,
     int height,
     int downscale_factor,
@@ -48,10 +49,19 @@ void convert_uint8_img_to_float_img(
 void loadImageToCudaFloatRGB(const std::string& path, int& outW, int& outH, float* d_image);
 
 // Running average depth maintenance
+cudaError_t prefill_invalid_depth(
+    float* d_depth_data,
+    float* d_depth_out,
+    float* d_depth_cache,
+    int width,
+    int height,
+    float min_valid_depth = 0.01f,  // Minimum valid depth threshold
+    float max_valid_depth = 100.0f  // Maximum valid depth threshold
+);
 cudaError_t update_depth_cache(
-    float* new_depth,          // Input/output: current frame depth (gaps will be filled in-place)
-    float* avg_depth,          // Input/output: running average buffer
-    bool first_run,
+    const float* generated_depth,
+    const float* sparse_depth,
+    float* cached_depthd,          // Input/output: running average buffer
     int width,
     int height,
     float min_valid_depth = 0.01f,  // Minimum valid depth threshold
