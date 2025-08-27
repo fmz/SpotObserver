@@ -19,11 +19,185 @@
 
 namespace SOb {
 
-// Persistent memory
-static float* d_temp_depth = nullptr;
-static uint8_t* d_update_mask = nullptr;
-static uint8_t* d_valid_mask_persistent = nullptr;
-static size_t allocated_size = 0;
+// Rotation angles enum for template parameter
+enum class Rotation : int {
+    NONE = 0,
+    CW_90 = 90,
+    CW_180 = 180,
+    CW_270 = 270
+};
+
+// Helper to compute rotated dimensions
+template<Rotation R>
+__device__ __forceinline__ void getRotatedCoords(
+    int x, int y, int width, int height,
+    int& out_x, int& out_y, int& out_w, int& out_h)
+{
+    if constexpr (R == Rotation::CW_90) {
+        out_x = height - 1 - y;
+        out_y = x;
+        out_w = height;
+        out_h = width;
+    } else if constexpr (R == Rotation::CW_180) {
+        out_x = width - 1 - x;
+        out_y = height - 1 - y;
+        out_w = width;
+        out_h = height;
+    } else if constexpr (R == Rotation::CW_270) {
+        out_x = y;
+        out_y = width - 1 - x;
+        out_w = height;
+        out_h = width;
+    } else { // NONE
+        out_x = x;
+        out_y = y;
+        out_w = width;
+        out_h = height;
+    }
+}
+
+template<Rotation R>
+__global__ void rotateDepth_fast_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    int width, int height)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int dst_x, dst_y, dst_w, dst_h;
+    getRotatedCoords<R>(x, y, width, height, dst_x, dst_y, dst_w, dst_h);
+
+    dst[dst_y * dst_w + dst_x] = src[y * width + x];
+}
+
+
+// Optimized downscaling kernel using shared memory, separable convolutions, and vectorized accesses
+template <int TILE_SZ, int SCALE_FACTOR, bool ROTATE_90_CW = false>
+__global__ void downscale_optimized_kernel(
+    const float* input_image,
+    float* output_image,
+    int original_width,
+    int original_height
+) {
+    // Shared memory: input tile + intermediate results for separable convolution
+    __shared__ float s_input[TILE_SZ * SCALE_FACTOR][TILE_SZ * SCALE_FACTOR + 1];
+    __shared__ float s_horizontal[TILE_SZ][TILE_SZ * SCALE_FACTOR + 1];
+
+    // Handle rotation: if rotating 90 CW, output dimensions are swapped
+    const int new_width = ROTATE_90_CW ? (original_height / SCALE_FACTOR) : (original_width / SCALE_FACTOR);
+    const int new_height = ROTATE_90_CW ? (original_width / SCALE_FACTOR) : (original_height / SCALE_FACTOR);
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int out_x = blockIdx.x * TILE_SZ + tx;
+    const int out_y = blockIdx.y * TILE_SZ + ty;
+
+    const int in_tile_x = blockIdx.x * TILE_SZ * SCALE_FACTOR;
+    const int in_tile_y = blockIdx.y * TILE_SZ * SCALE_FACTOR;
+
+    // Phase 1: Cooperative loading of input data with vectorized accesses
+    for (int load_y = ty; load_y < TILE_SZ * SCALE_FACTOR; load_y += blockDim.y) {
+        int src_y = in_tile_y + load_y;
+        if (src_y < original_height) {
+            // Try vectorized loads when possible
+            for (int load_x = tx * 4; load_x < TILE_SZ * SCALE_FACTOR; load_x += blockDim.x * 4) {
+                int src_x = in_tile_x + load_x;
+
+                // Vectorized load of 4 floats if aligned and within bounds
+                if ((src_x & 3) == 0 && src_x + 3 < original_width) {
+                    int src_idx = src_y * original_width + src_x;
+                    float4 data = *reinterpret_cast<const float4*>(&input_image[src_idx]);
+
+                    if (load_x < TILE_SZ * SCALE_FACTOR) s_input[load_y][load_x] = data.x;
+                    if (load_x + 1 < TILE_SZ * SCALE_FACTOR) s_input[load_y][load_x + 1] = data.y;
+                    if (load_x + 2 < TILE_SZ * SCALE_FACTOR) s_input[load_y][load_x + 2] = data.z;
+                    if (load_x + 3 < TILE_SZ * SCALE_FACTOR) s_input[load_y][load_x + 3] = data.w;
+                } else {
+                    // Scalar fallback
+                    for (int i = 0; i < 4 && load_x + i < TILE_SZ * SCALE_FACTOR; i++) {
+                        int curr_x = src_x + i;
+                        if (curr_x < original_width) {
+                            s_input[load_y][load_x + i] = input_image[src_y * original_width + curr_x];
+                        } else {
+                            s_input[load_y][load_x + i] = 0.0f;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fill with zeros for out-of-bounds
+            for (int load_x = tx; load_x < TILE_SZ * SCALE_FACTOR; load_x += blockDim.x) {
+                s_input[load_y][load_x] = 0.0f;
+            }
+        }
+    }
+
+    __syncthreads();
+
+    // Phase 2: Separable convolution - horizontal pass
+    if (ty < TILE_SZ && tx < TILE_SZ) {
+        for (int row = 0; row < SCALE_FACTOR; row++) {
+            int src_row = ty * SCALE_FACTOR + row;
+            float sum = 0.0f;
+            int valid_count = 0;
+
+            // Horizontal averaging with unrolled loop for common scale factors
+            #pragma unroll
+            for (int k = 0; k < SCALE_FACTOR; k++) {
+                float val = s_input[src_row][tx * SCALE_FACTOR + k];
+                if (val > 0.01f) {
+                    sum += val;
+                    valid_count++;
+                }
+            }
+
+            s_horizontal[ty][tx * SCALE_FACTOR + row] = (valid_count > 0) ? sum / valid_count : 0.0f;
+        }
+    }
+
+    __syncthreads();
+
+    // Phase 3: Separable convolution - vertical pass and write back
+    if (ty < TILE_SZ && tx < TILE_SZ) {
+        // First check if we're within the input processing bounds
+        const int input_downscaled_width = original_width / SCALE_FACTOR;
+        const int input_downscaled_height = original_height / SCALE_FACTOR;
+
+        if (out_x < input_downscaled_width && out_y < input_downscaled_height) {
+            float sum = 0.0f;
+            int valid_count = 0;
+
+            // Vertical averaging
+            #pragma unroll
+            for (int k = 0; k < SCALE_FACTOR; k++) {
+                float val = s_horizontal[ty][tx * SCALE_FACTOR + k];
+                if (val > 0.01f) {
+                    sum += val;
+                    valid_count++;
+                }
+            }
+
+            // Write result to output buffer with optional rotation
+            int final_x, final_y;
+            if constexpr (ROTATE_90_CW) {
+                final_x = new_width - 1 - out_y;
+                final_y = out_x;
+            } else {
+                final_x = out_x;
+                final_y = out_y;
+            }
+
+            // Comprehensive bounds checking for output write
+            if (final_x >= 0 && final_x < new_width && final_y >= 0 && final_y < new_height) {
+                int out_idx = final_y * new_width + final_x;
+                output_image[out_idx] = (valid_count > 0) ? sum / valid_count : 0.0f;
+            }
+        }
+    }
+}
 
 // Fast reciprocal approximation
 __device__ __forceinline__ float fast_rcp(float x) {
@@ -353,11 +527,20 @@ static __global__ void update_valid_mask_kernel(
     }
 }
 
+size_t depth_preprocessor_get_workspace_size(int width, int height) {
+    // Calculate size needed for depth preprocessing
+    size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    return pixel_count * (sizeof(float) + sizeof(uint8_t) * 4); // depth + update mask + valid mask
+}
+
 // Main preprocessing function
 cudaError_t preprocess_depth_image(
     float* depth_image,
     int width,
-    int height
+    int height,
+    int downscale_factor,
+    uint8_t* workspace,
+    bool rotate_90_cw
 ) {
     const float min_depth = 0.01f;
     const float max_depth = 100.0f;
@@ -366,24 +549,18 @@ cudaError_t preprocess_depth_image(
 
     // Allocate temporary buffers if needed
     size_t image_size = width * height;
-    if (!d_temp_depth || allocated_size < image_size) {
-        if (d_temp_depth) {
-            cudaFree(d_temp_depth);
-            cudaFree(d_update_mask);
-            cudaFree(d_valid_mask_persistent);
-        }
-        cudaMalloc(&d_temp_depth, image_size * sizeof(float));
-        cudaMalloc(&d_update_mask, image_size * sizeof(uint8_t));
-        cudaMalloc(&d_valid_mask_persistent, image_size * sizeof(uint8_t));
-        allocated_size = image_size;
-    }
+
+    // Carve up workspace
+    float*   d_temp_depth  = reinterpret_cast<float*>(workspace);
+    uint8_t* d_update_mask = reinterpret_cast<uint8_t*>(workspace + image_size * sizeof(float));
+    uint8_t* d_valid_mask  = reinterpret_cast<uint8_t*>(workspace + image_size * (sizeof(float) + sizeof(uint8_t)));
 
     // Extract valid mask
     int blockSize = 256;
     int numBlocks = (image_size + blockSize - 1) / blockSize;
 
     extract_valid_mask_kernel<<<numBlocks, blockSize>>>(
-        depth_image, d_valid_mask_persistent, image_size, min_depth, max_depth
+        depth_image, d_valid_mask, image_size, min_depth, max_depth
     );
 
     // Pass 1: Small radius search using shared memory
@@ -392,16 +569,13 @@ cudaError_t preprocess_depth_image(
                (height + BLOCK_DIM_Y - 1) / BLOCK_DIM_Y);
 
     fill_depth_pass1_shared<<<grid1, block1>>>(
-        depth_image, d_valid_mask_persistent, d_temp_depth, d_update_mask,
+        depth_image, d_valid_mask, d_temp_depth, d_update_mask,
         width, height, small_radius
     );
 
-    // Copy results back
-    cudaMemcpyAsync(depth_image, d_temp_depth, image_size * sizeof(float), cudaMemcpyDeviceToDevice);
-
     // Update valid mask based on what was filled
     update_valid_mask_kernel<<<numBlocks, blockSize>>>(
-        d_valid_mask_persistent, d_update_mask, image_size
+        d_valid_mask, d_update_mask, image_size
     );
 
     // Pass 2: Large radius hierarchical search
@@ -410,33 +584,102 @@ cudaError_t preprocess_depth_image(
                (height + block2.y - 1) / block2.y);
 
     fill_depth_pass2_hierarchical<<<grid2, block2>>>(
-        depth_image, d_valid_mask_persistent, d_update_mask,
+        d_temp_depth, d_valid_mask, d_update_mask,
         width, height, large_radius
     );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return err;
+
+    // Apply downscaling
+    if (downscale_factor > 1) {
+        // Verify it's a power of 2
+        if ((downscale_factor & (downscale_factor - 1)) != 0) {
+            return cudaErrorInvalidValue; // Must be power of 2
+        }
+
+        // Helper lambda for launching downscale kernels
+        auto launch_downscale_kernel = [&](int tile_size, auto kernel_func) {
+            dim3 block(tile_size, tile_size);
+            dim3 grid((width / downscale_factor + tile_size - 1) / tile_size,
+                      (height / downscale_factor + tile_size - 1) / tile_size);
+            kernel_func<<<grid, block>>>(d_temp_depth, depth_image, width, height);
+        };
+
+        // Launch appropriate kernel based on scale factor
+        switch (downscale_factor) {
+            case 2:
+                if (rotate_90_cw) launch_downscale_kernel(16, downscale_optimized_kernel<16, 2, true>);
+                else launch_downscale_kernel(16, downscale_optimized_kernel<16, 2, false>);
+                break;
+            case 4:
+                if (rotate_90_cw) launch_downscale_kernel(16, downscale_optimized_kernel<16, 4, true>);
+                else launch_downscale_kernel(16, downscale_optimized_kernel<16, 4, false>);
+                break;
+            case 8:
+                if (rotate_90_cw) launch_downscale_kernel(8, downscale_optimized_kernel<8, 8, true>);
+                else launch_downscale_kernel(8, downscale_optimized_kernel<8, 8, false>);
+                break;
+            case 16:
+                if (rotate_90_cw) launch_downscale_kernel(4, downscale_optimized_kernel<4, 16, true>);
+                else launch_downscale_kernel(4, downscale_optimized_kernel<4, 16, false>);
+                break;
+            case 32:
+                if (rotate_90_cw) launch_downscale_kernel(2, downscale_optimized_kernel<2, 32, true>);
+                else launch_downscale_kernel(2, downscale_optimized_kernel<2, 32, false>);
+                break;
+            default:
+                return cudaErrorInvalidValue; // Unsupported scale factor
+        }
+
+        err = cudaGetLastError();
+    } else {
+        if (rotate_90_cw) {
+            dim3 block(TILE_SIZE, TILE_SIZE);
+            dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
+                      (height + TILE_SIZE - 1) / TILE_SIZE);
+            rotateDepth_fast_kernel<Rotation::CW_90><<<grid, block>>>(d_temp_depth, depth_image, width, height);
+            err = cudaGetLastError();
+        } else {
+            err = cudaMemcpyAsync(depth_image, d_temp_depth, image_size * sizeof(float), cudaMemcpyDeviceToDevice);
+        }
+    }
 
     return cudaGetLastError();
 }
 
-// Cleanup function
-void cleanup_depth_preprocessor() {
-    if (d_temp_depth) {
-        cudaFree(d_temp_depth);
-        d_temp_depth = nullptr;
+cudaError_t postprocess_depth_image(
+    float* depth_image,
+    int width,
+    int height,
+    float* workspace,
+    bool rotate_90_ccw
+) {
+    if (!rotate_90_ccw) {
+        return cudaSuccess; // No rotation needed
     }
-    if (d_update_mask) {
-        cudaFree(d_update_mask);
-        d_update_mask = nullptr;
-    }
-    if (d_valid_mask_persistent) {
-        cudaFree(d_valid_mask_persistent);
-        d_valid_mask_persistent = nullptr;
-    }
-    allocated_size = 0;
+    
+    // Apply 270 CW rotation
+    dim3 block(TILE_SIZE, TILE_SIZE);
+    dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
+              (height + TILE_SIZE - 1) / TILE_SIZE);
+    
+    // Rotate to workspace buffer
+    rotateDepth_fast_kernel<Rotation::CW_270><<<grid, block>>>(
+        depth_image, workspace, width, height);
+    
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return err;
+    
+    // Copy rotated result back
+    size_t image_size = width * height * sizeof(float);
+    err = cudaMemcpyAsync(depth_image, workspace, image_size, cudaMemcpyDeviceToDevice);
+    if (err != cudaSuccess) return err;
+
+    err = cudaGetLastError();
+    
+    return err;
 }
-
-
-
-
 
 struct int2_ { int x, y; };
 
@@ -544,7 +787,7 @@ static inline int highest_power_of_two_le(int v) {
     return p;
 }
 
-size_t depth_preprocessor_get_workspace_size(int width, int height) {
+size_t depth_preprocessor2_get_workspace_size(int width, int height) {
     // Calculate size needed for depth preprocessing
     size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
     return pixel_count * (sizeof(float) + sizeof(int2_) * 2); // depth + update mask + valid mask
@@ -555,10 +798,13 @@ cudaError_t preprocess_depth_image2(
     float* depth_image,
     int width,
     int height,
-    uint8_t* workspace
+    int downscale_factor,
+    uint8_t* workspace,
+    bool rotate_90_cw
 ) {
     const float threshold = 0.01f;
     const int extra_refine_passes = 2;
+
 
     const int W = width;
     const int H = height;
@@ -617,17 +863,64 @@ cudaError_t preprocess_depth_image2(
         if (err != cudaSuccess) return err;
     }
 
-    // Write back in place
-    err = cudaMemcpyAsync(depth_image, d_out, N * sizeof(float), cudaMemcpyDeviceToDevice);
+    // Apply downscaling
+    if (downscale_factor > 1) {
+        // Verify it's a power of 2
+        if ((downscale_factor & (downscale_factor - 1)) != 0) {
+            return cudaErrorInvalidValue; // Must be power of 2
+        }
+        
+        err = cudaSuccess;
+        
+        // Helper lambda for launching downscale kernels
+        auto launch_downscale_kernel = [&](int tile_size, auto kernel_func) {
+            dim3 block(tile_size, tile_size);
+            dim3 grid((width / downscale_factor + tile_size - 1) / tile_size,
+                      (height / downscale_factor + tile_size - 1) / tile_size);
+            kernel_func<<<grid, block>>>(d_out, depth_image, width, height);
+        };
+
+        // Launch appropriate kernel based on scale factor
+        switch (downscale_factor) {
+            case 2:
+                if (rotate_90_cw) launch_downscale_kernel(16, downscale_optimized_kernel<16, 2, true>);
+                else launch_downscale_kernel(16, downscale_optimized_kernel<16, 2, false>);
+                break;
+            case 4:
+                if (rotate_90_cw) launch_downscale_kernel(16, downscale_optimized_kernel<16, 4, true>);
+                else launch_downscale_kernel(16, downscale_optimized_kernel<16, 4, false>);
+                break;
+            case 8:
+                if (rotate_90_cw) launch_downscale_kernel(8, downscale_optimized_kernel<8, 8, true>);
+                else launch_downscale_kernel(8, downscale_optimized_kernel<8, 8, false>);
+                break;
+            case 16:
+                if (rotate_90_cw) launch_downscale_kernel(4, downscale_optimized_kernel<4, 16, true>);
+                else launch_downscale_kernel(4, downscale_optimized_kernel<4, 16, false>);
+                break;
+            case 32:
+                if (rotate_90_cw) launch_downscale_kernel(2, downscale_optimized_kernel<2, 32, true>);
+                else launch_downscale_kernel(2, downscale_optimized_kernel<2, 32, false>);
+                break;
+            default:
+                return cudaErrorInvalidValue; // Unsupported scale factor
+        }
+
+        err = cudaGetLastError();
+    } else {
+        if (rotate_90_cw) {
+            dim3 block(TILE_SIZE, TILE_SIZE);
+            dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
+                      (height + TILE_SIZE - 1) / TILE_SIZE);
+            rotateDepth_fast_kernel<Rotation::CW_90><<<grid, block>>>(d_out, depth_image, width, height);
+            err = cudaGetLastError();
+        } else {
+            err = cudaMemcpyAsync(depth_image, d_out, N * sizeof(float), cudaMemcpyDeviceToDevice);
+        }
+    }
 
     return err;
 }
-
-
-
-
-
-
 
 // Dummy kernel for testing purposes (keeping original)
 __global__ void setOutputToOnes(float* input, float* output, int size) {
@@ -649,42 +942,6 @@ cudaError_t testCudaKernel(float* d_input, float* d_output, int size) {
     return cudaGetLastError();
 }
 
-// Rotation angles enum for template parameter
-enum class Rotation : int {
-    NONE = 0,
-    CW_90 = 90,
-    CW_180 = 180,
-    CW_270 = 270
-};
-
-// Helper to compute rotated dimensions
-template<Rotation R>
-__device__ __forceinline__ void getRotatedCoords(
-    int x, int y, int width, int height,
-    int& out_x, int& out_y, int& out_w, int& out_h)
-{
-    if constexpr (R == Rotation::CW_90) {
-        out_x = y;
-        out_y = width - 1 - x;
-        out_w = height;
-        out_h = width;
-    } else if constexpr (R == Rotation::CW_180) {
-        out_x = width - 1 - x;
-        out_y = height - 1 - y;
-        out_w = width;
-        out_h = height;
-    } else if constexpr (R == Rotation::CW_270) {
-        out_x = height - 1 - y;
-        out_y = x;
-        out_w = height;
-        out_h = width;
-    } else { // NONE
-        out_x = x;
-        out_y = y;
-        out_w = width;
-        out_h = height;
-    }
-}
 
 // Optimized RGB rotation kernel using shared memory
 template<Rotation R>
@@ -865,28 +1122,12 @@ __global__ void rotateRGB_fast_kernel(
     *reinterpret_cast<uchar3*>(&dst[dst_idx]) = pixel;
 }
 
-template<Rotation R>
-__global__ void rotateDepth_fast_kernel(
-    const float* __restrict__ src,
-    float* __restrict__ dst,
-    int width, int height)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x >= width || y >= height) return;
-
-    int dst_x, dst_y, dst_w, dst_h;
-    getRotatedCoords<R>(x, y, width, height, dst_x, dst_y, dst_w, dst_h);
-
-    dst[dst_y * dst_w + dst_x] = src[y * width + x];
-}
-
 // Needed for preprocessing RGB images from 4-channel HWC uint8_t to 3-channel float CHW
-// Batched NHWC uint8 (RGB or RGBA) -> NCHW float (RGB) conversion
+// Batched NHWC uint8 (RGB or RGBA) -> NCHW float (RGB) conversion with optional 90-deg CW rotation
+template<bool ROTATE_90_CW = false>
 __global__ void nhwc_to_nchw_rgb_float_kernel(
     const uint8_t* __restrict__ in,   // [N,H,W,C] C=3 or 4
-    float* __restrict__ out,          // [N,3,H,W]
+    float* __restrict__ out,          // [N,3,H,W] or [N,3,W,H] if rotated
     int N, int H, int W, int C,
     float scale
 ) {
@@ -895,6 +1136,11 @@ __global__ void nhwc_to_nchw_rgb_float_kernel(
     const int pixels_per_img = H * W;
     const int total_pixels = N * pixels_per_img;
 
+    // Calculate output dimensions based on rotation
+    const int out_H = ROTATE_90_CW ? W : H;
+    const int out_W = ROTATE_90_CW ? H : W;
+    const int out_pixels_per_img = out_H * out_W;
+
     // Fast path only when C==4 and input pointer 4-byte aligned
     if (C == 4 && ((reinterpret_cast<uintptr_t>(in) & 0x3) == 0)) {
         const uchar4* __restrict__ vin = reinterpret_cast<const uchar4*>(in);
@@ -902,10 +1148,24 @@ __global__ void nhwc_to_nchw_rgb_float_kernel(
             uchar4 px = vin[i];
             int n = i / pixels_per_img;
             int p = i - n * pixels_per_img;          // pixel index within image
-            int base = n * 3 * pixels_per_img + p;   // position of R plane element
-            out[base]                    = px.x * scale;
-            out[base +     pixels_per_img] = px.y * scale;
-            out[base + 2 * pixels_per_img] = px.z * scale;
+            int y = p / W;
+            int x = p - y * W;
+            
+            // Calculate output coordinates with optional rotation
+            int out_x, out_y;
+            if constexpr (ROTATE_90_CW) {
+                out_x = H - 1 - y;
+                out_y = x;
+            } else {
+                out_x = x;
+                out_y = y;
+            }
+            
+            int out_p = out_y * out_W + out_x;
+            int base = n * 3 * out_pixels_per_img + out_p;   // position of R plane element
+            out[base]                        = px.x * scale;
+            out[base +     out_pixels_per_img] = px.y * scale;
+            out[base + 2 * out_pixels_per_img] = px.z * scale;
         }
     } else {
         // Generic path (C==3 or C==4, handles unaligned)
@@ -915,23 +1175,36 @@ __global__ void nhwc_to_nchw_rgb_float_kernel(
             int y = p / W;
             int x = p - y * W;
             int in_offset = ((n * H + y) * W + x) * C;
-            int base = n * 3 * pixels_per_img + p;
+            
+            // Calculate output coordinates with optional rotation
+            int out_x, out_y;
+            if constexpr (ROTATE_90_CW) {
+                out_x = H - 1 - y;
+                out_y = x;
+            } else {
+                out_x = x;
+                out_y = y;
+            }
+            
+            int out_p = out_y * out_W + out_x;
+            int base = n * 3 * out_pixels_per_img + out_p;
             uint8_t r = in[in_offset + 0];
             uint8_t g = in[in_offset + 1];
             uint8_t b = in[in_offset + 2];
-            out[base]                      = r * scale;
-            out[base +     pixels_per_img] = g * scale;
-            out[base + 2 * pixels_per_img] = b * scale;
+            out[base]                        = r * scale;
+            out[base +     out_pixels_per_img] = g * scale;
+            out[base + 2 * out_pixels_per_img] = b * scale;
         }
     }
 }
 
 void convert_uint8_img_to_float_img(
     const uint8_t* d_in,  // [N,H,W,4] or [N,H,W,3]
-    float* d_out,         // [N,3,H,W]
+    float* d_out,         // [N,3,H,W] or [N,3,W,H] if rotated
     int N, int H, int W, int C,
     bool normalize,
-    cudaStream_t stream
+    cudaStream_t stream,
+    bool rotate_90_cw
 ) {
     if (C != 3 && C != 4) {
         throw std::invalid_argument("Input channel count must be 3 or 4");
@@ -943,8 +1216,14 @@ void convert_uint8_img_to_float_img(
     int blocks = (total_pixels + threads - 1) / threads;
 
     float scale = normalize ? (1.0f / 255.0f) : 1.0f;
-    nhwc_to_nchw_rgb_float_kernel<<<blocks, threads, 0, stream>>>(
-        d_in, d_out, N, H, W, C, scale);
+    
+    if (rotate_90_cw) {
+        nhwc_to_nchw_rgb_float_kernel<true><<<blocks, threads, 0, stream>>>(
+            d_in, d_out, N, H, W, C, scale);
+    } else {
+        nhwc_to_nchw_rgb_float_kernel<false><<<blocks, threads, 0, stream>>>(
+            d_in, d_out, N, H, W, C, scale);
+    }
 
     checkCudaError(cudaGetLastError(), "Failed to launch convert_uint8_to_float_3ch kernel");
 }

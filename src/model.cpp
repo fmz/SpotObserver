@@ -116,6 +116,14 @@ bool TorchModel::runInference(
     TensorShape  output_shape
 ) {
     try {
+        static int32_t dump_id = 300;
+        DumpRGBImageFromCudaCHW(
+            input_data,
+            input_shape.W,
+            input_shape.H,
+            "rgb",
+            dump_id
+        );
         // Create input tensor from a device pointer
         torch::Tensor input_tensor = torch::from_blob(
             const_cast<float*>(input_data), 
@@ -181,7 +189,22 @@ bool TorchModel::runInference(
             LogMessage("Model output tensor is not contiguous");
             throw std::runtime_error("Model output tensor is not contiguous.");
         }
+        DumpDepthImageFromCuda(
+            depth_data,
+            depth_shape.W,
+            depth_shape.H,
+            "preprocessed-depth",
+            dump_id
+        );
 
+        DumpDepthImageFromCuda(
+            output_data,
+            output_shape.W,
+            output_shape.H,
+            "output",
+            dump_id
+        );
+        dump_id++;
         //LogMessage("Inference completed successfully.");
     } catch (const std::exception& e) {
         LogMessage("Error during inference: " + std::string(e.what()));
@@ -679,16 +702,16 @@ bool ONNXModel::runInference(
 
         DumpDepthImageFromCuda(
             depth_data,
-            input_shape.W,
-            input_shape.H,
+            depth_shape.W,
+            depth_shape.H,
             "preprocessed-depth",
             dump_id
         );
 
         DumpDepthImageFromCuda(
             output_data,
-            input_shape.W,
-            input_shape.H,
+            output_shape.W,
+            output_shape.H,
             "output",
             dump_id
         );

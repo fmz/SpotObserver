@@ -430,7 +430,7 @@ bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, SObModel mod
             input_shape,
             depth_shape,
             output_shape,
-            25
+            5
         );
         
         // Start the pipeline

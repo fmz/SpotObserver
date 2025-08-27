@@ -100,7 +100,7 @@ bool VisionPipeline::allocateCudaBuffers() {
     size_t depth_size = depth_shape_.N * depth_shape_.C * depth_shape_.H * depth_shape_.W * sizeof(float);
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data");
 
-    size_t depth_workspace_size = depth_preprocessor_get_workspace_size(depth_shape_.W, depth_shape_.H);
+    size_t depth_workspace_size = depth_preprocessor2_get_workspace_size(depth_shape_.W, depth_shape_.H);
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_preprocessor_workspace_, depth_workspace_size), "cudaMalloc for vision pipeline depth preprocessor workspace");
 
     size_t output_size = max_size_ * output_shape_.N * output_shape_.C * output_shape_.H * output_shape_.W * sizeof(float);
@@ -156,6 +156,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
     size_t num_output_elements = output_shape_.N * output_shape_.C * output_shape_.H * output_shape_.W;
 
     while (!stop_token.stop_requested() && running_.load()) {
+        auto start_time = std::chrono::high_resolution_clock::now();
         try {
             // Get current images from SpotConnection
             if (!spot_connection_.getCurrentImages(
@@ -187,13 +188,17 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 ), "cudaMemcpyAsync for RGB images");
 
             // Convert RGB images to float and normalize to [0,1]
+            bool do_rotate_90_cw = false;
             convert_uint8_img_to_float_img(
                 d_rgb_ptr,
                 cuda_ws_.d_rgb_float_data_,
                 input_shape_.N,
                 input_shape_.H,
                 input_shape_.W,
-                input_shape_.C
+                input_shape_.C,
+                true,
+                0,
+                do_rotate_90_cw
             );
 
             // Preprocess depth images
@@ -203,22 +208,54 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
 
+                LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
+                           i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
+
+
+                int32_t depth_scale_factor = 4;
                 checkCudaError(preprocess_depth_image2(
                     cur_depth_input_ptr,
                     depth_shape_.W,
                     depth_shape_.H,
-                    cuda_ws_.d_depth_preprocessor_workspace_
+                    depth_scale_factor,
+                    cuda_ws_.d_depth_preprocessor_workspace_,
+                    do_rotate_90_cw
                 ), "preprocess_depth_image");
+
 
                 TensorShape input_shape_float = input_shape_;
                 input_shape_float.N = 1; // Process one image at a time
                 input_shape_float.C = 3; // float RGB has 3 channels
+                if (do_rotate_90_cw) {
+                    input_shape_float.H = input_shape_.W;
+                    input_shape_float.W = input_shape_.H;
+                }
+
                 TensorShape depth_shape_single = depth_shape_;
                 depth_shape_single.N = 1; // Process one image at a time
+                if (do_rotate_90_cw) {
+                    depth_shape_single.H = depth_shape_.W / depth_scale_factor;
+                    depth_shape_single.W = depth_shape_.H / depth_scale_factor;
+                } else {
+                    depth_shape_single.H = depth_shape_.H / depth_scale_factor;
+                    depth_shape_single.W = depth_shape_.W / depth_scale_factor;
+                }
+
                 TensorShape output_shape_single = output_shape_;
                 output_shape_single.N = 1; // Process one image at a time
+                if (do_rotate_90_cw) {
+                    output_shape_single.H = output_shape_.W;
+                    output_shape_single.W = output_shape_.H;
+                } else {
+                    output_shape_single.H = output_shape_.H;
+                    output_shape_single.W = output_shape_.W;
+                }
 
                 // Run inference
+                // Need to synchronize here to ensure that the depth preprocessor is done before we run inference
+                // TODO: Make this more efficient by using CUDA events and/or streams
+                checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
+
                 bool inference_success = model_.runInference(
                     cur_rgb_input_ptr,
                     cur_depth_input_ptr,
@@ -232,6 +269,19 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     LogMessage("Inference failed");
                     continue;
                 }
+
+                // Postprocess output: rotate back if input was rotated
+                LogMessage("About to postprocess depth image");
+                float* temp_output_ptr = reinterpret_cast<float*>(cuda_ws_.d_depth_preprocessor_workspace_);
+                checkCudaError(postprocess_depth_image(
+                    cur_depth_output_ptr,
+                    output_shape_single.W,
+                    output_shape_single.H,
+                    temp_output_ptr,
+                    do_rotate_90_cw
+                ), "postprocess_depth_image");
+
+                LogMessage("Done postprocessing depth image");
 
                 DumpRGBImageFromCudaCHW(
                     cur_rgb_input_ptr,
@@ -270,6 +320,11 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("Exception in pipeline worker: {}", e.what());
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        LogMessage("VisionPipeline iteration time: {} ms", duration.count());
+
     }
     // Cleanup
     delete[] rgb_images;

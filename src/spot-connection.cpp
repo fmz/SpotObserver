@@ -252,6 +252,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         }
     }
 
+    checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize after push");
     // Update write index
     assert(n_rgbs_written == n_depths_written);
     // Update the read index to the write index we just wrote to.
@@ -341,7 +342,7 @@ static std::vector<SpotCamera> convert_bitmask_to_spot_cam_vector(uint32_t bitma
 SpotConnection::SpotConnection()
     : robot_(nullptr)
     , image_client_(nullptr)
-    , image_lifo_(25)
+    , image_lifo_(5)
     , connected_(false)
     , streaming_(false)
 {

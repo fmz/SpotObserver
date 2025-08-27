@@ -112,7 +112,7 @@ int main(int argc, char* argv[]) {
     SOb_SetUnityLogCallback(TestLogCallback);
     SOb_ToggleLogging(true);
 
-    SOb_ToggleDebugDumps("./spot-dump-dx12");
+    //SOb_ToggleDebugDumps("./spot-dump-dx12");
 
     // ---------------------------------------------------------------------------------------
     // 2. Initialize D3D12
@@ -313,7 +313,7 @@ int main(int argc, char* argv[]) {
     auto frame_start = start_time;
 
 
-    while (!should_quit) {
+    for (int32_t iteration = 0; !should_quit && iteration < 10000; iteration++) {
         for (size_t robot = 0; robot < 2; robot++) {
             if (spot_ids[robot] < 0) continue;
 
@@ -363,15 +363,15 @@ int main(int argc, char* argv[]) {
                 cv::Mat depth(actual_height, actual_width, CV_32FC1, depth_data);
 
                 // Convert RGB to BGR for OpenCV display
-                cv::Mat image_bgr;
-                cv::cvtColor(image, image_bgr, cv::COLOR_RGBA2BGR);
+                cv::cvtColor(image, image, cv::COLOR_RGBA2BGR);
+                cv::normalize(depth, depth, 0, 1, cv::NORM_MINMAX);
 
                 // Create window names
                 std::string image_window = "SPOT " + std::to_string(robot) + " RGB" + std::to_string(cam);
                 std::string depth_window = "SPOT " + std::to_string(robot) + " Depth" + std::to_string(cam);
 
                 // Display the images
-                cv::imshow(image_window, image_bgr);
+                cv::imshow(image_window, image);
                 cv::imshow(depth_window, depth);
 
                 // Unmap the readback buffers
