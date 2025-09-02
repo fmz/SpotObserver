@@ -182,6 +182,9 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             uint8_t* d_rgb_ptr = d_rgb_data_ + write_idx_ * num_rgb_elemenets;
             float*   d_depth_output_ptr = d_output_buffer_ + write_idx_ * num_output_elements;
 
+            constexpr int32_t depth_scale_factor = 4;
+            constexpr float   inv_scale_factor = 1.0f / depth_scale_factor;
+
             // Copy inputs to our local locations (in order to ensure synchronization between processed depth and RGB images)
             checkCudaError(cudaMemcpyAsync(
                 d_rgb_ptr,
@@ -212,18 +215,41 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             );
 
             // Preprocess depth images
+            TensorShape input_shape_float = input_shape_;
+            input_shape_float.C = 3; // float RGB has 3 channels
+            if (do_rotate_90_cw) {
+                input_shape_float.H = input_shape_.W;
+                input_shape_float.W = input_shape_.H;
+            }
+
+            TensorShape depth_shape_single = depth_shape_;
+            if (do_rotate_90_cw) {
+                depth_shape_single.H = depth_shape_.W / depth_scale_factor;
+                depth_shape_single.W = depth_shape_.H / depth_scale_factor;
+            } else {
+                depth_shape_single.H = depth_shape_.H / depth_scale_factor;
+                depth_shape_single.W = depth_shape_.W / depth_scale_factor;
+            }
+
+            TensorShape output_shape_single = output_shape_;
+            if (do_rotate_90_cw) {
+                output_shape_single.H = output_shape_.W;
+                output_shape_single.W = output_shape_.H;
+            } else {
+                output_shape_single.H = output_shape_.H;
+                output_shape_single.W = output_shape_.W;
+            }
             LogMessage("num_images_per_iter = {}", num_images_per_iter);
             for (size_t i = 0; i < num_images_per_iter; i++) {
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
-                float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
+                float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape_single.C * depth_shape_single.H * depth_shape_single.W;
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
                 float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
 
-                int32_t depth_scale_factor = 4;
                 if (!first_run_) {
                     checkCudaError(prefill_invalid_depth(
                         cur_depth_input_ptr,
@@ -255,54 +281,43 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     ), "preprocess_depth_image");
 
                 }
+            }
+
+            auto preprocess_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(preprocess_time - start_time);
+            LogMessage("VisionPipeline preprocess time: {} ms", duration.count());
+
+            // Run inference
+            // Need to synchronize here to ensure that the depth preprocessor is done before we run inference
+            // TODO: Make this more efficient by using CUDA events and/or streams
+            checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
+
+            bool inference_success = model_.runInference(
+                cuda_ws_.d_rgb_float_data_,
+                cuda_ws_.d_preprocessed_depth_data_,
+                d_depth_output_ptr,
+                input_shape_float,
+                depth_shape_single,
+                output_shape_single
+            );
+
+            if (!inference_success) {
+                LogMessage("Inference failed");
+                continue;
+            }
+            checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
+            auto inference_time = std::chrono::high_resolution_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
+            LogMessage("VisionPipeline inference time: {} ms", duration.count());
 
 
-                TensorShape input_shape_float = input_shape_;
-                input_shape_float.N = 1; // Process one image at a time
-                input_shape_float.C = 3; // float RGB has 3 channels
-                if (do_rotate_90_cw) {
-                    input_shape_float.H = input_shape_.W;
-                    input_shape_float.W = input_shape_.H;
-                }
 
-                TensorShape depth_shape_single = depth_shape_;
-                depth_shape_single.N = 1; // Process one image at a time
-                if (do_rotate_90_cw) {
-                    depth_shape_single.H = depth_shape_.W / depth_scale_factor;
-                    depth_shape_single.W = depth_shape_.H / depth_scale_factor;
-                } else {
-                    depth_shape_single.H = depth_shape_.H / depth_scale_factor;
-                    depth_shape_single.W = depth_shape_.W / depth_scale_factor;
-                }
-
-                TensorShape output_shape_single = output_shape_;
-                output_shape_single.N = 1; // Process one image at a time
-                if (do_rotate_90_cw) {
-                    output_shape_single.H = output_shape_.W;
-                    output_shape_single.W = output_shape_.H;
-                } else {
-                    output_shape_single.H = output_shape_.H;
-                    output_shape_single.W = output_shape_.W;
-                }
-
-                // Run inference
-                // Need to synchronize here to ensure that the depth preprocessor is done before we run inference
-                // TODO: Make this more efficient by using CUDA events and/or streams
-                checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
-
-                bool inference_success = model_.runInference(
-                    cur_rgb_input_ptr,
-                    cur_preprocessed_depth_ptr,
-                    cur_depth_output_ptr,
-                    input_shape_float,
-                    depth_shape_single,
-                    output_shape_single
-                );
-
-                if (!inference_success) {
-                    LogMessage("Inference failed");
-                    continue;
-                }
+            for (size_t i = 0; i < num_images_per_iter; i++) {
+                float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
+                float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
+                float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
+                float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
+                float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
                 // Postprocess output: rotate back if input was rotated
                 LogMessage("About to postprocess depth image");
@@ -347,6 +362,11 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 );
                 dump_id++;
             }
+
+            checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
+            auto postprocess_time = std::chrono::high_resolution_clock::now();
+            duration = std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_time - inference_time);
+            LogMessage("VisionPipeline postprocess time: {} ms", duration.count());
 
             // Update read index
             read_idx_.store(write_idx_, std::memory_order_release);

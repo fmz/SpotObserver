@@ -625,6 +625,8 @@ bool ONNXModel::runInference(
         dump_id
     );
 
+    auto time_start = std::chrono::high_resolution_clock::now();
+
     try {
         // Create input tensor
         std::vector<int64_t> input_tensor_shape = {
@@ -721,6 +723,9 @@ bool ONNXModel::runInference(
         LogMessage("Error during ONNX inference: {}", e.what());
         return false;
     }
+    auto time_end = std::chrono::high_resolution_clock::now();
+    LogMessage("Total ONNX inference time: {} ms",
+        std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count());
 
     return true;
 }

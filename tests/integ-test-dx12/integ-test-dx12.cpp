@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
     // 3. Connect to Spot robots
     // ---------------------------------------------------------------------------------------
     int32_t spot_ids[2];
-    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT;
+    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT; //| HAND | LEFT | RIGHT | BACK;
     std::vector<SpotCamera> cams = convert_bitmask_to_spot_cam_vector(cam_bitmask);
 
     for (size_t i = 0; i < 2; i++) {
@@ -246,6 +246,7 @@ int main(int argc, char* argv[]) {
     // ---------------------------------------------------------------------------------------
     std::cout << "Registering D3D12 resources with SpotObserver...\n";
 
+    int32_t robots_active = 0;
     for (size_t robot = 0; robot < 2; robot++) {
         if (spot_ids[robot] < 0) continue;
 
@@ -263,6 +264,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Failed to register textures for robot " << robot << " camera " << cam << std::endl;
                 return -1;
             }
+            robots_active++;
         }
     }
 
@@ -307,7 +309,7 @@ int main(int argc, char* argv[]) {
 
     int32_t frame_count = 0;
     bool should_quit = false;
-    bool new_images = false;
+    int32_t n_images_pending = num_cameras * robots_active;
 
     auto start_time = high_resolution_clock::now();
     auto frame_start = start_time;
@@ -328,7 +330,6 @@ int main(int argc, char* argv[]) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-            new_images = true;
             std::cout << "Successfully uploaded image batch for robot " << robot << " at frame " << frame_count << std::endl;
 
             // Read back and display all camera data
@@ -374,6 +375,8 @@ int main(int argc, char* argv[]) {
                 cv::imshow(image_window, image);
                 cv::imshow(depth_window, depth);
 
+                n_images_pending -= 1;
+
                 // Unmap the readback buffers
                 robot_resources[robot][cam].image_texture->Unmap(0, &no_write);
                 robot_resources[robot][cam].depth_texture->Unmap(0, &no_write);
@@ -403,17 +406,19 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (new_images) {
+        if (n_images_pending <= 0) {
+            if (n_images_pending < 0) {
+                std::cerr << "n_images_pending went negative!" << std::endl;
+            }
             auto frame_end = high_resolution_clock::now();
             auto frame_duration = duration_cast<microseconds>(frame_end - frame_start);
 
-            if (frame_count % 10 == 0) {
-                std::cout << std::format("Frame {} processing time: {:.2f} ms\n",
-                    frame_count, double(frame_duration.count()) / 1000.0);
-            }
+            std::cout << std::format("Frame {} processing time: {:.2f} ms\n",
+                frame_count, double(frame_duration.count()) / 1000.0);
+
             frame_start = frame_end;
 
-            new_images = false;
+            n_images_pending = num_cameras * robots_active;
         }
 
         frame_count++;
