@@ -35,10 +35,10 @@ private:
     float*   cached_depth_{nullptr};
 
     bool first_run_{true};
-
     const size_t max_size_; // Maximum size of the queue
 
-    cudaStream_t cuda_stream_;
+    // Owned by SpotConnection
+    cudaStream_t cuda_stream_{nullptr};
 
 public:
     explicit ReaderWriterCBuf(size_t max_size);
@@ -63,6 +63,9 @@ public:
      * Consume image and depth data
      */
     std::pair<uint8_t*, float*> pop(int32_t count) const;
+
+    // Attach a stream created/owned by SpotConnection.
+    inline void attachCudaStream(cudaStream_t stream) { cuda_stream_ = stream; }
 
     friend class SpotConnection;
 };
@@ -89,6 +92,9 @@ private:
     std::vector<SpotCamera> camera_order_;
 
     std::unique_ptr<std::jthread> image_streamer_thread_ = nullptr;
+
+    // One CUDA stream per connection (owned here).
+    cudaStream_t cuda_stream_{nullptr};
 
 private:
     bosdyn::api::GetImageRequest _createImageRequest(
@@ -126,10 +132,8 @@ public:
     uint32_t getCurrentCamMask() const { return current_cam_mask_; }
     int32_t  getCurrentNumCams() const { return current_num_cams_; }
 
-    const cudaStream_t getCudaStream() const {
-        return image_lifo_.cuda_stream_;
-    }
-
+    // Return the connection's CUDA stream.
+    const cudaStream_t getCudaStream() const { return cuda_stream_; }
 };
 
 } // namespace SOb

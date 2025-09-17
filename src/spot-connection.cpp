@@ -69,12 +69,8 @@ ReaderWriterCBuf::ReaderWriterCBuf(size_t max_size)
     , rgb_data_(nullptr)
     , depth_data_(nullptr)
 {
-    checkCudaError(
-        cudaStreamCreate(&cuda_stream_),
-        "cudaStreamCreate for SpotConnection"
-    );
-    LogMessage("Created ReaderWriterCBuf with max size {} and CUDA stream {:#x}",
-               max_size, size_t(cuda_stream_));
+    // Stream is owned by SpotConnection and attached via attachCudaStream().
+    LogMessage("Created ReaderWriterCBuf with max size {}", max_size_);
 }
 
 ReaderWriterCBuf::~ReaderWriterCBuf() {
@@ -86,10 +82,11 @@ ReaderWriterCBuf::~ReaderWriterCBuf() {
         cudaFree(depth_data_);
         depth_data_ = nullptr;
     }
-    if (cuda_stream_) {
-        cudaStreamDestroy(cuda_stream_);
-        cuda_stream_ = nullptr;
+    if (cached_depth_) {
+        cudaFree(cached_depth_);
+        cached_depth_ = nullptr;
     }
+    // Do not destroy cuda_stream_ here; SpotConnection owns it.
     LogMessage("Destroyed ReaderWriterCBuf");
 }
 
@@ -195,9 +192,10 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     rgb_write_ptr,
                     cv_img.data,
                     image_size * sizeof(uint8_t),
-                    cudaMemcpyHostToDevice
+                    cudaMemcpyHostToDevice,
+                    cuda_stream_ /* use per-connection stream */
                 ),
-                "cudaMemcpyAsync"
+                "cudaMemcpyAsync RGB"
             );
 
             // DumpRGBImageFromCuda(
@@ -234,10 +232,14 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     depth_write_ptr,
                     cv_img.data,
                     depth_size * sizeof(float),
-                    cudaMemcpyHostToDevice
+                    cudaMemcpyHostToDevice,
+                    cuda_stream_
                 ),
-                "cudaMemcpyAsync"
+                "cudaMemcpyAsync DEPTH"
             );
+
+            // If dumping requires device->host copies on default stream, this ensures correctness:
+            // checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before debug dump");
             DumpDepthImageFromCuda(
                 depth_write_ptr,
                 cv_img.cols,
@@ -246,12 +248,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 n_depths_written + write_idx * n_images_per_response_
             );
 
-            // checkCudaError(update_depth_cache(
-            //     depth_write_ptr,          // Input/output: current frame depth (gaps will be filled in-place)
-            //     depth_cache_ptr,          // Input/output: running average buffer
-            //     depth_width,
-            //     depth_height
-            // ), "update_depth_cache");
+            // checkCudaError(update_depth_cache(depth_write_ptr, depth_cache_ptr, depth_width, depth_height, cuda_stream_), "update_depth_cache");
 
             DumpDepthImageFromCuda(
                 depth_write_ptr,
@@ -273,15 +270,16 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         }
     }
 
-    checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize after push");
-    // Update write index
+    // Make this batch visible only after the stream's async work completes.
+    checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after push");
+
+    // Update indices/flags
     assert(n_rgbs_written == n_depths_written);
     // Update the read index to the write index we just wrote to.
     read_idx_.store(write_idx, std::memory_order_release);
     new_data_.store(true, std::memory_order_release);
     LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
                write_idx, (write_idx + 1) % max_size_);
-
     write_idx = (write_idx + 1) % max_size_;
     write_idx_.store(write_idx, std::memory_order_release);
     first_run_ = false;
@@ -378,6 +376,12 @@ SpotConnection::SpotConnection()
 
 SpotConnection::~SpotConnection() {
     _joinStreamingThread();
+    // Destroy the per-connection CUDA stream after the thread is stopped.
+    if (cuda_stream_) {
+        checkCudaError(cudaStreamDestroy(cuda_stream_), "cudaStreamDestroy for SpotConnection");
+        cuda_stream_ = nullptr;
+        LogMessage("Destroyed CUDA stream for SpotConnection");
+    }
     // TODO: figure out how to cleanup image_client_
 }
 
@@ -508,6 +512,15 @@ bool SpotConnection::connect(
         LogMessage("SpotConnection::connect: Connected to Spot robot at {}", robot_ip);
 
         connected_ = true;
+
+        // Create one CUDA stream per SpotConnection and attach it to the buffer.
+        checkCudaError(
+            cudaStreamCreate(&cuda_stream_),
+            "cudaStreamCreate for SpotConnection"
+        );
+        image_lifo_.attachCudaStream(cuda_stream_);
+        LogMessage("SpotConnection::connect: Created CUDA stream {:#x} and attached to buffer",
+                   size_t(cuda_stream_));
 
         return true;
 
