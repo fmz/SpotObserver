@@ -264,6 +264,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         cur_preprocessed_depth_ptr,
                         depth_shape_.W,
                         depth_shape_.H,
+                        false,
                         depth_scale_factor,
                         cuda_ws_.d_depth_preprocessor_workspace_,
                         do_rotate_90_cw
@@ -275,6 +276,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         cur_preprocessed_depth_ptr,
                         depth_shape_.W,
                         depth_shape_.H,
+                        true,
                         depth_scale_factor,
                         cuda_ws_.d_depth_preprocessor_workspace_,
                         do_rotate_90_cw

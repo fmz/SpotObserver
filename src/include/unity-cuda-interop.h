@@ -38,5 +38,6 @@ bool registerOutputTextures(
 
 bool uploadNextImageSetToUnity(int32_t robot_id);
 bool uploadNextVisionPipelineImageSetToUnity(int32_t robot_id);
+bool clearOutputTextures(int32_t robot_id);
 
 }

@@ -246,6 +246,45 @@ bool registerOutputTextures(
     return true;
 }
 
+bool clearOutputTextures(int32_t robot_id) {
+    if (robot_id < 0) {
+        LogMessage("Invalid robot ID: {}", robot_id);
+        return false;
+    }
+
+    auto erase_interop_entries = [&](auto& tex_map) {
+        for (auto& tex : tex_map) {
+            if (s_InteropCache.contains(tex)) {
+                DX12InteropCacheEntry& entry = s_InteropCache[tex];
+                if (entry.extMem) {
+                    cudaDestroyExternalMemory(entry.extMem);
+                    entry.extMem = nullptr;
+                }
+                entry.cudaPtr = 0;
+                if (entry.sharedBuf) {
+                    entry.sharedBuf->Release();
+                    entry.sharedBuf = nullptr;
+                }
+                entry.bufSize = 0;
+                s_InteropCache.erase(tex);
+            }
+            if (s_TextureFootprints.contains(tex)) {
+                s_TextureFootprints.erase(tex);
+            }
+        }
+    };
+
+    // Remove and release all interop entries for this robot ID
+    erase_interop_entries(s_OutputRGBTextures[robot_id]);
+    erase_interop_entries(s_OutputDepthTextures[robot_id]);
+
+    s_OutputRGBTextures.erase(robot_id);
+    s_OutputDepthTextures.erase(robot_id);
+
+    LogMessage("Cleared output textures for robot ID {}", robot_id);
+    return true;
+}
+
 // Helper function type for getting images
 typedef bool (*GetImageSetFunc)(int32_t robot_id, int32_t n_images_requested, uint8_t** images, float** depths);
 

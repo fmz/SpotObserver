@@ -60,6 +60,9 @@ bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
 );
 
 UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_ClearUnityReadbackBuffers(int32_t robot_id);
+
+UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, SObModel model);
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id);

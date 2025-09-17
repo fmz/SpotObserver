@@ -9,7 +9,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES native)
 
 set(Protobuf_ROOT "${CMAKE_PREFIX_PATH}")
 set(CMAKE_PREFIX_PATH ${CMAKE_CURRENT_SOURCE_DIR}/extern/libtorch;${CMAKE_PREFIX_PATH})
@@ -31,6 +30,12 @@ set(OpenCV_LIBS opencv_world4110.lib)
 find_package(Protobuf REQUIRED PATHS "${Protobuf_ROOT}" NO_DEFAULT_PATH)
 find_package(gRPC REQUIRED)
 find_package(Threads REQUIRED)
+
+# Support Ampere and Ada architectures - set BEFORE finding Torch
+set(CMAKE_CUDA_ARCHITECTURES 86;89 CACHE STRING "CUDA archs" FORCE)
+#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_86,code=sm_86 --use_fast_math")
+set(TORCH_CUDA_ARCH_LIST "Common")
+message(STATUS "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 
 set(USE_SYSTEM_NVTX ON)
 find_package(Torch REQUIRED)

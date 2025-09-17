@@ -8,15 +8,15 @@ namespace SOb {
 
 cudaError_t setOutputToOnes_launcher(float* d_input, float* d_output, int size);
 
-size_t depth_preprocessor_get_workspace_size(int width, int height);
-cudaError_t preprocess_depth_image(
-    float* depth_image,
-    int width,
-    int height,
-    int downscale_factor,
-    uint8_t* workspace,
-    bool rotate_90_cw = false
-);
+// size_t depth_preprocessor_get_workspace_size(int width, int height);
+// cudaError_t preprocess_depth_image(
+//     float* depth_image,
+//     int width,
+//     int height,
+//     int downscale_factor,
+//     uint8_t* workspace,
+//     bool rotate_90_cw = false
+// );
 
 size_t depth_preprocessor2_get_workspace_size(int width, int height);
 cudaError_t preprocess_depth_image2(
@@ -24,6 +24,7 @@ cudaError_t preprocess_depth_image2(
     float* depth_image_out,
     int width,
     int height,
+    bool do_nearest_neighbor_fill,
     int downscale_factor,
     uint8_t* workspace,
     bool rotate_90_cw = false

@@ -283,6 +283,8 @@ extern "C" {
 UNITY_INTERFACE_EXPORT
 int32_t UNITY_INTERFACE_API SOb_ConnectToSpot(const char* robot_ip, const char* username, const char* password) {
     try {
+        SOb::SetDLLDirectory();
+
         if (!robot_ip || !username || !password) {
             SOb::LogMessage("SOb_ConnectToSpot: Invalid null pointer parameters");
             return -1;
@@ -500,6 +502,22 @@ bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
         return true;
     } catch (const std::exception& e) {
         SOb::LogMessage("SOb_RegisterOutputTextures: Exception while registering output textures for robot ID {}: {}", robot_id, e.what());
+        return false;
+    }
+}
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_ClearUnityReadbackBuffers(int32_t robot_id) {
+    try {
+        bool ret = SOb::clearOutputTextures(robot_id);
+        if (!ret) {
+            SOb::LogMessage("SOb_ClearUnityReadbackBuffers: Failed to clear output textures for robot ID {}", robot_id);
+            return false;
+        }
+        SOb::LogMessage("SOb_ClearUnityReadbackBuffers: Successfully cleared output textures for robot ID {}", robot_id);
+        return true;
+    } catch (const std::exception& e) {
+        SOb::LogMessage("SOb_ClearUnityReadbackBuffers: Exception while clearing output textures for robot ID {}: {}", robot_id, e.what());
         return false;
     }
 }
