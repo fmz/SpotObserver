@@ -185,22 +185,24 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             constexpr int32_t depth_scale_factor = 4;
             constexpr float   inv_scale_factor = 1.0f / depth_scale_factor;
 
-            // Copy inputs to our local locations (in order to ensure synchronization between processed depth and RGB images)
+            // Copy inputs on the per-connection stream
             checkCudaError(cudaMemcpyAsync(
                 d_rgb_ptr,
                 rgb_images[0],
                 num_rgb_elemenets * sizeof(uint8_t),
-                cudaMemcpyDeviceToDevice
-                ), "cudaMemcpyAsync for RGB images");
+                cudaMemcpyDeviceToDevice,
+                cuda_stream_ // NEW
+            ), "cudaMemcpyAsync for RGB images");
 
             checkCudaError(cudaMemcpyAsync(
                 cuda_ws_.d_depth_data_,
                 depth_images[0],
                 num_depth_elements * sizeof(float),
-                cudaMemcpyDeviceToDevice
-                ), "cudaMemcpyAsync for RGB images");
+                cudaMemcpyDeviceToDevice,
+                cuda_stream_ // NEW
+            ), "cudaMemcpyAsync for depth images");
 
-            // Convert RGB images to float and normalize to [0,1]
+            // Convert RGB images to float and normalize to [0,1] on our stream
             bool do_rotate_90_cw = false;
             convert_uint8_img_to_float_img(
                 d_rgb_ptr,
@@ -210,13 +212,13 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 input_shape_.W,
                 input_shape_.C,
                 true,
-                0,
+                cuda_stream_,
                 do_rotate_90_cw
             );
 
             // Preprocess depth images
             TensorShape input_shape_float = input_shape_;
-            input_shape_float.C = 3; // float RGB has 3 channels
+            input_shape_float.C = 3;
             if (do_rotate_90_cw) {
                 input_shape_float.H = input_shape_.W;
                 input_shape_float.W = input_shape_.H;
@@ -240,6 +242,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 output_shape_single.W = output_shape_.W;
             }
             LogMessage("num_images_per_iter = {}", num_images_per_iter);
+
             for (size_t i = 0; i < num_images_per_iter; i++) {
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
@@ -249,26 +252,29 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
-
                 if (!first_run_) {
                     checkCudaError(prefill_invalid_depth(
                         cur_depth_input_ptr,
                         cur_preprocessed_depth_ptr,
                         depth_cache_ptr,
                         depth_shape_.W,
-                        depth_shape_.H
-                    ), "prefill_invalid_depth");
-
-                    checkCudaError(preprocess_depth_image2(
-                        cur_preprocessed_depth_ptr,
-                        cur_preprocessed_depth_ptr,
-                        depth_shape_.W,
                         depth_shape_.H,
-                        false,
-                        depth_scale_factor,
-                        cuda_ws_.d_depth_preprocessor_workspace_,
-                        do_rotate_90_cw
-                    ), "preprocess_depth_image");
+                        0.01f,
+                        100.0f,
+                        cuda_stream_
+                    ), "prefill_invalid_depth");
+                    //
+                    // checkCudaError(preprocess_depth_image2(
+                    //     cur_preprocessed_depth_ptr,
+                    //     cur_preprocessed_depth_ptr,
+                    //     depth_shape_.W,
+                    //     depth_shape_.H,
+                    //     false,
+                    //     depth_scale_factor,
+                    //     cuda_ws_.d_depth_preprocessor_workspace_,
+                    //     do_rotate_90_cw,
+                    //     cuda_stream_ // NEW
+                    // ), "preprocess_depth_image");
 
                 } else {
                     checkCudaError(preprocess_depth_image2(
@@ -279,9 +285,9 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         true,
                         depth_scale_factor,
                         cuda_ws_.d_depth_preprocessor_workspace_,
-                        do_rotate_90_cw
+                        do_rotate_90_cw,
+                        cuda_stream_
                     ), "preprocess_depth_image");
-
                 }
             }
 
@@ -289,10 +295,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(preprocess_time - start_time);
             LogMessage("VisionPipeline preprocess time: {} ms", duration.count());
 
-            // Run inference
-            // Need to synchronize here to ensure that the depth preprocessor is done before we run inference
-            // TODO: Make this more efficient by using CUDA events and/or streams
-            checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
+            // Stream-scoped sync before inference (keeps other connections running)
+            checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize before running inference");
 
             bool inference_success = model_.runInference(
                 cuda_ws_.d_rgb_float_data_,
@@ -307,12 +311,13 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 LogMessage("Inference failed");
                 continue;
             }
-            checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
+
+            // Need to synchronize here to ensure that the depth preprocessor is done before we run inference
+            // TODO: Make sure model_.runInference() uses the same stream
+            checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after inference");
             auto inference_time = std::chrono::high_resolution_clock::now();
             duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
             LogMessage("VisionPipeline inference time: {} ms", duration.count());
-
-
 
             for (size_t i = 0; i < num_images_per_iter; i++) {
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
@@ -322,14 +327,14 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
                 // Postprocess output: rotate back if input was rotated
-                LogMessage("About to postprocess depth image");
                 float* temp_output_ptr = reinterpret_cast<float*>(cuda_ws_.d_depth_preprocessor_workspace_);
                 checkCudaError(postprocess_depth_image(
                     cur_depth_output_ptr,
                     output_shape_single.W,
                     output_shape_single.H,
                     temp_output_ptr,
-                    do_rotate_90_cw
+                    do_rotate_90_cw,
+                    cuda_stream_
                 ), "postprocess_depth_image");
 
                 checkCudaError(update_depth_cache(
@@ -337,9 +342,14 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     cur_preprocessed_depth_ptr,
                     depth_cache_ptr,
                     output_shape_single.W,
-                    output_shape_single.H
+                    output_shape_single.H,
+                    0.01f,
+                    100.0f,
+                    cuda_stream_
                 ), "update_depth_cache");
-                LogMessage("Done postprocessing depth image");
+
+                // Ensure dumps see completed work (dumpers likely use default stream)
+                checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before dumps");
 
                 DumpRGBImageFromCudaCHW(
                     cur_rgb_input_ptr,
@@ -365,16 +375,15 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 dump_id++;
             }
 
-            checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize before running inference");
+            checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after postprocess");
             auto postprocess_time = std::chrono::high_resolution_clock::now();
             duration = std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_time - inference_time);
             LogMessage("VisionPipeline postprocess time: {} ms", duration.count());
 
-            // Update read index
+            // Publish only after stream work completes
             read_idx_.store(write_idx_, std::memory_order_release);
             new_data_.store(true, std::memory_order_release);
 
-            // Update write index (circular)
             LogMessage("VisionPipeline: Updating write index from {} to {}",
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
@@ -387,8 +396,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
         LogMessage("VisionPipeline iteration time: {} ms", duration.count());
-
     }
+
     // Cleanup
     delete[] rgb_images;
     delete[] depth_images;

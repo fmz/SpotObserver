@@ -653,7 +653,8 @@ cudaError_t postprocess_depth_image(
     int width,
     int height,
     float* workspace,
-    bool rotate_90_ccw
+    bool rotate_90_ccw,
+    cudaStream_t stream
 ) {
     if (!rotate_90_ccw) {
         return cudaSuccess; // No rotation needed
@@ -663,9 +664,9 @@ cudaError_t postprocess_depth_image(
     dim3 block(TILE_SIZE, TILE_SIZE);
     dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
               (height + TILE_SIZE - 1) / TILE_SIZE);
-    
+
     // Rotate to workspace buffer
-    rotateDepth_fast_kernel<Rotation::CW_270><<<grid, block>>>(
+    rotateDepth_fast_kernel<Rotation::CW_270><<<grid, block, 0, stream>>>(
         depth_image, workspace, width, height);
     
     cudaError_t err = cudaGetLastError();
@@ -673,11 +674,10 @@ cudaError_t postprocess_depth_image(
     
     // Copy rotated result back
     size_t image_size = width * height * sizeof(float);
-    err = cudaMemcpyAsync(depth_image, workspace, image_size, cudaMemcpyDeviceToDevice);
+    err = cudaMemcpyAsync(depth_image, workspace, image_size, cudaMemcpyDeviceToDevice, stream);
     if (err != cudaSuccess) return err;
 
     err = cudaGetLastError();
-    
     return err;
 }
 
@@ -793,7 +793,7 @@ size_t depth_preprocessor2_get_workspace_size(int width, int height) {
     return pixel_count * (sizeof(float) + sizeof(int2_) * 2); // depth + update mask + valid mask
 }
 
-// In-place fill of invalid pixels (< threshold) with the nearest valid pixel value.
+// In-place fill/downscale on a given stream.
 cudaError_t preprocess_depth_image2(
     float* depth_image_in,
     float* depth_image_out,
@@ -802,11 +802,11 @@ cudaError_t preprocess_depth_image2(
     bool do_neighbor_averaging,
     int downscale_factor,
     uint8_t* workspace,
-    bool rotate_90_cw
+    bool rotate_90_cw,
+    cudaStream_t stream
 ) {
     const float threshold = 0.01f;
     const int extra_refine_passes = 2;
-
 
     const int W = width;
     const int H = height;
@@ -819,8 +819,8 @@ cudaError_t preprocess_depth_image2(
 
     cudaError_t err = cudaSuccess;
 
-    // Copy original depth to output buffer (preserve valid pixels)
-    err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice);
+    // Preserve valid pixels
+    err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
     if (err != cudaSuccess) return err;
 
     if (do_neighbor_averaging) {
@@ -829,7 +829,7 @@ cudaError_t preprocess_depth_image2(
                   (H + block.y - 1) / block.y);
 
         // Initialize seeds from valid pixels
-        init_seeds_kernel<<<grid, block>>>(depth_image_in, seeds_a, W, H, threshold);
+        init_seeds_kernel<<<grid, block, 0, stream>>>(depth_image_in, seeds_a, W, H, threshold);
         err = cudaGetLastError();
         if (err != cudaSuccess)  return err;
 
@@ -841,7 +841,7 @@ cudaError_t preprocess_depth_image2(
         while (step >= 1) {
             const int2_* in_ptr  = ping ? seeds_a : seeds_b;
             int2_*       out_ptr = ping ? seeds_b : seeds_a;
-            jfa_pass_kernel<<<grid, block>>>(in_ptr, out_ptr, W, H, step);
+            jfa_pass_kernel<<<grid, block, 0, stream>>>(in_ptr, out_ptr, W, H, step);
             err = cudaGetLastError();
             if (err != cudaSuccess)  return err;
             ping = !ping;
@@ -852,7 +852,7 @@ cudaError_t preprocess_depth_image2(
         for (int i = 0; i < extra_refine_passes; ++i) {
             const int2_* in_ptr  = ping ? seeds_a : seeds_b;
             int2_*       out_ptr = ping ? seeds_b : seeds_a;
-            jfa_pass_kernel<<<grid, block>>>(in_ptr, out_ptr, W, H, 1);
+            jfa_pass_kernel<<<grid, block, 0, stream>>>(in_ptr, out_ptr, W, H, 1);
             err = cudaGetLastError();
             if (err != cudaSuccess) return err;
             ping = !ping;
@@ -860,52 +860,46 @@ cudaError_t preprocess_depth_image2(
 
         // Finalize: copy nearest valid pixel values into invalid locations
         const int2_* final_seeds = ping ? seeds_a : seeds_b;
-        finalize_fill_kernel<<<grid, block>>>(final_seeds, depth_image_in, d_out, W, H, threshold);
+        finalize_fill_kernel<<<grid, block, 0, stream>>>(final_seeds, depth_image_in, d_out, W, H, threshold);
         err = cudaGetLastError();
         if (err != cudaSuccess) return err;
     }
 
-    // Apply downscaling
     if (downscale_factor > 1) {
-        // Verify it's a power of 2
         if ((downscale_factor & (downscale_factor - 1)) != 0) {
-            return cudaErrorInvalidValue; // Must be power of 2
+            return cudaErrorInvalidValue;
         }
-        
-        err = cudaSuccess;
-        
-        // Helper lambda for launching downscale kernels
+
         auto launch_downscale_kernel = [&](int tile_size, auto kernel_func) {
             dim3 block(tile_size, tile_size);
             dim3 grid((width / downscale_factor + tile_size - 1) / tile_size,
                       (height / downscale_factor + tile_size - 1) / tile_size);
-            kernel_func<<<grid, block>>>(d_out, depth_image_out, width, height);
+            kernel_func<<<grid, block, 0, stream>>>(d_out, depth_image_out, width, height);
         };
 
-        // Launch appropriate kernel based on scale factor
         switch (downscale_factor) {
             case 2:
                 if (rotate_90_cw) launch_downscale_kernel(16, downscale_optimized_kernel<16, 2, true>);
-                else launch_downscale_kernel(16, downscale_optimized_kernel<16, 2, false>);
+                else              launch_downscale_kernel(16, downscale_optimized_kernel<16, 2, false>);
                 break;
             case 4:
                 if (rotate_90_cw) launch_downscale_kernel(16, downscale_optimized_kernel<16, 4, true>);
-                else launch_downscale_kernel(16, downscale_optimized_kernel<16, 4, false>);
+                else              launch_downscale_kernel(16, downscale_optimized_kernel<16, 4, false>);
                 break;
             case 8:
                 if (rotate_90_cw) launch_downscale_kernel(8, downscale_optimized_kernel<8, 8, true>);
-                else launch_downscale_kernel(8, downscale_optimized_kernel<8, 8, false>);
+                else              launch_downscale_kernel(8, downscale_optimized_kernel<8, 8, false>);
                 break;
             case 16:
                 if (rotate_90_cw) launch_downscale_kernel(4, downscale_optimized_kernel<4, 16, true>);
-                else launch_downscale_kernel(4, downscale_optimized_kernel<4, 16, false>);
+                else              launch_downscale_kernel(4, downscale_optimized_kernel<4, 16, false>);
                 break;
             case 32:
                 if (rotate_90_cw) launch_downscale_kernel(2, downscale_optimized_kernel<2, 32, true>);
-                else launch_downscale_kernel(2, downscale_optimized_kernel<2, 32, false>);
+                else              launch_downscale_kernel(2, downscale_optimized_kernel<2, 32, false>);
                 break;
             default:
-                return cudaErrorInvalidValue; // Unsupported scale factor
+                return cudaErrorInvalidValue;
         }
 
         err = cudaGetLastError();
@@ -914,10 +908,10 @@ cudaError_t preprocess_depth_image2(
             dim3 block(TILE_SIZE, TILE_SIZE);
             dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
                       (height + TILE_SIZE - 1) / TILE_SIZE);
-            rotateDepth_fast_kernel<Rotation::CW_90><<<grid, block>>>(d_out, depth_image_out, width, height);
+            rotateDepth_fast_kernel<Rotation::CW_90><<<grid, block, 0, stream>>>(d_out, depth_image_out, width, height);
             err = cudaGetLastError();
         } else {
-            err = cudaMemcpyAsync(depth_image_out, d_out, N * sizeof(float), cudaMemcpyDeviceToDevice);
+            err = cudaMemcpyAsync(depth_image_out, d_out, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
         }
     }
 
@@ -1266,13 +1260,14 @@ cudaError_t prefill_invalid_depth(
     int width,
     int height,
     float min_valid_depth,
-    float max_valid_depth
+    float max_valid_depth,
+    cudaStream_t stream
 ) {
     dim3 block(32, 8);
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
 
-    prefill_depth_from_cache<<<grid, block>>>(
+    prefill_depth_from_cache<<<grid, block, 0, stream>>>(
         d_depth_data, d_depth_out, d_depth_cache,
         width, height,
         min_valid_depth, max_valid_depth
@@ -1325,14 +1320,15 @@ cudaError_t update_depth_cache(
     float* cached_depth,
     int width,
     int height,
-    float min_valid_depth,     // Minimum valid depth threshold, default 0.01
-    float max_valid_depth      // Maximum valid depth threshold, default 100.0
+    float min_valid_depth,
+    float max_valid_depth,
+    cudaStream_t stream
 ) {
     dim3 block(32, 8);
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
               
-    update_depth_cache_kernel<<<grid, block>>>(
+    update_depth_cache_kernel<<<grid, block, 0, stream>>>(
         generated_depth, sparse_depth, cached_depth,
         width, height,
         min_valid_depth, max_valid_depth
@@ -1341,4 +1337,4 @@ cudaError_t update_depth_cache(
     return cudaGetLastError();
 }
 
-}
+} // namespace SOb

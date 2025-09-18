@@ -27,7 +27,8 @@ cudaError_t preprocess_depth_image2(
     bool do_nearest_neighbor_fill,
     int downscale_factor,
     uint8_t* workspace,
-    bool rotate_90_cw = false
+    bool rotate_90_cw = false,
+    cudaStream_t stream = 0
 );
 
 cudaError_t postprocess_depth_image(
@@ -35,7 +36,8 @@ cudaError_t postprocess_depth_image(
     int width,
     int height,
     float* workspace,
-    bool rotate_90_ccw = false
+    bool rotate_90_ccw = false,
+    cudaStream_t stream = 0
 );
 
 void convert_uint8_img_to_float_img(
@@ -56,17 +58,19 @@ cudaError_t prefill_invalid_depth(
     float* d_depth_cache,
     int width,
     int height,
-    float min_valid_depth = 0.01f,  // Minimum valid depth threshold
-    float max_valid_depth = 100.0f  // Maximum valid depth threshold
+    float min_valid_depth = 0.01f,
+    float max_valid_depth = 100.0f,
+    cudaStream_t stream = 0
 );
 cudaError_t update_depth_cache(
     const float* generated_depth,
     const float* sparse_depth,
-    float* cached_depthd,          // Input/output: running average buffer
+    float* cached_depth, // Input/output: running average buffer
     int width,
     int height,
-    float min_valid_depth = 0.01f,  // Minimum valid depth threshold
-    float max_valid_depth = 100.0f  // Maximum valid depth threshold
+    float min_valid_depth = 0.01f,
+    float max_valid_depth = 100.0f,
+    cudaStream_t stream = 0
 );
 
 }

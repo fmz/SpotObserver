@@ -24,6 +24,8 @@ static ID3D12Fence*               s_Fence      = nullptr;
 static HANDLE                     s_FenceEvent = nullptr;
 static UINT64                     s_FenceValue = 1000;
 
+cudaStream_t s_cudaStream = 0;
+
 // Cache entry holds our shared D3D12 buffer + CUDA import info
 struct DX12InteropCacheEntry {
     ID3D12Resource*        sharedBuf = nullptr;
@@ -139,6 +141,108 @@ static void __add_barrier(
         after
     );
     cl->ResourceBarrier(1, &b);
+}
+
+static void __on_graphics_device_event(UnityGfxDeviceEventType type) {
+    switch (type) {
+    case kUnityGfxDeviceEventInitialize:
+        s_Gfx12  = s_Unity->Get<IUnityGraphicsD3D12v8>();
+        s_Gfx    = s_Unity->Get<IUnityGraphics>();
+        s_Device = s_Gfx12 ? s_Gfx12->GetDevice() : nullptr;
+        break;
+
+    case kUnityGfxDeviceEventShutdown:
+        s_Device = nullptr;
+        s_Gfx12  = nullptr;
+        break;
+
+    default:
+        break;
+    }
+}
+
+void initUnityInterop(IUnityInterfaces* unity) {
+    s_Unity  = unity;
+    s_Gfx    = unity->Get<IUnityGraphics>();
+    s_Gfx->RegisterDeviceEventCallback(__on_graphics_device_event);
+
+    // Call once in case the device already exists (Unity tells you what renderer is active)
+    __on_graphics_device_event(kUnityGfxDeviceEventInitialize);
+
+    // once s_Device is valid, create our shared D3D12 objects:
+    if (s_Device && !s_CmdAlloc) {
+        HRESULT hr = S_OK;
+
+        // 1) Allocator + command‐list
+        hr = s_Device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&s_CmdAlloc)
+        );
+        if (!checkHR(hr, "CreateCommandAllocator")) return;
+
+        hr = s_Device->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            s_CmdAlloc,
+            nullptr,
+            IID_PPV_ARGS(&s_CmdList)
+        );
+        if (!checkHR(hr, "CreateCommandList")) return;
+        s_CmdList->Close();
+
+        // 2) Fence + event
+        hr = s_Device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(&s_Fence)
+        );
+        if (!checkHR(hr, "CreateFence")) return;
+        s_FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (!s_FenceEvent) {
+            LogMessage("Failed to create fence event.");
+            return;
+        }
+        s_FenceValue = 1;
+
+        // 3) Command queue from Unity
+        if (s_Gfx12) {
+            s_CmdQueue = s_Gfx12->GetCommandQueue();
+        } else {
+            D3D12_COMMAND_QUEUE_DESC qd = {};
+            hr = s_Device->CreateCommandQueue(&qd, IID_PPV_ARGS(&s_CmdQueue));
+            if (!checkHR(hr, "CreateCommandQueue")) return;
+        }
+
+        // 4) Create CUDA stream
+        cudaError_t cerr = cudaStreamCreateWithFlags(&s_cudaStream, cudaStreamNonBlocking);
+        if (!checkCUDA(cerr, "cudaStreamCreateWithFlags")) return;
+    } else {
+        LogMessage("Failed to initialize D3D12 objects: device {} allocator {}",
+            (void*)s_Device, (void*)s_CmdAlloc);
+    }
+}
+
+void shutdownUnityInterop() {
+    if (s_Gfx)
+        s_Gfx->UnregisterDeviceEventCallback(__on_graphics_device_event);
+
+    if (s_FenceEvent)    CloseHandle(s_FenceEvent);
+    if (s_Fence)         s_Fence->Release();
+    if (s_CmdList)       s_CmdList->Release();
+    if (s_CmdAlloc)      s_CmdAlloc->Release();
+    if (s_CmdQueue)      s_CmdQueue->Release(); // release queue
+
+    s_FenceEvent = nullptr;
+    s_Fence      = nullptr;
+    s_CmdList    = nullptr;
+    s_CmdAlloc   = nullptr;
+    s_CmdQueue   = nullptr;
+
+    for (auto& entry : s_InteropCache) {
+        cudaFree(reinterpret_cast<void*>(entry.second.cudaPtr));
+        cudaDestroyExternalMemory(entry.second.extMem);
+        entry.second.sharedBuf->Release();
+    }
 }
 
 bool registerOutputTextures(
@@ -327,7 +431,6 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
             LogMessage("Failed to create fence event.");
             return false;
         }
-        s_FenceValue = 1000;
     }
 
     // Check if we have registered textures for this robot ID
@@ -384,7 +487,8 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
                     reinterpret_cast<uint8_t*>(rgb_entry.cudaPtr),
                     rgb_images[i],
                     src_size,
-                    cudaMemcpyDeviceToDevice
+                    cudaMemcpyDeviceToDevice,
+                    s_cudaStream
                 ),
                 "cudaMemcpyAsync for RGB texture data"
             );
@@ -396,7 +500,8 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
                     reinterpret_cast<uint8_t*>(rgb_entry.cudaPtr),
                     rgb_images[i],
                     rgb_buf_size,
-                    cudaMemcpyDeviceToDevice
+                    cudaMemcpyDeviceToDevice,
+                    s_cudaStream
                 ),
                 "cudaMemcpyAsync for RGB buffer"
             );
@@ -413,7 +518,8 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
                     reinterpret_cast<float*>(depth_entry.cudaPtr),
                     depth_images[i],
                     src_size,
-                    cudaMemcpyDeviceToDevice
+                    cudaMemcpyDeviceToDevice,
+                    s_cudaStream
                 ),
                 "cudaMemcpyAsync for Depth texture data"
             );
@@ -424,14 +530,13 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
                     reinterpret_cast<float*>(depth_entry.cudaPtr),
                     depth_images[i],
                     depth_buf_size,
-                    cudaMemcpyDeviceToDevice
+                    cudaMemcpyDeviceToDevice,
+                    s_cudaStream
                 ),
                 "cudaMemcpyAsync for Depth buffer"
             );
         }
     }
-
-    checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize()");
 
     LogMessage("Copied images to shared buffers for {} robot ID: {}", operation_name, robot_id);
 

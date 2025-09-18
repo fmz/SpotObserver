@@ -27,6 +27,9 @@
 
 namespace SOb {
 
+void initUnityInterop(IUnityInterfaces* unity);
+void shutdownUnityInterop();
+
 bool registerOutputTextures(
     int32_t robot_id,
     uint32_t cam_bit,         // Single bit only

@@ -278,6 +278,23 @@ static void unloadModel(SObModel model) {
 
 extern "C" {
 
+void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* unity) {
+    SOb::LogMessage("SpotObserver Plugin Load!");
+    try {
+        SOb::initUnityInterop(unity);
+    } catch (const std::exception& e) {
+        SOb::LogMessage("Exception while initializing Unity.");
+    }
+}
+
+void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginUnload() {
+    SOb::LogMessage("SpotObserver Plugin Unload!");
+    try {
+        SOb::shutdownUnityInterop();
+    } catch (const std::exception& e) {
+        SOb::LogMessage("Exception while shutting down Unity interop.");
+    }
+}
 
 // Connect to a spot robot. Returns a newly assigned ID, or -1 in case of an error.
 UNITY_INTERFACE_EXPORT
