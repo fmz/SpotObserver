@@ -298,6 +298,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             // Stream-scoped sync before inference (keeps other connections running)
             checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize before running inference");
 
+            // TODO: Support running models on cuda_stream_
             bool inference_success = model_.runInference(
                 cuda_ws_.d_rgb_float_data_,
                 cuda_ws_.d_preprocessed_depth_data_,
@@ -312,9 +313,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 continue;
             }
 
-            // Need to synchronize here to ensure that the depth preprocessor is done before we run inference
-            // TODO: Make sure model_.runInference() uses the same stream
-            checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after inference");
+
             auto inference_time = std::chrono::high_resolution_clock::now();
             duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
             LogMessage("VisionPipeline inference time: {} ms", duration.count());

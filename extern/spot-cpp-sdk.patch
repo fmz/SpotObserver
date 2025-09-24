@@ -1,0 +1,88 @@
+diff --git a/cpp/CMakeLists.txt b/cpp/CMakeLists.txt
+index d4efbc8..50e883c 100644
+--- a/cpp/CMakeLists.txt
++++ b/cpp/CMakeLists.txt
+@@ -9,6 +9,8 @@
+ cmake_minimum_required (VERSION 3.10.2)
+ project (bosdyn VERSION 5.0.0)
+ 
++message(STATUS "CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
++
+ # Dependencies:
+ find_package(protobuf REQUIRED)
+ find_package(Eigen3 REQUIRED)
+@@ -23,7 +25,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS true)
+ # Command-line arguments:
+ set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+ option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+-option(BUILD_CHOREOGRAPHY_LIBS "Boolean to control whether choreography proto libraries are built" ON)
++option(BUILD_CHOREOGRAPHY_LIBS "Boolean to control whether choreography proto libraries are built" OFF)
++
++message(STATUS "BUILD_CHOREOGRAPHY_LIBS: ${BUILD_CHOREOGRAPHY_LIBS}")
++message(STATUS "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
++message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
++message(STATUS "WIN32: ${WIN32}")
++message(STATUS "PROTOBUF_LIBRARIES = ${PROTOBUF_LIBRARIES}")
++
++# HACK
++if (WIN32)
++  set(PROTOBUF_LIBRARIES "C:/Users/brown/Documents/fmz/vcpkg/vcpkg_installed/x64-windows/lib/libprotobuf.lib")
++endif()
+ 
+ IF (NOT UNIX)
+     SET(BUILD_SHARED_LIBS OFF CACHE BOOL "Build using shared libraries" FORCE)
+@@ -92,6 +105,8 @@ if (bosdyn_protos_files)
+ endif()
+ if (BUILD_CHOREOGRAPHY_LIBS)
+ 
++message(WARNING "Choreography protos are not supported in this build. Please set BUILD_CHOREOGRAPHY_LIBS to OFF or remove the option from your CMake configuration.")
++
+ ### API choreography_protos LIBRARY ###
+ set(API_choreography_protos_PATH ${CMAKE_CURRENT_SOURCE_DIR}/build/choreography_protos/)
+ # Copy choreography_protos folders to build folder so they are in a subdirectory from the cpp folder (necessary for the proto cpp files generation).
+@@ -172,6 +187,23 @@ if (BUILD_SHARED_LIBS)
+   )
+ endif()
+ 
++if(WIN32)
++  message(STATUS "Building shared library on Windows")
++  add_compile_definitions(
++      WIN32_LEAN_AND_MEAN
++      NOMINMAX
++      _HAS_EXCEPTIONS=1          # std::format / <format> needs this on MSVC
++      _WINDLL                    # Ensure DllMain is called
++  )
++
++  # Add entry point specification
++    if (BUILD_SHARED_LIBS)
++      set_target_properties(TARGET bosdyn_client PROPERTY
++          LINK_FLAGS "/DLL"
++      )
++    endif()
++  endif()
++
+ add_library (bosdyn_client_static STATIC ${bosdyn_client_SRC})
+ set_property(TARGET bosdyn_client_static PROPERTY POSITION_INDEPENDENT_CODE 1)
+ target_compile_features(bosdyn_client_static PUBLIC cxx_std_17)
+@@ -245,7 +277,7 @@ target_include_directories(inverse_kinematics_reachability PUBLIC
+ )
+ target_link_libraries(inverse_kinematics_reachability PUBLIC bosdyn_client_static)
+ install(TARGETS inverse_kinematics_reachability DESTINATION ${CMAKE_INSTALL_BINDIR})
+-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/examples/joint_control)
++#add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/examples/joint_control)
+ add_executable(spot_cam ${CMAKE_CURRENT_SOURCE_DIR}/examples/spot_cam/ptz_example.cpp)
+ target_compile_features(spot_cam PUBLIC cxx_std_17)
+ target_include_directories(spot_cam PUBLIC
+diff --git a/protos/bosdyn/api/spot/choreography_sequence.proto b/protos/bosdyn/api/spot/choreography_sequence.proto
+index bdfc9b3..9081a8a 100644
+--- a/protos/bosdyn/api/spot/choreography_sequence.proto
++++ b/protos/bosdyn/api/spot/choreography_sequence.proto
+@@ -1018,7 +1018,7 @@ message ChoreographyStatusResponse {
+         STATUS_PREPPING = 3;
+         STATUS_WAITING_FOR_START_TIME = 4;
+         STATUS_VALIDATING = 5;
+-        STATUS_INTERRUPTED = 6;
++        STATUS_SPOT_INTERRUPTED = 6;
+         STATUS_FALLEN = 7;
+         STATUS_POWERED_OFF = 8;
+         STATUS_OTHER = 9;
