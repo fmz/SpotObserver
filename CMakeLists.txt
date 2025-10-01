@@ -292,7 +292,7 @@ if(WIN32 AND COPY_DLLS)
         foreach(dll ${VCPKG_DLLS})
             if(EXISTS "${VCPKG_DLL_DIR}/${dll}")
                 install(FILES "${VCPKG_DLL_DIR}/${dll}"
-                    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    DESTINATION ${CMAKE_INSTALL_BINDIR}
                 )
             endif()
         endforeach()
@@ -303,7 +303,7 @@ if(WIN32 AND COPY_DLLS)
         foreach(dll ${OPENCV_DLLS})
             if(EXISTS "${OPENCV_DLL_DIR}/${dll}")
                 install(FILES "${OPENCV_DLL_DIR}/${dll}"
-                    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    DESTINATION ${CMAKE_INSTALL_BINDIR}
                 )
             endif()
         endforeach()
@@ -313,7 +313,7 @@ if(WIN32 AND COPY_DLLS)
     foreach(dll ${MLLIB_DLLS})
         if(EXISTS "${dll}")
             install(FILES "${dll}"
-                DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                DESTINATION ${CMAKE_INSTALL_BINDIR}
             )
         endif()
     endforeach()
@@ -323,5 +323,5 @@ endif()
 install(EXPORT SpotObserverTargets
     FILE SpotObserverTargets.cmake
     NAMESPACE SpotObserver::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/SpotObserver
+    DESTINATION ${CMAKE_INSTALL_BINDIR}/cmake/SpotObserver
 )

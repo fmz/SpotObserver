@@ -76,10 +76,9 @@ if(COPY_DLLS AND WIN32)
     endif()
 endif()
 
-# Install test executable if requested
 if(INSTALL_TESTS)
     install(TARGETS spot_camera_stream_test
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/tests
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         CONFIGURATIONS Release Debug RelWithDebInfo MinSizeRel
     )
 endif()

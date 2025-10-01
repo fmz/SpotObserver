@@ -69,3 +69,10 @@ if(COPY_DLLS AND WIN32)
         )
     endif()
 endif()
+
+if(INSTALL_TESTS)
+    install(TARGETS integ-test
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        CONFIGURATIONS Release Debug RelWithDebInfo MinSizeRel
+    )
+endif()

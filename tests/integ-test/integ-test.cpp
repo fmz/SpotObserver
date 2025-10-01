@@ -52,7 +52,7 @@ int main(int argc, char* argv[]) {
 
     int32_t spot_ids[2];
 
-    uint32_t cam_bitmask = FRONTRIGHT | FRONTLEFT;
+    uint32_t cam_bitmask = FRONTRIGHT | FRONTLEFT | HAND;
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;

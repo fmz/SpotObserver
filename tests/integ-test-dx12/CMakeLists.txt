@@ -70,10 +70,9 @@ if(COPY_DLLS AND WIN32)
     endif()
 endif()
 
-# Install test executable if requested
 if(INSTALL_TESTS)
     install(TARGETS integ-test-dx12
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/tests
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         CONFIGURATIONS Release Debug RelWithDebInfo MinSizeRel
     )
 endif()
