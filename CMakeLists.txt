@@ -1,8 +1,14 @@
 cmake_minimum_required(VERSION 3.28)
-project(SpotCameraStream LANGUAGES CXX CUDA)
+project(SpotCameraStream VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 option(BUILD_TESTS "Build the test executable" ON)
+option(INSTALL_TESTS "Install test executables" ON)
 set(PLUGIN_NAME "SpotObserverLib")
+
+# Set default install directory to SpotObserver/install if not specified
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install" CACHE PATH "Default install directory" FORCE)
+endif()
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -261,9 +267,61 @@ endif()
 #    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 #)
 #
-## INSTALL
-#install(TARGETS ${PLUGIN_NAME}
-#    RUNTIME DESTINATION "Plugins"
-#    LIBRARY DESTINATION "Plugins"
-#    ARCHIVE DESTINATION "Plugins"
-#)
+# INSTALL
+include(GNUInstallDirs)
+
+# Install the main library
+install(TARGETS ${PLUGIN_NAME}
+    EXPORT SpotObserverTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Install public headers
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/SpotObserver
+    FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+# Install required DLLs on Windows
+if(WIN32 AND COPY_DLLS)
+    # Install vcpkg DLLs
+    if(VCPKG_DLL_DIR AND EXISTS "${VCPKG_DLL_DIR}")
+        foreach(dll ${VCPKG_DLLS})
+            if(EXISTS "${VCPKG_DLL_DIR}/${dll}")
+                install(FILES "${VCPKG_DLL_DIR}/${dll}"
+                    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                )
+            endif()
+        endforeach()
+    endif()
+
+    # Install OpenCV DLLs
+    if(EXISTS "${OPENCV_DLL_DIR}")
+        foreach(dll ${OPENCV_DLLS})
+            if(EXISTS "${OPENCV_DLL_DIR}/${dll}")
+                install(FILES "${OPENCV_DLL_DIR}/${dll}"
+                    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                )
+            endif()
+        endforeach()
+    endif()
+
+    # Install ML library DLLs
+    foreach(dll ${MLLIB_DLLS})
+        if(EXISTS "${dll}")
+            install(FILES "${dll}"
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            )
+        endif()
+    endforeach()
+endif()
+
+# Export targets for find_package support
+install(EXPORT SpotObserverTargets
+    FILE SpotObserverTargets.cmake
+    NAMESPACE SpotObserver::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/SpotObserver
+)
