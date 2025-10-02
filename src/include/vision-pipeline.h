@@ -30,7 +30,7 @@ private:
     };
 
     MLModel& model_;
-    const SpotConnection& spot_connection_;
+    const SpotCamStream& spot_cam_stream_;
     bool first_run_{true};
     
     // Threading
@@ -61,7 +61,7 @@ private:
 public:
     VisionPipeline(
         MLModel& model,
-        const SpotConnection& spot_connection,
+        const SpotCamStream& spot_cam_stream_,
         const TensorShape& input_shape,
         const TensorShape& depth_shape,
         const TensorShape& output_shape,
