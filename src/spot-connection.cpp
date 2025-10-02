@@ -6,7 +6,7 @@
 #include "logger.h"
 #include "utils.h"
 #include "dumper.h"
-#include "cuda_kernels.cuh"
+#include "vision-pipeline.h"
 
 #include <opencv2/opencv.hpp>
 
@@ -184,8 +184,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 break;
             }
 
-            // LogMessage("Copying RGB image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
-            //            image_size, write_idx, size_t(rgb_write_ptr));
+            LogMessage("Copying RGB image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
+                       image_size, write_idx, size_t(rgb_write_ptr));
 
             checkCudaError(
                 cudaMemcpyAsync(
@@ -198,13 +198,14 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "cudaMemcpyAsync RGB"
             );
 
-            // DumpRGBImageFromCuda(
-            //     rgb_write_ptr,
-            //     cv_img.cols,
-            //     cv_img.rows,
-            //     "rgb",
-            //     n_rgbs_written + write_idx * n_images_per_response_
-            // );
+            DumpRGBImageFromCuda(
+                rgb_write_ptr,
+                cv_img.cols,
+                cv_img.rows,
+                cv_img.depth(),
+                "rgb",
+                n_rgbs_written + write_idx * n_images_per_response_
+            );
 
             rgb_write_ptr += n_elems_per_rgb_;
             n_rgbs_written++;
@@ -224,8 +225,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
             }
 
-            // LogMessage("Copying depth image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
-            //            depth_size, write_idx, size_t(depth_write_ptr));
+            LogMessage("Copying depth image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
+                       depth_size, write_idx, size_t(depth_write_ptr));
 
             checkCudaError(
                 cudaMemcpyAsync(
@@ -247,8 +248,6 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "pre-depth-cache",
                 n_depths_written + write_idx * n_images_per_response_
             );
-
-            // checkCudaError(update_depth_cache(depth_write_ptr, depth_cache_ptr, depth_width, depth_height, cuda_stream_), "update_depth_cache");
 
             DumpDepthImageFromCuda(
                 depth_write_ptr,
@@ -359,33 +358,40 @@ static std::vector<SpotCamera> convert_bitmask_to_spot_cam_vector(uint32_t bitma
 
 ///////////////////////////////////////////////////////////////////////////////
 
-SpotConnection::SpotConnection()
-    : robot_(nullptr)
-    , image_client_(nullptr)
-    , image_lifo_(5)
-    , connected_(false)
+SpotCamStream::SpotCamStream(
+    SpotConnection& robot,
+    bosdyn::client::ImageClient& image_client,
+    int32_t image_lifo_max_size
+)
+    : robot_(robot)
+    , image_client_(image_client)
+    , image_lifo_(image_lifo_max_size)
     , streaming_(false)
 {
-    // Create SDK instance
-    sdk_ = bosdyn::client::CreateStandardSDK("SpotObserverConnection");
-    if (!sdk_) {
-        LogMessage("SpotConnection::SpotConnection: Failed to create SDK instance");
-        throw std::runtime_error("Failed to create Spot SDK instance");
-    }
+    // Create one CUDA stream per SpotConnection and attach it to the buffer.
+    checkCudaError(
+        cudaStreamCreate(&cuda_stream_),
+        "cudaStreamCreate for SpotConnection"
+    );
+    image_lifo_.attachCudaStream(cuda_stream_);
+    LogMessage("SpotConnection::connect: Created CUDA stream {:#x} and attached to buffer",
+               size_t(cuda_stream_));
+
 }
 
-SpotConnection::~SpotConnection() {
+SpotCamStream::~SpotCamStream() {
+    quit_requested_.store(true);
     _joinStreamingThread();
-    // Destroy the per-connection CUDA stream after the thread is stopped.
+
     if (cuda_stream_) {
         checkCudaError(cudaStreamDestroy(cuda_stream_), "cudaStreamDestroy for SpotConnection");
         cuda_stream_ = nullptr;
-        LogMessage("Destroyed CUDA stream for SpotConnection");
+        LogMessage("SpotConnection::~SpotConnection: Destroyed CUDA stream");
     }
     // TODO: figure out how to cleanup image_client_
 }
 
-bosdyn::api::GetImageRequest SpotConnection::_createImageRequest(
+bosdyn::api::GetImageRequest SpotCamStream::_createImageRequest(
     const std::vector<std::string>& rgb_sources,
     const std::vector<std::string>& depth_sources
 ) {
@@ -413,13 +419,15 @@ bosdyn::api::GetImageRequest SpotConnection::_createImageRequest(
     return request;
 }
 
-// Image producer thread that requests images from the robot
-void SpotConnection::_spotCamReaderThread(std::stop_token stop_token) {
-    if (!image_client_) {
-        LogMessage("Image client not initialized");
-        return;
-    }
+void SpotCamStream::_startStreamingThread() {
+    // Create and start thread
+    image_streamer_thread_ = std::make_unique<std::jthread>([this](std::stop_token stop_token) {
+        _spotCamReaderThread(stop_token);
+    });
+}
 
+// Image producer thread that requests images from the robot
+void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
     LogMessage("Producer thread started");
 
     while (!stop_token.stop_requested() && !quit_requested_.load()) {
@@ -427,7 +435,7 @@ void SpotConnection::_spotCamReaderThread(std::stop_token stop_token) {
             auto start = std::chrono::high_resolution_clock::now();
 
             // Request images from all cameras
-            bosdyn::client::GetImageResultType response = image_client_->GetImage(current_request_);
+            bosdyn::client::GetImageResultType response = image_client_.GetImage(current_request_);
             if (!response.status) {
                 LogMessage("Failed to get images: {}", response.status.message());
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -439,6 +447,9 @@ void SpotConnection::_spotCamReaderThread(std::stop_token stop_token) {
 
             // Process and queue images
             image_lifo_.push(response.response.image_responses());
+            auto end = std::chrono::high_resolution_clock::now();
+            LogMessage("Total time for GetImage and push: {:.4f} ms",
+                       std::chrono::duration<double, std::milli>(end - start).count());
         } catch (const std::exception& e) {
             LogMessage("Error in producer thread: {}", e.what());
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -447,19 +458,7 @@ void SpotConnection::_spotCamReaderThread(std::stop_token stop_token) {
     LogMessage("Exiting producer thread.");
 }
 
-void SpotConnection::_startStreamingThread() {
-    if (!image_client_) {
-        std::cerr << "Image client not initialized" << std::endl;
-        return;
-    }
-
-    // Create and start thread
-    image_streamer_thread_ = std::make_unique<std::jthread>([this](std::stop_token stop_token) {
-        _spotCamReaderThread(stop_token);
-    });
-}
-
-void SpotConnection::_joinStreamingThread() {
+void SpotCamStream::_joinStreamingThread() {
     if (image_streamer_thread_) {
         image_streamer_thread_->request_stop();
         if (image_streamer_thread_->joinable()) {
@@ -474,65 +473,8 @@ void SpotConnection::_joinStreamingThread() {
     }
 }
 
-bool SpotConnection::connect(
-    const std::string& robot_ip,
-    const std::string& username,
-    const std::string& password
-) {
-    try {
-        // Create robot using ClientSDK
-        bosdyn::client::Result<std::unique_ptr<bosdyn::client::Robot>> robot_result = sdk_->CreateRobot(robot_ip);
-        if (!robot_result.status) {
-            LogMessage("SpotConnection::connect: Failed to connect to robot: {}",
-                       robot_result.status.message());
-            return false;
-        }
-
-        robot_ = std::move(robot_result.response);
-
-        // Authenticate
-        bosdyn::common::Status auth_status = robot_->Authenticate(username, password);
-        if (!auth_status) {
-            LogMessage("SpotConnection::connect: Failed to authenticate: {}", auth_status.message());
-            return false;
-        }
-
-        // Create image client
-        bosdyn::client::Result<bosdyn::client::ImageClient*> image_client_result =
-            robot_->EnsureServiceClient<bosdyn::client::ImageClient>();
-
-        if (!image_client_result.status) {
-            LogMessage("SpotConnection::connect: Failed to create image client: {}",
-                       image_client_result.status.message());
-            return false;
-        }
-
-        image_client_ = image_client_result.response;
-
-        LogMessage("SpotConnection::connect: Connected to Spot robot at {}", robot_ip);
-
-        connected_ = true;
-
-        // Create one CUDA stream per SpotConnection and attach it to the buffer.
-        checkCudaError(
-            cudaStreamCreate(&cuda_stream_),
-            "cudaStreamCreate for SpotConnection"
-        );
-        image_lifo_.attachCudaStream(cuda_stream_);
-        LogMessage("SpotConnection::connect: Created CUDA stream {:#x} and attached to buffer",
-                   size_t(cuda_stream_));
-
-        return true;
-
-    } catch (const std::exception& e) {
-        LogMessage("SpotConnection::connect: Exception while connecting to robot {}: {}",
-            robot_ip, e.what());
-        return false;
-    }
-}
-
-bool SpotConnection::streamCameras(uint32_t cam_mask) {
-    if (!connected_) {
+bool SpotCamStream::streamCameras(uint32_t cam_mask) {
+    if (!robot_.connected_) {
         LogMessage("SpotConnection::streamCameras: Not connected to robot");
         return false;
     }
@@ -572,7 +514,7 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
         // Query the robot for images and fill in image metadata
         // Max 3 retries
         for (int32_t i = 0; i < max_connection_retries; i++) {
-            bosdyn::client::GetImageResultType response = image_client_->GetImage(current_request_);
+            bosdyn::client::GetImageResultType response = image_client_.GetImage(current_request_);
             if (!response.status) {
                 LogMessage("SpotConnection::streamCameras: Failed to get images: {}",
                            response.status.message());
@@ -588,7 +530,14 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
                 return false;
             }
             // Read image sizes
-            size_t rgb_ref_size = image_responses[0].shot().image().rows() * image_responses[0].shot().image().cols() * 4;
+            current_rgb_shape_ = TensorShape{
+                size_t(num_cams_requested),
+                4, //(image_responses[0].shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3)
+                size_t(image_responses[0].shot().image().rows()),
+                size_t(image_responses[0].shot().image().cols())
+            };
+
+            size_t rgb_ref_size = current_rgb_shape_.H * current_rgb_shape_.W * 4;
                                   //(image_responses[0].shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);;
             // For debugging purposes, ensure that all RGB images have the same size
             for (int32_t j = 1; j < num_cams_requested; j++) {
@@ -602,8 +551,14 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
                 }
             }
             // Same thing for depth images
-            size_t depth_ref_size = image_responses[num_cams_requested].shot().image().rows() *
-                                    image_responses[num_cams_requested].shot().image().cols();
+            current_depth_shape_ = TensorShape{
+                size_t(num_cams_requested),
+                1,
+                size_t(image_responses[num_cams_requested].shot().image().rows()),
+                size_t(image_responses[num_cams_requested].shot().image().cols())
+            };
+
+            size_t depth_ref_size = current_depth_shape_.H * current_depth_shape_.W;
             for (int32_t j = num_cams_requested + 1; j < image_responses.size(); j++) {
                 const auto& img_response = image_responses[j];
                 size_t depth_size = img_response.shot().image().rows() * img_response.shot().image().cols();
@@ -638,7 +593,7 @@ bool SpotConnection::streamCameras(uint32_t cam_mask) {
     return true;
 }
 
-bool SpotConnection::getCurrentImages(
+bool SpotCamStream::getCurrentImages(
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
@@ -656,5 +611,225 @@ bool SpotConnection::getCurrentImages(
 
     return true;
 }
+
+///////////////////////////////////////////////////////////////////////////////
+
+SpotConnection::SpotConnection(
+    const std::string& robot_ip,
+    const std::string& username,
+    const std::string& password
+)
+    : robot_(nullptr)
+    , image_client_(nullptr)
+    , image_lifo_max_size_(5)
+    , connected_(false)
+{
+    // Create SDK instance
+    sdk_ = bosdyn::client::CreateStandardSDK("SpotObserverConnection");
+    if (!sdk_) {
+        LogMessage("SpotConnection::SpotConnection: Failed to create SDK instance");
+        throw std::runtime_error("Failed to create Spot SDK instance");
+    }
+
+    try {
+        // Create robot using ClientSDK
+        bosdyn::client::Result<std::unique_ptr<bosdyn::client::Robot>> robot_result = sdk_->CreateRobot(robot_ip);
+        if (!robot_result.status) {
+            throw std::runtime_error(std::format("SpotConnection::connect: Failed to connect to robot: {}",
+                       robot_result.status.message()));
+        }
+
+        robot_ = std::move(robot_result.response);
+
+        // Authenticate
+        bosdyn::common::Status auth_status = robot_->Authenticate(username, password);
+        if (!auth_status) {
+            throw std::runtime_error(std::format("SpotConnection::connect: Failed to authenticate: {}",
+                auth_status.message()));
+        }
+
+        // Create image client
+        bosdyn::client::Result<bosdyn::client::ImageClient*> image_client_result =
+            robot_->EnsureServiceClient<bosdyn::client::ImageClient>();
+
+        if (!image_client_result.status) {
+            throw std::runtime_error(std::format("SpotConnection::connect: Failed to create image client: {}",
+                       image_client_result.status.message()));
+        }
+
+        image_client_ = image_client_result.response;
+
+        LogMessage("SpotConnection::connect: Connected to Spot robot at {}", robot_ip);
+
+        connected_ = true;
+
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::format("SpotConnection::connect: Exception while connecting to robot {}: {}",
+            robot_ip, e.what()));
+    }
+}
+
+SpotConnection::~SpotConnection() {
+    cam_streams_.clear();
+    vision_pipelines_.clear();
+
+    if (connected_) {
+        LogMessage("SpotConnection::~SpotConnection: Disconnecting from robot");
+        robot_.reset();
+        sdk_.reset();
+        connected_ = false;
+    }
+}
+
+int32_t SpotConnection::createCamStream(uint32_t cam_mask) {
+    if (!connected_) {
+        LogMessage("SpotConnection::createCamStream: Not connected to robot");
+        return false;
+    }
+
+    try {
+        if (cam_streams_.find(cam_mask) != cam_streams_.end()) {
+            LogMessage("SpotConnection::createCamStream: Note that a camera stream with mask {:#x} already exists",
+                       cam_mask);
+        }
+
+        int32_t stream_id = next_stream_id_++;
+        auto [it, inserted] = cam_streams_.try_emplace(
+            stream_id,
+            std::make_unique<SpotCamStream>(*this, *image_client_, image_lifo_max_size_)
+        );
+
+        LogMessage("SpotConnection::createCamStream: Created camera stream with mask {:#x}",
+                   cam_mask);
+
+        if (!it->second->streamCameras(cam_mask)) {
+            LogMessage("SpotConnection::createCamStream: Failed to start streaming cameras with mask {:#x}",
+                       cam_mask);
+            return false;
+        }
+
+        return stream_id;
+
+    } catch (const std::exception& e) {
+        LogMessage("SpotConnection::createCamStream: Exception while creating camera stream: {}",
+                   e.what());
+        return -1;
+    }
+}
+
+bool SpotConnection::removeCamStream(int32_t stream_id) {
+    auto cam_stream_it = cam_streams_.find(stream_id);
+    if (cam_stream_it == cam_streams_.end()) {
+        LogMessage("SpotConnection::removeCamStream: Camera stream {} doesn't exist",
+                   stream_id);
+        return false;
+    }
+    try {
+        // Remove the associated vision pipeline if any
+        removeVisionPipeline(stream_id);
+
+        cam_streams_.erase(cam_stream_it);
+        LogMessage("SpotConnection::removeCamStream: Removed camera stream {}", stream_id);
+        return true;
+    } catch (const std::exception& e) {
+        LogMessage("SpotConnection::removeCamStream: Exception while removing camera: {}",  e.what());
+        return false;
+    }
+}
+
+SpotCamStream* SpotConnection::getCamStream(int32_t stream_id) {
+    auto cam_stream_it = cam_streams_.find(stream_id);
+    if (cam_stream_it == cam_streams_.end()) {
+        LogMessage("SpotConnection::getCamStream: Camera stream {} doesn't exist",
+                   stream_id);
+        return nullptr;
+    }
+    return cam_stream_it->second.get();
+}
+
+bool SpotConnection::createVisionPipeline(MLModel& model, int32_t stream_id) {
+    SpotCamStream* cam_stream = getCamStream(stream_id);
+    if (cam_stream == nullptr || !cam_stream->isStreaming()) {
+        LogMessage("SpotConnection::createVisionPipeline: Camera stream {} doesn't exist. "
+            "Please create and start streaming before creating a vision pipeline.",
+            stream_id);
+        return false;
+    }
+    if (getVisionPipeline(stream_id) != nullptr) {
+        LogMessage("SpotConnection::createVisionPipeline: Vision pipeline for stream {} already exists",
+                   stream_id);
+        return false;
+    }
+    // Get the expected tensor shapes from the camera stream
+    TensorShape rgb_shape = cam_stream->getCurrentRGBTensorShape();
+    TensorShape depth_shape = cam_stream->getCurrentDepthTensorShape();
+
+    try {
+        auto [it, inserted] = vision_pipelines_.try_emplace(
+            stream_id,
+            std::make_unique<VisionPipeline>(
+                model,
+                *cam_stream,
+                rgb_shape,
+                depth_shape,
+                depth_shape,
+                image_lifo_max_size_
+            )
+        );
+        if (!inserted) {
+            LogMessage("SpotConnection::createVisionPipeline: Failed to insert vision pipeline for stream {}",
+                       stream_id);
+            return false;
+        }
+        LogMessage("SpotConnection::createVisionPipeline: Created vision pipeline for stream {}",
+                   stream_id);
+
+        // Start the vision pipeline processing thread
+        if (!it->second->start()) {
+            LogMessage("SOb_LaunchVisionPipeline: Failed to start vision pipeline for stream {}",
+                       stream_id);
+            return false;
+        }
+
+        LogMessage("SOb_LaunchVisionPipeline: Successfully launched vision pipeline for stream {}",
+                   stream_id);
+
+        return true;
+    } catch (const std::exception& e) {
+        LogMessage("SpotConnection::createVisionPipeline: Exception while creating vision pipeline: {}",
+                   e.what());
+        return false;
+    }
+}
+bool SpotConnection::removeVisionPipeline(int32_t stream_id) {
+    auto vision_pipeline_it = vision_pipelines_.find(stream_id);
+    if (vision_pipeline_it == vision_pipelines_.end()) {
+        LogMessage("SpotConnection::removeVisionPipeline: Vision pipeline for stream {} doesn't exist",
+                   stream_id);
+        return false;
+    }
+
+    try {
+        vision_pipelines_.erase(vision_pipeline_it);
+        LogMessage("SpotConnection::removeVisionPipeline: Removed vision pipeline for stream {}",
+                   stream_id);
+        return true;
+    } catch (const std::exception& e) {
+        LogMessage("SpotConnection::removeVisionPipeline: Exception while removing vision pipeline: {}",
+                   e.what());
+        return false;
+    }
+}
+
+VisionPipeline* SpotConnection::getVisionPipeline(int32_t stream_id) {
+    auto vision_pipeline_it = vision_pipelines_.find(stream_id);
+    if (vision_pipeline_it == vision_pipelines_.end()) {
+        LogMessage("SpotConnection::getVisionPipeline: Vision pipeline for stream {} doesn't exist",
+                   stream_id);
+        return nullptr;
+    }
+    return vision_pipeline_it->second.get();
+}
+
 
 } // namespace SOb

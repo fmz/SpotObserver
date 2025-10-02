@@ -9,7 +9,9 @@
 
 #include "IUnityInterface.h"
 
+#ifdef __cplusplus
 extern "C" {
+#endif
 
 // Define a function pointer type for logging
 typedef void (*SOb_LogCallback)(const char* message);
@@ -39,11 +41,16 @@ bool UNITY_INTERFACE_API SOb_DisconnectFromSpot(int32_t robot_id);
 
 // Start reading spot camera feeds. Runs in a separate threads.
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_ReadCameraFeeds(int32_t robot_id, uint32_t cam_bitmask);
+int32_t UNITY_INTERFACE_API SOb_CreateCameraStream(int32_t robot_id, uint32_t cam_bitmask);
+
+UNITY_INTERFACE_EXPORT
+int32_t UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_stream_id);
+
 
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
+    int32_t cam_stream_id,
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
@@ -52,6 +59,7 @@ bool UNITY_INTERFACE_API SOb_GetNextImageSet(
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
     int32_t robot_id,
+    int32_t cam_stream_id,
     uint32_t cam_bit,         // Single bit only
     void* out_img_buf,        // ID3D12Resource* (aka tensor)
     void* out_depth_buf,      // ID3D12Resource* (aka tensor)
@@ -63,22 +71,27 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ClearUnityReadbackBuffers(int32_t robot_id);
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, SObModel model);
+bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(
+    int32_t robot_id,
+    int32_t cam_stream_id,
+    SObModel model
+);
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id);
+bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id, int32_t cam_stream_id);
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextVisionPipelineImageSet(
     int32_t robot_id,
+    int32_t cam_stream_id,
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
 );
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id);
+bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id, int32_t cam_stream_id);
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id);
+bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id, int32_t cam_stream_id);
 
 // Model stuff
 UNITY_INTERFACE_EXPORT
@@ -103,6 +116,8 @@ bool UNITY_INTERFACE_API SOb_SetUnityLogCallback(const SOb_LogCallback callback)
 UNITY_INTERFACE_EXPORT
 void UNITY_INTERFACE_API SOb_ToggleDebugDumps(const char* dump_path);
 
-}
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
 #endif //SPOT_OBSERVER_H

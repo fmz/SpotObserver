@@ -36,9 +36,9 @@ struct DX12InteropCacheEntry {
 
 static std::unordered_map<ID3D12Resource*, DX12InteropCacheEntry> s_InteropCache = {};
 
-// robot ID -> <D3D12 textures>
-static std::unordered_map<int32_t, std::vector<ID3D12Resource*>> s_OutputRGBTextures = {};
-static std::unordered_map<int32_t, std::vector<ID3D12Resource*>> s_OutputDepthTextures = {};
+// robot ID -> cam_stream_id -> <D3D12 textures>
+static std::unordered_map<int32_t, std::unordered_map<int32_t, std::vector<ID3D12Resource*>>> s_OutputRGBTextures = {};
+static std::unordered_map<int32_t, std::unordered_map<int32_t, std::vector<ID3D12Resource*>>> s_OutputDepthTextures = {};
 
 // Store texture footprints for proper copying
 struct TextureFootprintInfo {
@@ -247,6 +247,7 @@ void shutdownUnityInterop() {
 
 bool registerOutputTextures(
     int32_t robot_id,
+    int32_t cam_stream_id,
     uint32_t cam_bit,         // Single bit only
     void* out_img_tex,        // ID3D12Resource* (texture or buffer)
     void* out_depth_tex,      // ID3D12Resource* (texture or buffer)
@@ -258,16 +259,24 @@ bool registerOutputTextures(
         LogMessage("Invalid output textures: out_img_tex = {}, out_depth_tex = {}", (void*)out_img_tex, (void*)out_depth_tex);
         return false;
     }
-    if (robot_id < 0 || cam_bit == 0 || cam_bit >= NUM_CAMERAS) {
-        LogMessage("Invalid robot ID or camera bitmask: robot_id = {}, cam_bit = {}", robot_id, cam_bit);
+    if (robot_id < 0) {
+        LogMessage("registerOutputTextures: Invalid robot ID {}", robot_id);
         return false;
     }
-    if (img_buffer_size <= 0 || depth_buffer_size <= 0) {
-        LogMessage("Invalid buffer sizes: img_buffer_size = {}, depth_buffer_size = {}", img_buffer_size, depth_buffer_size);
+    if (cam_stream_id < 0) {
+        LogMessage("registerOutputTextures: Invalid cam stream ID: cam_stream_id = {}", cam_stream_id);
+        return false;
+    }
+    if (cam_bit == 0 || cam_bit >= NUM_CAMERAS) {
+        LogMessage("registerOutputTextures: Invalid camera bitmask: cam_bit = {}", cam_bit);
         return false;
     }
     if (__num_set_bits(cam_bit) != 1) {
         LogMessage("Invalid camera bitmask: cam_bit = {:#x}. Must be a single bit set.", cam_bit);
+        return false;
+    }
+    if (img_buffer_size <= 0 || depth_buffer_size <= 0) {
+        LogMessage("Invalid buffer sizes: img_buffer_size = {}, depth_buffer_size = {}", img_buffer_size, depth_buffer_size);
         return false;
     }
 
@@ -342,10 +351,11 @@ bool registerOutputTextures(
     }
 
     // Register the output textures in the global maps
-    s_OutputRGBTextures[robot_id].push_back(rgb_resource);
-    s_OutputDepthTextures[robot_id].push_back(depth_resource);
+    s_OutputRGBTextures[robot_id][cam_stream_id].push_back(rgb_resource);
+    s_OutputDepthTextures[robot_id][cam_stream_id].push_back(depth_resource);
 
-    LogMessage("Registered output textures for robot ID {}: RGB = {}, Depth = {}", robot_id, (void*)rgb_resource, (void*)depth_resource);
+    LogMessage("Registered output textures for robot ID {} @ cam-stream ID {}: RGB = {}, Depth = {}",
+        robot_id, cam_stream_id, (void*)rgb_resource, (void*)depth_resource);
 
     return true;
 }
@@ -357,23 +367,26 @@ bool clearOutputTextures(int32_t robot_id) {
     }
 
     auto erase_interop_entries = [&](auto& tex_map) {
-        for (auto& tex : tex_map) {
-            if (s_InteropCache.contains(tex)) {
-                DX12InteropCacheEntry& entry = s_InteropCache[tex];
-                if (entry.extMem) {
-                    cudaDestroyExternalMemory(entry.extMem);
-                    entry.extMem = nullptr;
+        for (auto& cam_stream_map_to_tex : tex_map) {
+            for (auto& tex : cam_stream_map_to_tex.second) {
+                // Release interop entry
+                if (s_InteropCache.contains(tex)) {
+                    DX12InteropCacheEntry& entry = s_InteropCache[tex];
+                    if (entry.extMem) {
+                        cudaDestroyExternalMemory(entry.extMem);
+                        entry.extMem = nullptr;
+                    }
+                    entry.cudaPtr = 0;
+                    if (entry.sharedBuf) {
+                        entry.sharedBuf->Release();
+                        entry.sharedBuf = nullptr;
+                    }
+                    entry.bufSize = 0;
+                    s_InteropCache.erase(tex);
                 }
-                entry.cudaPtr = 0;
-                if (entry.sharedBuf) {
-                    entry.sharedBuf->Release();
-                    entry.sharedBuf = nullptr;
+                if (s_TextureFootprints.contains(tex)) {
+                    s_TextureFootprints.erase(tex);
                 }
-                entry.bufSize = 0;
-                s_InteropCache.erase(tex);
-            }
-            if (s_TextureFootprints.contains(tex)) {
-                s_TextureFootprints.erase(tex);
             }
         }
     };
@@ -390,10 +403,15 @@ bool clearOutputTextures(int32_t robot_id) {
 }
 
 // Helper function type for getting images
-typedef bool (*GetImageSetFunc)(int32_t robot_id, int32_t n_images_requested, uint8_t** images, float** depths);
+typedef bool (*GetImageSetFunc)(int32_t robot_id, int32_t cam_stream_id, int32_t n_images_requested, uint8_t** images, float** depths);
 
 // Common implementation for uploading image sets to Unity buffers
-static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getImageSetFunc, const char* operation_name) {
+static bool uploadImageSetToUnityCommon(
+    int32_t robot_id,
+    int32_t cam_stream_id,
+    GetImageSetFunc getImageSetFunc,
+    const char* operation_name
+) {
     // Sanity checks
     if (robot_id < 0) {
         LogMessage("Invalid robot ID: {}", robot_id);
@@ -434,10 +452,17 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
     }
 
     // Check if we have registered textures for this robot ID
-    auto rgb_it = s_OutputRGBTextures.find(robot_id);
-    auto depth_it = s_OutputDepthTextures.find(robot_id);
-    if (rgb_it == s_OutputRGBTextures.end() || depth_it == s_OutputDepthTextures.end()) {
+    auto rgb_cam_stream_it = s_OutputRGBTextures.find(robot_id);
+    auto depth_cam_stream_it = s_OutputDepthTextures.find(robot_id);
+    if (rgb_cam_stream_it == s_OutputRGBTextures.end() || depth_cam_stream_it == s_OutputDepthTextures.end()) {
         LogMessage("No registered output textures for robot ID: {}", robot_id);
+        return false;
+    }
+
+    auto rgb_it = rgb_cam_stream_it->second.find(cam_stream_id);
+    auto depth_it = depth_cam_stream_it->second.find(cam_stream_id);
+    if (rgb_it == rgb_cam_stream_it->second.end() || depth_it == depth_cam_stream_it->second.end()) {
+        LogMessage("No registered output textures for cam-stream ID: {}", cam_stream_id);
         return false;
     }
 
@@ -446,16 +471,17 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
 
     size_t num_textures = rgb_textures.size();
     if (num_textures != depth_textures.size()) {
-        LogMessage("Mismatch in number of RGB and depth textures for robot ID: {}", robot_id);
+        LogMessage("Mismatch in number of RGB and depth textures for robot ID: {} @ cam stream {}",
+            robot_id, cam_stream_id);
         return false;
     }
 
     // Grab the latest image set using the provided function
     uint8_t* rgb_images[NUM_CAMERAS];
     float* depth_images[NUM_CAMERAS];
-    bool ret = getImageSetFunc(robot_id, num_textures, rgb_images, depth_images);
+    bool ret = getImageSetFunc(robot_id, cam_stream_id, num_textures, rgb_images, depth_images);
     if (!ret) {
-        LogMessage("No new images ready for {}: {}", operation_name, robot_id);
+        LogMessage("No new images ready for {}: robot {}, cam stream {}", operation_name, robot_id, cam_stream_id);
         return false;
     }
 
@@ -538,7 +564,8 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
         }
     }
 
-    LogMessage("Copied images to shared buffers for {} robot ID: {}", operation_name, robot_id);
+    LogMessage("Copied images to shared buffers for {} robot ID: {}, cam stream {}",
+        operation_name, robot_id, cam_stream_id);
 
     // Copy to Unity resources
     s_CmdAlloc->Reset();
@@ -644,12 +671,12 @@ static bool uploadImageSetToUnityCommon(int32_t robot_id, GetImageSetFunc getIma
     return true;
 }
 
-bool uploadNextImageSetToUnity(int32_t robot_id) {
-    return uploadImageSetToUnityCommon(robot_id, SOb_GetNextImageSet, "robot");
+bool uploadNextImageSetToUnity(int32_t robot_id, int32_t cam_stream_id) {
+    return uploadImageSetToUnityCommon(robot_id, cam_stream_id, SOb_GetNextImageSet, "robot");
 }
 
-bool uploadNextVisionPipelineImageSetToUnity(int32_t robot_id) {
-    return uploadImageSetToUnityCommon(robot_id, SOb_GetNextVisionPipelineImageSet, "vision pipeline");
+bool uploadNextVisionPipelineImageSetToUnity(int32_t robot_id, int32_t cam_stream_id) {
+    return uploadImageSetToUnityCommon(robot_id, cam_stream_id, SOb_GetNextVisionPipelineImageSet, "vision pipeline");
 }
 
 }
