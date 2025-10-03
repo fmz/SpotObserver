@@ -16,23 +16,24 @@ static int32_t dump_id = 900;
 
 VisionPipeline::VisionPipeline(
     MLModel& model,
-    const SpotConnection& spot_connection,
+    const SpotCamStream& spot_cam_stream_,
     const TensorShape& input_shape,
     const TensorShape& depth_shape,
     const TensorShape& output_shape,
     size_t max_results
   ) : model_(model)
-    , spot_connection_(std::move(spot_connection))
+    , spot_cam_stream_(std::move(spot_cam_stream_))
     , input_shape_(input_shape)
     , depth_shape_(depth_shape)
     , output_shape_(output_shape)
     , max_size_(max_results)
-    , cuda_stream_(spot_connection_.getCudaStream())
+    , cuda_stream_(spot_cam_stream_.getCudaStream())
 { }
 
 VisionPipeline::~VisionPipeline() {
     stop();
     deallocateCudaBuffers();
+
 }
 
 bool VisionPipeline::start() {
@@ -40,20 +41,26 @@ bool VisionPipeline::start() {
         return false; // Already running
     }
     
-    if (!spot_connection_.isConnected() || !spot_connection_.isStreaming()) {
-        LogMessage("SpotConnection must be connected and streaming before starting pipeline");
+    if (!spot_cam_stream_.isStreaming()) {
+        LogMessage("SpotCamStream must be connected and streaming before starting pipeline");
         return false;
     }
 
-    if (input_shape_.N != depth_shape_.N) {
-        LogMessage("Incompatible shapes: input_shape_.N != depth_shape_.N");
+    TensorShape stream_rgb_shape = spot_cam_stream_.getCurrentRGBTensorShape();
+        if (input_shape_ != stream_rgb_shape) {
+        LogMessage("Incompatible shapes: input_shape {} != stream_rgb_shape {}",
+            input_shape_.to_string(),
+            stream_rgb_shape.to_string()
+        );
+        return false;
     }
-    if (input_shape_.N != output_shape_.N) {
-        LogMessage("Incompatible shapes: input_shape_.N != output_shape_.N");
-    }
-    size_t num_cams = spot_connection_.getCurrentNumCams();
-    if (input_shape_.N != num_cams) {
-        LogMessage("Incompatible shapes: input_shape_.N != spot_connection_.getCurrentNumCams()");
+    TensorShape stream_depth_shape = spot_cam_stream_.getCurrentDepthTensorShape();
+    if (depth_shape_ != stream_depth_shape) {
+        LogMessage("Incompatible shapes: depth_shape_ {} != stream_depth_shape {}",
+            depth_shape_.to_string(),
+            stream_depth_shape.to_string()
+        );
+        return false;
     }
 
     if (!allocateCudaBuffers()) {
@@ -169,8 +176,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
         auto start_time = std::chrono::high_resolution_clock::now();
         try {
             // Get current images from SpotConnection
-            if (!spot_connection_.getCurrentImages(
-                    spot_connection_.getCurrentNumCams(),
+            if (!spot_cam_stream_.getCurrentImages(
+                    input_shape_.N,
                     rgb_images,
                     depth_images)
             ) {

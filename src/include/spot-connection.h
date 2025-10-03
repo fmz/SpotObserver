@@ -5,6 +5,7 @@
 #pragma once
 
 #include "spot-observer.h"
+#include "model.h"
 
 #include <bosdyn/client/sdk/client_sdk.h>
 #include <bosdyn/client/robot/robot.h>
@@ -67,23 +68,25 @@ public:
     // Attach a stream created/owned by SpotConnection.
     inline void attachCudaStream(cudaStream_t stream) { cuda_stream_ = stream; }
 
-    friend class SpotConnection;
+    friend class SpotCamStream;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class SpotConnection {
-private:
-    std::unique_ptr<bosdyn::client::Robot> robot_;
-    std::unique_ptr<bosdyn::client::ClientSdk> sdk_;
+class SpotConnection;
+class VisionPipeline;
 
-    bosdyn::client::ImageClient* image_client_;
+class SpotCamStream {
+    SpotCamStream(const SpotCamStream&) = delete;
+    SpotCamStream& operator=(const SpotCamStream&) = delete;
+    SpotCamStream() = delete;
+
+    std::shared_ptr<bosdyn::client::ImageClient> image_client_;
 
     // Thread data
     ReaderWriterCBuf image_lifo_;
     std::atomic<bool> quit_requested_{false};
     std::atomic<int> num_samples_{0};
-    bool connected_;
     bool streaming_;
     // Camera feed params
     uint32_t current_cam_mask_;
@@ -96,7 +99,11 @@ private:
     // One CUDA stream per connection (owned here).
     cudaStream_t cuda_stream_{nullptr};
 
-private:
+    SpotConnection& robot_;
+
+    TensorShape current_rgb_shape_{0, 0, 0, 0};
+    TensorShape current_depth_shape_{0, 0, 0, 0};
+
     bosdyn::api::GetImageRequest _createImageRequest(
         const std::vector<std::string>& rgb_sources,
         const std::vector<std::string>& depth_sources
@@ -110,15 +117,12 @@ private:
     void _joinStreamingThread();
 
 public:
-
-    SpotConnection();
-    ~SpotConnection();
-
-    bool connect(
-        const std::string& robot_ip,
-        const std::string& username,
-        const std::string& password
+    SpotCamStream(
+        SpotConnection& robot,
+        std::shared_ptr<bosdyn::client::ImageClient> image_client,
+        int32_t image_lifo_max_size
     );
+    ~SpotCamStream();
 
     bool streamCameras(uint32_t cam_mask);
     bool getCurrentImages(
@@ -127,13 +131,51 @@ public:
         float** depths
     ) const;
 
-    bool     isConnected()       const { return connected_; }
     bool     isStreaming()       const { return streaming_; }
     uint32_t getCurrentCamMask() const { return current_cam_mask_; }
     int32_t  getCurrentNumCams() const { return current_num_cams_; }
 
+    TensorShape getCurrentRGBTensorShape() const { return current_rgb_shape_; }
+    TensorShape getCurrentDepthTensorShape() const { return current_depth_shape_; }
+
     // Return the connection's CUDA stream.
     const cudaStream_t getCudaStream() const { return cuda_stream_; }
+};
+
+class SpotConnection {
+    std::unique_ptr<bosdyn::client::Robot> robot_;
+    std::unique_ptr<bosdyn::client::ClientSdk> sdk_;
+    std::shared_ptr<bosdyn::client::ImageClient> image_client_;
+
+    int32_t image_lifo_max_size_;
+
+    std::unordered_map<int32_t, std::unique_ptr<SpotCamStream>> cam_streams_;
+    std::unordered_map<int32_t, std::unique_ptr<VisionPipeline>> vision_pipelines_;
+
+    bool connected_;
+
+    int32_t next_stream_id_{0xee1};
+
+public:
+
+    SpotConnection(
+        const std::string& robot_ip,
+        const std::string& username,
+        const std::string& password
+    );
+    ~SpotConnection();
+
+    int32_t createCamStream(uint32_t cam_mask);
+    bool removeCamStream(int32_t stream_id);
+    SpotCamStream* getCamStream(int32_t stream_id);
+
+    bool createVisionPipeline(MLModel& model, int32_t stream_id);
+    bool removeVisionPipeline(int32_t stream_id);
+    VisionPipeline* getVisionPipeline(int32_t stream_id);
+
+    bool isConnected() const { return connected_; }
+
+    friend class SpotCamStream;
 };
 
 } // namespace SOb

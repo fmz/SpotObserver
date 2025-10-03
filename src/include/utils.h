@@ -14,6 +14,24 @@
 
 namespace SOb {
 
+struct TensorShape {
+    size_t N, C, H, W;
+    TensorShape(size_t n, size_t c, size_t h, size_t w) : N(n), C(c), H(h), W(w) {}
+    bool operator==(const TensorShape& other) const {
+        return N == other.N && C == other.C && H == other.H && W == other.W;
+    }
+    bool operator!=(const TensorShape& other) const {
+        return !(*this == other);
+    }
+    size_t total_size() const {
+        return N * C * H * W;
+    }
+    std::string to_string() const {
+        return std::format("N={}, C={}, H={}, W={}", N, C, H, W);
+    }
+};
+
+
 inline void checkCudaError(cudaError_t error, const std::string& operation) {
     if (error != cudaSuccess) {
         throw std::runtime_error(operation + " failed: " + cudaGetErrorString(error));
