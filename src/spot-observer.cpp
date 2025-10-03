@@ -138,7 +138,7 @@ static bool getNextImageSet(
         return false;
     }
 
-    if (n_images_requested <= 0 || n_images_requested > stream->getCurrentCamMask()) {
+    if (n_images_requested <= 0 || n_images_requested > stream->getCurrentNumCams()) {
         LogMessage("SOb_GetNextImageSet: Invalid number of images requested: {}", n_images_requested);
         return false;
     }
@@ -175,6 +175,11 @@ static bool getNextImageSetFromVisionPipeline(
     }
 
     VisionPipeline* pipeline = robot.getVisionPipeline(cam_stream_id);
+    if (!pipeline) {
+        LogMessage("SOb_GetNextVisionPipelineImageSet: Vision pipeline for camera stream ID {} not found for robot ID {}",
+            cam_stream_id, robot_id);
+        return false;
+    }
     if (!pipeline->isRunning()) {
         LogMessage("SOb_GetNextVisionPipelineImageSet: Vision pipeline is not running for robot ID {}", robot_id);
         return false;
@@ -349,7 +354,7 @@ int32_t UNITY_INTERFACE_API SOb_CreateCameraStream(int32_t robot_id, uint32_t ca
     auto it = SOb::__robot_connections.find(robot_id);
     if (it == SOb::__robot_connections.end()) {
         SOb::LogMessage("SOb_CreateCameraStream: Robot ID {} not found", robot_id);
-        return false; // Robot ID not found
+        return -1; // Robot ID not found
     }
 
     try {
@@ -367,7 +372,7 @@ int32_t UNITY_INTERFACE_API SOb_CreateCameraStream(int32_t robot_id, uint32_t ca
 }
 
 UNITY_INTERFACE_EXPORT
-int32_t UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_stream_id) {
+bool UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_stream_id) {
     auto it = SOb::__robot_connections.find(robot_id);
     if (it == SOb::__robot_connections.end()) {
         SOb::LogMessage("SOb_DestroyCameraStream: Robot ID {} not found", robot_id);
@@ -377,14 +382,14 @@ int32_t UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t ca
     try {
         if (it->second->removeCamStream(cam_stream_id)) {
             SOb::LogMessage("SOb_DestroyCameraStream: Successfully destroyed camera stream {} for robot ID {}", cam_stream_id, robot_id);
-            return 0; // Success
+            return true; // Success
         } else {
             SOb::LogMessage("SOb_DestroyCameraStream: Failed to destroy camera stream {} for robot ID {}", cam_stream_id, robot_id);
-            return -1; // Failure
+            return false; // Failure
         }
     } catch (const std::exception& e) {
         SOb::LogMessage("SOb_DestroyCameraStream: Exception while destroying camera stream {} for robot ID {}: {}", cam_stream_id, robot_id, e.what());
-        return -1; // Error during destruction
+        return false; // Error during destruction
     }
 }
 
@@ -481,7 +486,7 @@ bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id, int32_t cam_st
         return true;
 
     } catch (const std::exception& e) {
-        LogMessage("SOb_StopVisionPipeline: Exception while launching vision pipeline for robot ID {} @ stream-ID: {}",
+        LogMessage("SOb_StopVisionPipeline: Exception while stopping vision pipeline for robot ID {} @ stream-ID: {}",
             robot_id, cam_stream_id, e.what());
         return false;
     }

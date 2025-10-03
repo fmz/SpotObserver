@@ -81,7 +81,7 @@ class SpotCamStream {
     SpotCamStream& operator=(const SpotCamStream&) = delete;
     SpotCamStream() = delete;
 
-    bosdyn::client::ImageClient& image_client_;
+    std::shared_ptr<bosdyn::client::ImageClient> image_client_;
 
     // Thread data
     ReaderWriterCBuf image_lifo_;
@@ -117,7 +117,11 @@ class SpotCamStream {
     void _joinStreamingThread();
 
 public:
-    SpotCamStream(SpotConnection& robot, bosdyn::client::ImageClient& image_client, int32_t image_lifo_max_size);
+    SpotCamStream(
+        SpotConnection& robot,
+        std::shared_ptr<bosdyn::client::ImageClient> image_client,
+        int32_t image_lifo_max_size
+    );
     ~SpotCamStream();
 
     bool streamCameras(uint32_t cam_mask);
@@ -141,7 +145,7 @@ public:
 class SpotConnection {
     std::unique_ptr<bosdyn::client::Robot> robot_;
     std::unique_ptr<bosdyn::client::ClientSdk> sdk_;
-    bosdyn::client::ImageClient* image_client_;
+    std::shared_ptr<bosdyn::client::ImageClient> image_client_;
 
     int32_t image_lifo_max_size_;
 
