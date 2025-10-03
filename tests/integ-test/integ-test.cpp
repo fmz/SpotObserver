@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
         for (size_t i = 0; i < 2; i++) {
             if (spot_ids[i] < 0) continue;
             // Launch vision pipeline only on the first camera stream
-            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[i][0], model);
+            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][0], model);
             if (!ret) {
                 std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
                 disconnect_from_spots(spot_ids, 2);
@@ -139,7 +139,7 @@ int main(int argc, char* argv[]) {
 
     for (uint32_t cam_bitmask : cam_bitmasks) {
         uint32_t num_bits_set = __num_set_bits(cam_bitmask);
-        num_images_requested_per_stream.push_back(__num_set_bits(num_bits_set));
+        num_images_requested_per_stream.push_back(num_bits_set);
         images.push_back(new uint8_t*[num_bits_set]);
         depths.push_back(new float*[num_bits_set]);
     }

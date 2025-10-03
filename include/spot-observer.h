@@ -44,7 +44,7 @@ UNITY_INTERFACE_EXPORT
 int32_t UNITY_INTERFACE_API SOb_CreateCameraStream(int32_t robot_id, uint32_t cam_bitmask);
 
 UNITY_INTERFACE_EXPORT
-int32_t UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_stream_id);
+bool UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_stream_id);
 
 
 UNITY_INTERFACE_EXPORT
