@@ -116,7 +116,7 @@ int main(int argc, char* argv[]) {
     SOb_SetUnityLogCallback(TestLogCallback);
     SOb_ToggleLogging(true);
 
-    SOb_ToggleDebugDumps("./spot_dump_dx12");
+    //SOb_ToggleDebugDumps("./spot_dump_dx12");
 
     // ---------------------------------------------------------------------------------------
     // 2. Initialize D3D12
