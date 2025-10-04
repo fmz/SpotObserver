@@ -198,14 +198,14 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "cudaMemcpyAsync RGB"
             );
 
-            DumpRGBImageFromCuda(
-                rgb_write_ptr,
-                cv_img.cols,
-                cv_img.rows,
-                cv_img.depth(),
-                "rgb",
-                n_rgbs_written + write_idx * n_images_per_response_
-            );
+            // DumpRGBImageFromCuda(
+            //     rgb_write_ptr,
+            //     cv_img.cols,
+            //     cv_img.rows,
+            //     cv_img.channels(),
+            //     "rgb",
+            //     n_rgbs_written + write_idx * n_images_per_response_
+            // );
 
             rgb_write_ptr += n_elems_per_rgb_;
             n_rgbs_written++;
@@ -239,23 +239,13 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "cudaMemcpyAsync DEPTH"
             );
 
-            // If dumping requires device->host copies on default stream, this ensures correctness:
-            // checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before debug dump");
-            DumpDepthImageFromCuda(
-                depth_write_ptr,
-                cv_img.cols,
-                cv_img.rows,
-                "pre-depth-cache",
-                n_depths_written + write_idx * n_images_per_response_
-            );
-
-            DumpDepthImageFromCuda(
-                depth_write_ptr,
-                cv_img.cols,
-                cv_img.rows,
-                "post-depth-cache",
-                n_depths_written + write_idx * n_images_per_response_
-            );
+            // DumpDepthImageFromCuda(
+            //     depth_write_ptr,
+            //     cv_img.cols,
+            //     cv_img.rows,
+            //     "depth",
+            //     n_depths_written + write_idx * n_images_per_response_
+            // );
 
             depth_write_ptr += n_elems_per_depth_;
             depth_cache_ptr += n_elems_per_depth_;
@@ -600,7 +590,6 @@ bool SpotCamStream::getCurrentImages(
 ) const {
     auto [ret_images, ret_depths] = image_lifo_.pop(n_images_requested);
     if (ret_images == nullptr || ret_depths == nullptr) {
-        LogMessage("SpotCamStream::getCurrentImages: No images available in the buffer");
         return false;
     }
 
@@ -684,15 +673,10 @@ SpotConnection::~SpotConnection() {
 int32_t SpotConnection::createCamStream(uint32_t cam_mask) {
     if (!connected_) {
         LogMessage("SpotConnection::createCamStream: Not connected to robot");
-        return false;
+        return -1;
     }
 
     try {
-        if (cam_streams_.find(cam_mask) != cam_streams_.end()) {
-            LogMessage("SpotConnection::createCamStream: Note that a camera stream with mask {:#x} already exists",
-                       cam_mask);
-        }
-
         int32_t stream_id = next_stream_id_++;
         auto [it, inserted] = cam_streams_.try_emplace(
             stream_id,
@@ -705,7 +689,8 @@ int32_t SpotConnection::createCamStream(uint32_t cam_mask) {
         if (!it->second->streamCameras(cam_mask)) {
             LogMessage("SpotConnection::createCamStream: Failed to start streaming cameras with mask {:#x}",
                        cam_mask);
-            return false;
+            cam_streams_.erase(it);
+            return -1;
         }
 
         return stream_id;

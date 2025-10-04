@@ -71,7 +71,7 @@ int main(int argc, char* argv[]) {
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT};
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND};
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -144,10 +144,9 @@ int main(int argc, char* argv[]) {
         depths.push_back(new float*[num_bits_set]);
     }
 
-    std::vector<float> image_cpu_buffer(640 * 480 * 3);
+    std::vector<uint8_t> image_cpu_buffer(640 * 480 * 4);
     std::vector<float> depth_cpu_buffer(640 * 480);
 
-    int32_t img_batch_id = 0;
     bool new_images = false;
     time_point<high_resolution_clock> start_time = high_resolution_clock::now();
     bool exit_requested = false;
@@ -163,42 +162,39 @@ int main(int argc, char* argv[]) {
         }
 
         for (int32_t spot = 0; spot < 2; spot++) {
-            if (spot_ids[spot] < 0) {
+            int32_t spot_id = spot_ids[spot];
+            if (spot_id < 0) {
                 std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
                 continue;
             }
-            for (int32_t stream = 0; stream < cam_stream_ids[spot_ids[spot]].size(); stream++) {
+            for (int32_t stream = 0; stream < cam_stream_ids[spot_id].size(); stream++) {
                 uint32_t num_images_requested = num_images_requested_per_stream[stream];
                 uint8_t** images_set = images[stream];
                 float** depths_set = depths[stream];
-                int32_t cam_stream_id = cam_stream_ids[spot_ids[spot]][stream];
+                int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
 
-                std::cout << "SPOT " << spot << " STREAM " << stream << " (ID " << cam_stream_id << ") - Requesting " << num_images_requested << " images..." << std::endl;
-                if (using_vision_pipeline) {
-                    if (!SOb_GetNextVisionPipelineImageSet(spot_ids[spot], cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
+                if (using_vision_pipeline && stream == 0) {
+                    if (!SOb_GetNextVisionPipelineImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         continue;
                     }
                 } else {
-                    if (!SOb_GetNextImageSet(spot_ids[spot], cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
+                    if (!SOb_GetNextImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         continue;
                     }
                 }
                 new_images = true;
                 for (uint32_t i = 0; i < num_images_requested; i++) {
-                    // std::cout << "SPOT " << spot << " Image batch " << img_batch_id <<" Image " << i << ": ";
-                    // std::cout << images[i] << " ";
-                    // std::cout << depths[i] << std::endl;
                     cudaMemcpyAsync(
                         image_cpu_buffer.data(),
-                        images[i],
+                        images_set[i],
                         4 * 640 * 480,
                         cudaMemcpyDeviceToHost
                     );
                     cudaMemcpyAsync(
                         depth_cpu_buffer.data(),
-                        depths[i],
+                        depths_set[i],
                         640 * 480 * sizeof(float),
                         cudaMemcpyDeviceToHost
                     );
@@ -207,18 +203,17 @@ int main(int argc, char* argv[]) {
                     cv::Mat image(480, 640, CV_8UC4, image_cpu_buffer.data());
                     cv::Mat depth(480, 640, CV_32FC1, depth_cpu_buffer.data());
 
-                    cv::cvtColor(image, image, cv::COLOR_RGB2BGR);
+                    cv::cvtColor(image, image, cv::COLOR_RGBA2BGR);
                     cv::normalize(depth, depth, 0, 1, cv::NORM_MINMAX);
 
-                    cv::imshow("SPOT " + std::to_string(spot) + " RGB" + std::to_string(i), image);
-                    cv::imshow("SPOT " + std::to_string(spot) + " Depth" + std::to_string(i), depth);
+                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " RGB" + std::to_string(i), image);
+                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " Depth" + std::to_string(i), depth);
                 }
                 if (cv::waitKey(1) == 'q') {
                     exit_requested = true;
                     break;
                 }
             }
-            img_batch_id++;
         }
     }
 
