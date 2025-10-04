@@ -4,17 +4,14 @@
 
 #pragma once
 
+#include "utils.h"
+
 #include <string>
 #include <torch/script.h>
 #include <torch/torch.h>
 #include <onnxruntime_cxx_api.h>
 
 namespace SOb {
-
-struct TensorShape {
-    size_t N, C, H, W;
-    TensorShape(size_t n, size_t c, size_t h, size_t w) : N(n), C(c), H(h), W(w) {}
-};
 
 class MLModel {
 public:

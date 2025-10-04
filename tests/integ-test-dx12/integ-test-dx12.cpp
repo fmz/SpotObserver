@@ -17,10 +17,12 @@
 #include <string>
 #include <chrono>
 #include <format>
+#include <unordered_map>
 
 #include "spot-observer.h"
 #include "d3dx12.h"
 #include <opencv2/opencv.hpp>
+#include <cuda_runtime.h>
 
 using Microsoft::WRL::ComPtr;
 using namespace std::chrono;
@@ -54,26 +56,11 @@ static uint32_t __num_set_bits(uint32_t bitmask) {
     return __popcnt(bitmask);
 }
 
-static std::vector<SpotCamera> convert_bitmask_to_spot_cam_vector(uint32_t bitmask) {
-    std::vector<SpotCamera> cams;
 
-    cams.reserve(__num_set_bits(bitmask));
-
-    if (bitmask & SpotCamera::BACK)       cams.emplace_back(SpotCamera::BACK);
-    if (bitmask & SpotCamera::FRONTLEFT)  cams.emplace_back(SpotCamera::FRONTLEFT);
-    if (bitmask & SpotCamera::FRONTRIGHT) cams.emplace_back(SpotCamera::FRONTRIGHT);
-    if (bitmask & SpotCamera::LEFT)       cams.emplace_back(SpotCamera::LEFT);
-    if (bitmask & SpotCamera::RIGHT)      cams.emplace_back(SpotCamera::RIGHT);
-    if (bitmask & SpotCamera::HAND)       cams.emplace_back(SpotCamera::HAND);
-
-    return cams;
-}
-
-static int32_t connect_to_spot_and_start_cam_feed(
+static int32_t connect_to_spot(
     const std::string& robot_ip,
     const std::string& username,
-    const std::string& password,
-    uint32_t cam_bitmask
+    const std::string& password
 ) {
     std::cout << "Connecting to Spot robot at " << robot_ip << " with user " << username << std::endl;
     int32_t spot_id = SOb_ConnectToSpot(robot_ip.c_str(), username.c_str(), password.c_str());
@@ -81,15 +68,32 @@ static int32_t connect_to_spot_and_start_cam_feed(
         std::cerr << "Failed to connect to Spot robot" << std::endl;
         return -1;
     }
+    std::cout << "Connected to Spot robot with ID: " << spot_id << std::endl;
+    return spot_id;
+}
 
-    bool ret = SOb_ReadCameraFeeds(spot_id, cam_bitmask);
-    if (!ret) {
+static int32_t start_cam_stream(int32_t spot_id, uint32_t cam_bitmask) {
+    int32_t cam_stream_id = SOb_CreateCameraStream(spot_id, cam_bitmask);
+    if (cam_stream_id < 0) {
         std::cerr << "Failed to start reading camera feeds" << std::endl;
         SOb_DisconnectFromSpot(spot_id);
         return -1;
     }
+    std::cout << "Started camera stream with ID: " << cam_stream_id << std::endl;
+    return cam_stream_id;
+}
 
-    return spot_id;
+static int32_t disconnect_from_spots(const int32_t spot_ids[], size_t num_spots) {
+    for (size_t i = 0; i < num_spots; i++) {
+        if (spot_ids[i] >= 0) {
+            if (SOb_DisconnectFromSpot(spot_ids[i])) {
+                std::cout << "Disconnected from Spot robot with ID: " << spot_ids[i] << std::endl;
+            } else {
+                std::cerr << "Failed to disconnect from Spot robot with ID: " << spot_ids[i] << std::endl;
+            }
+        }
+    }
+    return 0;
 }
 
 // ===========================================================================================
@@ -112,7 +116,7 @@ int main(int argc, char* argv[]) {
     SOb_SetUnityLogCallback(TestLogCallback);
     SOb_ToggleLogging(true);
 
-    //SOb_ToggleDebugDumps("./spot-dump-dx12");
+    //SOb_ToggleDebugDumps("./spot_dump_dx12");
 
     // ---------------------------------------------------------------------------------------
     // 2. Initialize D3D12
@@ -174,36 +178,55 @@ int main(int argc, char* argv[]) {
     // ---------------------------------------------------------------------------------------
     // 3. Connect to Spot robots
     // ---------------------------------------------------------------------------------------
-    int32_t spot_ids[2];
-    uint32_t cam_bitmask = FRONTLEFT | FRONTRIGHT; //| HAND | LEFT | RIGHT | BACK;
-    std::vector<SpotCamera> cams = convert_bitmask_to_spot_cam_vector(cam_bitmask);
+    int32_t spot_ids[2] = {-1, -1};
+    std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND};
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
         } else {
-            spot_ids[i] = connect_to_spot_and_start_cam_feed(robot_ips[i], username, password, cam_bitmask);
+            spot_ids[i] = connect_to_spot(robot_ips[i], username, password);
             if (spot_ids[i] < 0) {
-                std::cerr << "Failed to connect to Spot robot " << i << std::endl;
+                disconnect_from_spots(spot_ids, 2);
                 return -1;
             }
         }
     }
     std::cout << "Connected to Spot robots with IDs: " << spot_ids[0] << ", " << spot_ids[1] << std::endl;
 
-    uint32_t num_cameras = __num_set_bits(cam_bitmask);
+    for (size_t i = 0; i < 2; i++) {
+        if (spot_ids[i] < 0) continue;
+        for (uint32_t cam_bitmask : cam_bitmasks) {
+            int32_t cam_stream_id = start_cam_stream(spot_ids[i], cam_bitmask);
+
+            if (cam_stream_id < 0) {
+                disconnect_from_spots(spot_ids, 2);
+                return -1;
+            }
+            cam_stream_ids[spot_ids[i]].push_back(cam_stream_id);
+        }
+    }
+
+    // Calculate total cameras across all streams
+    uint32_t total_cameras = 0;
+    for (uint32_t cam_bitmask : cam_bitmasks) {
+        total_cameras += __num_set_bits(cam_bitmask);
+    }
+    uint32_t num_cameras = total_cameras;
 
     // ---------------------------------------------------------------------------------------
-    // 4. Create D3D12 resources for each camera
+    // 4. Create D3D12 resources for each camera stream
     // ---------------------------------------------------------------------------------------
-    std::cout << "Creating D3D12 textures for " << num_cameras << " cameras per robot...\n";
+    std::cout << "Creating D3D12 textures for camera streams...\n";
 
     struct CameraResources {
         ComPtr<ID3D12Resource> image_texture;
         ComPtr<ID3D12Resource> depth_texture;
     };
 
-    std::vector<std::vector<CameraResources>> robot_resources(2, std::vector<CameraResources>(num_cameras));
+    // Structure: robot -> stream -> camera resources
+    std::unordered_map<int32_t, std::vector<std::vector<CameraResources>>> robot_resources;
 
     D3D12_HEAP_PROPERTIES heap_default  = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
     D3D12_RESOURCE_DESC rgb_desc = CD3DX12_RESOURCE_DESC::Buffer(IMAGE_BUFSIZE);
@@ -212,32 +235,39 @@ int main(int argc, char* argv[]) {
     for (size_t robot = 0; robot < 2; robot++) {
         if (spot_ids[robot] < 0) continue;
 
-        for (uint32_t cam = 0; cam < num_cameras; cam++) {
-            // Create image texture (RGB)
+        int32_t spot_id = spot_ids[robot];
+        robot_resources[spot_id].resize(cam_bitmasks.size());
 
-            ThrowIfFailed(device->CreateCommittedResource(
-                &heap_default,
-                D3D12_HEAP_FLAG_NONE,
-                &rgb_desc,
-                D3D12_RESOURCE_STATE_COMMON,
-                nullptr,
-                IID_PPV_ARGS(&robot_resources[robot][cam].image_texture)
-            ), "CreateCommittedResource for rgb texture");
+        for (size_t stream = 0; stream < cam_bitmasks.size(); stream++) {
+            uint32_t num_cams_in_stream = __num_set_bits(cam_bitmasks[stream]);
+            robot_resources[spot_id][stream].resize(num_cams_in_stream);
 
-            // Create depth texture
-            ThrowIfFailed(device->CreateCommittedResource(
-                &heap_default,
-                D3D12_HEAP_FLAG_NONE,
-                &depth_desc,
-                D3D12_RESOURCE_STATE_COMMON,
-                nullptr,
-                IID_PPV_ARGS(&robot_resources[robot][cam].depth_texture)
-            ), "CreateCommittedResource for depth texture");
+            for (uint32_t cam = 0; cam < num_cams_in_stream; cam++) {
+                // Create image texture (RGB)
+                ThrowIfFailed(device->CreateCommittedResource(
+                    &heap_default,
+                    D3D12_HEAP_FLAG_NONE,
+                    &rgb_desc,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    nullptr,
+                    IID_PPV_ARGS(&robot_resources[spot_id][stream][cam].image_texture)
+                ), "CreateCommittedResource for rgb texture");
 
-            std::wstring img_name = L"Robot" + std::to_wstring(robot) + L"_Cam" + std::to_wstring(cam) + L"_Image";
-            std::wstring depth_name = L"Robot" + std::to_wstring(robot) + L"_Cam" + std::to_wstring(cam) + L"_Depth";
-            robot_resources[robot][cam].image_texture->SetName(img_name.c_str());
-            robot_resources[robot][cam].depth_texture->SetName(depth_name.c_str());
+                // Create depth texture
+                ThrowIfFailed(device->CreateCommittedResource(
+                    &heap_default,
+                    D3D12_HEAP_FLAG_NONE,
+                    &depth_desc,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    nullptr,
+                    IID_PPV_ARGS(&robot_resources[spot_id][stream][cam].depth_texture)
+                ), "CreateCommittedResource for depth texture");
+
+                std::wstring img_name = L"Robot" + std::to_wstring(robot) + L"_Stream" + std::to_wstring(stream) + L"_Cam" + std::to_wstring(cam) + L"_Image";
+                std::wstring depth_name = L"Robot" + std::to_wstring(robot) + L"_Stream" + std::to_wstring(stream) + L"_Cam" + std::to_wstring(cam) + L"_Depth";
+                robot_resources[spot_id][stream][cam].image_texture->SetName(img_name.c_str());
+                robot_resources[spot_id][stream][cam].depth_texture->SetName(depth_name.c_str());
+            }
         }
     }
 
@@ -246,25 +276,33 @@ int main(int argc, char* argv[]) {
     // ---------------------------------------------------------------------------------------
     std::cout << "Registering D3D12 resources with SpotObserver...\n";
 
-    int32_t robots_active = 0;
+    int32_t total_streams_active = 0;
     for (size_t robot = 0; robot < 2; robot++) {
         if (spot_ids[robot] < 0) continue;
 
-        for (uint32_t cam = 0; cam < num_cameras; cam++) {
-            bool reg_result = SOb_RegisterUnityReadbackBuffers(
-                spot_ids[robot],
-                1 << cam, // Single bit for camera
-                robot_resources[robot][cam].image_texture.Get(),
-                robot_resources[robot][cam].depth_texture.Get(),
-                static_cast<int32_t>(IMAGE_BUFSIZE),
-                static_cast<int32_t>(DEPTH_BUFSIZE)
-            );
+        int32_t spot_id = spot_ids[robot];
+        for (size_t stream = 0; stream < cam_bitmasks.size(); stream++) {
+            uint32_t num_cams_in_stream = __num_set_bits(cam_bitmasks[stream]);
+            int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
 
-            if (!reg_result) {
-                std::cerr << "Failed to register textures for robot " << robot << " camera " << cam << std::endl;
-                return -1;
+            for (uint32_t cam = 0; cam < num_cams_in_stream; cam++) {
+                bool reg_result = SOb_RegisterUnityReadbackBuffers(
+                    spot_id,
+                    cam_stream_id,
+                    1 << cam, // Single bit for camera within the stream
+                    robot_resources[spot_id][stream][cam].image_texture.Get(),
+                    robot_resources[spot_id][stream][cam].depth_texture.Get(),
+                    static_cast<int32_t>(IMAGE_BUFSIZE),
+                    static_cast<int32_t>(DEPTH_BUFSIZE)
+                );
+
+                if (!reg_result) {
+                    std::cerr << "Failed to register textures for robot " << robot << " stream " << stream << " camera " << cam << std::endl;
+                    disconnect_from_spots(spot_ids, 2);
+                    return -1;
+                }
             }
-            robots_active++;
+            total_streams_active++;
         }
     }
 
@@ -284,17 +322,17 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "Model loaded successfully!" << std::endl;
 
-        // Launch vision pipeline on both robots
+        // Launch vision pipeline on both robots (first stream only)
         for (size_t i = 0; i < 2; i++) {
             if (spot_ids[i] < 0) continue;
-            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], model);
+            int32_t spot_id = spot_ids[i];
+            int32_t cam_stream_id = cam_stream_ids[spot_id][0]; // Use first stream
+            bool ret = SOb_LaunchVisionPipeline(spot_id, cam_stream_id, model);
             if (!ret) {
                 std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
-                for (int32_t spot = 0; spot < 2; spot++) {
-                    cv::destroyAllWindows();
-                    SOb_DisconnectFromSpot(spot_ids[spot]);
-                }
+                disconnect_from_spots(spot_ids, 2);
                 SOb_UnloadModel(model);
+                cv::destroyAllWindows();
                 return -1;
             }
             std::cout << "Vision pipeline launched on robot " << i << std::endl;
@@ -307,141 +345,133 @@ int main(int argc, char* argv[]) {
     std::cout << "Starting camera feed reading loop with OpenCV display...\n";
     std::cout << "Press 'q' in any OpenCV window to quit...\n";
 
-    int32_t frame_count = 0;
-    bool should_quit = false;
-    int32_t n_images_pending = num_cameras * robots_active;
+    // Initialized output pointers for GPU device pointers
+    std::vector<uint32_t> num_images_requested_per_stream;
+    std::vector<uint8_t**> images_gpu;
+    std::vector<float**> depths_gpu;
 
-    auto start_time = high_resolution_clock::now();
-    auto frame_start = start_time;
-
-
-    for (int32_t iteration = 0; !should_quit && iteration < 10000; iteration++) {
-        for (size_t robot = 0; robot < 2; robot++) {
-            if (spot_ids[robot] < 0) continue;
-
-            // Upload next image batch to Unity textures
-            bool upload_result;
-            if (using_vision_pipeline) {
-                upload_result = SOb_PushNextVisionPipelineImageSetToUnityBuffers(spot_ids[robot]);
-            } else {
-                upload_result = SOb_PushNextImageSetToUnityBuffers(spot_ids[robot]);
-            }
-            if (!upload_result) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            std::cout << "Successfully uploaded image batch for robot " << robot << " at frame " << frame_count << std::endl;
-
-            // Read back and display all camera data
-            for (uint32_t cam = 0; cam < num_cameras; cam++) {
-                uint8_t* image_data = nullptr;
-                float*   depth_data = nullptr;
-
-                D3D12_RANGE image_read_range = {0, IMAGE_BUFSIZE};
-                D3D12_RANGE depth_read_range = {0, DEPTH_BUFSIZE};
-                D3D12_RANGE no_write = {0, 0};
-
-                ThrowIfFailed(robot_resources[robot][cam].image_texture->Map(
-                    0, &image_read_range, reinterpret_cast<void**>(&image_data)
-                ), "Map image readback");
-
-                ThrowIfFailed(robot_resources[robot][cam].depth_texture->Map(
-                    0, &depth_read_range, reinterpret_cast<void**>(&depth_data)
-                ), "Map depth readback");
-
-                // Create OpenCV matrices from D3D12 readback data
-                size_t actual_width = WIDTH;
-                size_t actual_height = HEIGHT;
-                // switch (cams[cam]) {
-                // case SpotCamera::FRONTLEFT:
-                // case SpotCamera::FRONTRIGHT:
-                //     actual_width = HEIGHT;
-                //     actual_height = WIDTH;
-                //     break;
-                // }
-
-                cv::Mat image(actual_height, actual_width, CV_8UC4, image_data);
-                cv::Mat depth(actual_height, actual_width, CV_32FC1, depth_data);
-
-                // Convert RGB to BGR for OpenCV display
-                cv::cvtColor(image, image, cv::COLOR_RGBA2BGR);
-                cv::normalize(depth, depth, 0, 1, cv::NORM_MINMAX);
-
-                // Create window names
-                std::string image_window = "SPOT " + std::to_string(robot) + " RGB" + std::to_string(cam);
-                std::string depth_window = "SPOT " + std::to_string(robot) + " Depth" + std::to_string(cam);
-
-                // Display the images
-                cv::imshow(image_window, image);
-                cv::imshow(depth_window, depth);
-
-                n_images_pending -= 1;
-
-                // Unmap the readback buffers
-                robot_resources[robot][cam].image_texture->Unmap(0, &no_write);
-                robot_resources[robot][cam].depth_texture->Unmap(0, &no_write);
-
-                // Analyze data for stats (only for first camera for brevity)
-                if (cam == 0 && frame_count % 10 == 0) {
-                    int img_nonzero = 0, depth_nonzero = 0;
-
-                    for (int i = 0; i < WIDTH * HEIGHT * CHANNELS; i++) {
-                        if (std::abs(image_data[i]) > 1e-6) img_nonzero++;
-                    }
-
-                    for (int i = 0; i < WIDTH * HEIGHT; i++) {
-                        if (std::abs(depth_data[i]) > 1e-6) depth_nonzero++;
-                    }
-
-                    std::cout << std::format("Robot {}, Frame {}: Image nonzero={}, Depth nonzero={}\n",
-                        robot, frame_count, img_nonzero, depth_nonzero);
-                }
-            }
-
-            // Check for quit key
-            int key = cv::waitKey(1) & 0xFF;
-            if (key == 'q' || key == 27) { // 'q' or ESC
-                should_quit = true;
-                break;
-            }
-        }
-
-        if (n_images_pending <= 0) {
-            if (n_images_pending < 0) {
-                std::cerr << "n_images_pending went negative!" << std::endl;
-            }
-            auto frame_end = high_resolution_clock::now();
-            auto frame_duration = duration_cast<microseconds>(frame_end - frame_start);
-
-            std::cout << std::format("Frame {} processing time: {:.2f} ms\n",
-                frame_count, double(frame_duration.count()) / 1000.0);
-
-            frame_start = frame_end;
-
-            n_images_pending = num_cameras * robots_active;
-        }
-
-        frame_count++;
+    for (uint32_t cam_bitmask : cam_bitmasks) {
+        uint32_t num_bits_set = __num_set_bits(cam_bitmask);
+        num_images_requested_per_stream.push_back(num_bits_set);
+        images_gpu.push_back(new uint8_t*[num_bits_set]);
+        depths_gpu.push_back(new float*[num_bits_set]);
     }
 
-    auto end_time = high_resolution_clock::now();
-    auto total_duration = duration_cast<milliseconds>(end_time - start_time);
+    std::vector<uint8_t> image_cpu_buffer(640 * 480 * 4);
+    std::vector<float> depth_cpu_buffer(640 * 480);
 
-    std::cout << "Processed " << frame_count << " frames in " << total_duration.count() << " ms\n";
-    std::cout << "Average frame time: " << (float(total_duration.count()) / float(frame_count)) << " ms\n";
+    bool new_images = false;
+    auto start_time = high_resolution_clock::now();
+    bool exit_requested = false;
+
+    while (!exit_requested) {
+        if (new_images) {
+            auto end_time = high_resolution_clock::now();
+            auto duration = duration_cast<microseconds>(end_time - start_time);
+            double latency_ms = double(duration.count()) / 1000.0;
+
+            std::cout << std::format("integ-test-dx12: total latency: {:.4f} ms\n", latency_ms);
+            start_time = end_time; // Reset start time for next push
+            new_images = false;
+        }
+
+        for (int32_t spot = 0; spot < 2; spot++) {
+            int32_t spot_id = spot_ids[spot];
+            if (spot_id < 0) {
+                continue;
+            }
+
+            for (int32_t stream = 0; stream < cam_stream_ids[spot_id].size(); stream++) {
+                uint32_t num_images_requested = num_images_requested_per_stream[stream];
+                uint8_t** images_set = images_gpu[stream];
+                float** depths_set = depths_gpu[stream];
+                int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
+
+                // Get GPU pointers from SpotObserver
+                if (using_vision_pipeline && stream == 0) {
+                    if (!SOb_GetNextVisionPipelineImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        continue;
+                    }
+                } else {
+                    if (!SOb_GetNextImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        continue;
+                    }
+                }
+                new_images = true;
+
+                // Upload GPU data to D3D12 textures, then read back and display
+                for (uint32_t i = 0; i < num_images_requested; i++) {
+                    // Copy from GPU to CPU buffers
+                    cudaMemcpyAsync(
+                        image_cpu_buffer.data(),
+                        images_set[i],
+                        4 * 640 * 480,
+                        cudaMemcpyDeviceToHost
+                    );
+                    cudaMemcpyAsync(
+                        depth_cpu_buffer.data(),
+                        depths_set[i],
+                        640 * 480 * sizeof(float),
+                        cudaMemcpyDeviceToHost
+                    );
+                    cudaStreamSynchronize(0); // Wait for the copy to complete
+
+                    // Now write to D3D12 readback buffers
+                    uint8_t* image_data = nullptr;
+                    float*   depth_data = nullptr;
+
+                    D3D12_RANGE image_read_range = {0, IMAGE_BUFSIZE};
+                    D3D12_RANGE depth_read_range = {0, DEPTH_BUFSIZE};
+                    D3D12_RANGE no_write = {0, 0};
+
+                    ThrowIfFailed(robot_resources[spot_id][stream][i].image_texture->Map(
+                        0, &image_read_range, reinterpret_cast<void**>(&image_data)
+                    ), "Map image readback");
+
+                    ThrowIfFailed(robot_resources[spot_id][stream][i].depth_texture->Map(
+                        0, &depth_read_range, reinterpret_cast<void**>(&depth_data)
+                    ), "Map depth readback");
+
+                    // Copy from CPU buffers to D3D12 mapped memory
+                    std::memcpy(image_data, image_cpu_buffer.data(), IMAGE_BUFSIZE);
+                    std::memcpy(depth_data, depth_cpu_buffer.data(), DEPTH_BUFSIZE);
+
+                    // Create OpenCV matrices from D3D12 readback data
+                    cv::Mat image(480, 640, CV_8UC4, image_data);
+                    cv::Mat depth(480, 640, CV_32FC1, depth_data);
+
+                    cv::cvtColor(image, image, cv::COLOR_RGBA2BGR);
+                    cv::normalize(depth, depth, 0, 1, cv::NORM_MINMAX);
+
+                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " RGB" + std::to_string(i), image);
+                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " Depth" + std::to_string(i), depth);
+
+                    // Unmap the readback buffers
+                    robot_resources[spot_id][stream][i].image_texture->Unmap(0, &no_write);
+                    robot_resources[spot_id][stream][i].depth_texture->Unmap(0, &no_write);
+                }
+
+                if (cv::waitKey(1) == 'q') {
+                    exit_requested = true;
+                    break;
+                }
+            }
+        }
+    }
 
     // ---------------------------------------------------------------------------------------
     // 7. Cleanup
     // ---------------------------------------------------------------------------------------
     std::cout << "Cleaning up...\n";
 
+    disconnect_from_spots(spot_ids, 2);
     cv::destroyAllWindows();
 
-    for (int robot = 0; robot < 2; robot++) {
-        if (spot_ids[robot] >= 0) {
-            SOb_DisconnectFromSpot(spot_ids[robot]);
-        }
-    }
+    if (model) SOb_UnloadModel(model);
+    for (auto image_set : images_gpu) delete[] image_set;
+    for (auto depth_set : depths_gpu) delete[] depth_set;
 
     CloseHandle(fenceEvt);
 

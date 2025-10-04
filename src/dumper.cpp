@@ -145,6 +145,7 @@ void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, 
         h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + 2 * num_pixels])) * 255.0f);
     }
 
+    LogMessage("Dumping float RGB image of size {}x{} to {}/rgb_{}.png", width, height, subdir, dump_id);
     return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id);
 }
 
@@ -173,6 +174,8 @@ void DumpRGBImageFromCuda(
         LogMessage("Failed to copy RGB image from device to host: {}", cudaGetErrorString(err));
         return;
     }
+    LogMessage("Dumping uint8 RGB image of size {}x{} to {}/rgb_{}.png", width, height, subdir, dump_id);
+
     return _dump_RGB_image(h_image, width, height, num_channels, subdir, dump_id);
 
 }

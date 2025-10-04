@@ -24,14 +24,11 @@ bool logging_enabled = true;
 
 // Map to hold robot connections by ID
 static int32_t __next_robot_id = 0; // Incremental ID for each robot connection
-static std::unordered_map<int32_t, SpotConnection> __robot_connections;
+static std::unordered_map<int32_t, std::unique_ptr<SpotConnection>> __robot_connections;
 
 // Keeping track of loaded models
 std::unordered_map<std::string, SObModel> s_path_to_model_map;
 std::unordered_map<SObModel, std::string> s_model_to_path_map;
-
-// Vision pipeline management
-static std::unordered_map<int32_t, std::unique_ptr<VisionPipeline>> __vision_pipelines;
 
 // Needed to get Unity to load our DLL dependencies from the same directory as the plugin
 static bool SetDLLDirectory() {
@@ -81,16 +78,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         break;
     case DLL_PROCESS_DETACH:
         LogMessage("DLL_PROCESS_DETACH");
-        // Clean up all vision pipelines before DLL unload
+        // Clean up all robot connections
         try {
-            for (auto& [robot_id, pipeline] : __vision_pipelines) {
-                LogMessage("DLL_PROCESS_DETACH: Stopping vision pipeline for robot ID {}", robot_id);
-                pipeline->stop();
-            }
-            __vision_pipelines.clear();
-            LogMessage("DLL_PROCESS_DETACH: All vision pipelines stopped and cleared");
+            __robot_connections.clear();
+            LogMessage("DLL_PROCESS_DETACH: All Spot connections cleared");
         } catch (const std::exception& e) {
-            LogMessage("DLL_PROCESS_DETACH: Exception while cleaning up vision pipelines: {}", e.what());
+            LogMessage("DLL_PROCESS_DETACH: Exception while cleaning up Spot connections: {}", e.what());
         }
         break;
     }
@@ -101,14 +94,11 @@ static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& use
     try {
         int32_t robot_id = __next_robot_id;
         __next_robot_id++;
-        auto [it, inserted] = __robot_connections.try_emplace(robot_id);
-        if (inserted) {
-            bool success = it->second.connect(robot_ip, username, password);
-            if (!success) {
-                __robot_connections.erase(it);
-                LogMessage("SOb::ConnectToSpot: Failed to connect to robot {}", robot_ip);
-                return -1;
-            }
+        auto [it, inserted] =
+            __robot_connections.try_emplace(robot_id, std::make_unique<SpotConnection>(robot_ip, username, password));
+        if (!inserted) {
+            LogMessage("SOb::ConnectToSpot: Failed to connect to robot {}", robot_ip);
+            return -1;
         }
         return robot_id;
 
@@ -120,6 +110,7 @@ static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& use
 
 static bool getNextImageSet(
     int32_t robot_id,
+    int32_t cam_stream_id,
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
@@ -129,23 +120,33 @@ static bool getNextImageSet(
         LogMessage("SOb_GetNextImageSet: Robot ID {} not found", robot_id);
         return false;
     }
-    SpotConnection& robot = it->second;
+    SpotConnection& robot = *it->second;
     if (!robot.isConnected()) {
         LogMessage("SOb_GetNextImageSet: Robot ID {} is not connected", robot_id);
         return false;
     }
-    if (!robot.isStreaming()) {
-        LogMessage("SOb_GetNextImageSet: Robot ID {} is not streaming", robot_id);
+
+    SpotCamStream* stream = robot.getCamStream(cam_stream_id);
+    if (!stream) {
+        LogMessage("SOb_GetNextImageSet: Camera stream ID {} not found for robot ID {}",
+            cam_stream_id, robot_id);
         return false;
     }
-    if (n_images_requested <= 0 || n_images_requested > robot.getCurrentNumCams()) {
+    if (!stream->isStreaming()) {
+        LogMessage("SOb_GetNextImageSet: Camera stream ID {} not streaming for robot ID {}",
+            cam_stream_id, robot_id);
+        return false;
+    }
+
+    if (n_images_requested <= 0 || n_images_requested > stream->getCurrentNumCams()) {
         LogMessage("SOb_GetNextImageSet: Invalid number of images requested: {}", n_images_requested);
         return false;
     }
 
     // Pop images from the circular buffer
-    if (robot.getCurrentImages(n_images_requested, images, depths)) {
-        LogMessage("SOb_GetNextImageSet: Successfully retrieved {} images for robot ID {}", n_images_requested, robot_id);
+    if (stream->getCurrentImages(n_images_requested, images, depths)) {
+        LogMessage("SOb_GetNextImageSet: Successfully retrieved {} images for robot ID {} @ cam-stream ID {}",
+            n_images_requested, robot_id, cam_stream_id);
         return true;
     } else {
         // LogMessage("SOb_GetNextImageSet: Failed to retrieve images for robot ID {}", robot_id);
@@ -157,17 +158,28 @@ static bool getNextImageSet(
 
 static bool getNextImageSetFromVisionPipeline(
     int32_t robot_id,
+    int32_t cam_stream_id,
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
 ) {
-    auto pipeline_it = __vision_pipelines.find(robot_id);
-    if (pipeline_it == __vision_pipelines.end()) {
-        LogMessage("SOb_GetNextVisionPipelineImageSet: Vision pipeline not found for robot ID {}", robot_id);
+    auto it = __robot_connections.find(robot_id);
+    if (it == __robot_connections.end()) {
+        LogMessage("SOb_GetNextImageSet: Robot ID {} not found", robot_id);
         return false;
     }
-    
-    auto& pipeline = pipeline_it->second;
+    SpotConnection& robot = *it->second;
+    if (!robot.isConnected()) {
+        LogMessage("SOb_GetNextImageSet: Robot ID {} is not connected", robot_id);
+        return false;
+    }
+
+    VisionPipeline* pipeline = robot.getVisionPipeline(cam_stream_id);
+    if (!pipeline) {
+        LogMessage("SOb_GetNextVisionPipelineImageSet: Vision pipeline for camera stream ID {} not found for robot ID {}",
+            cam_stream_id, robot_id);
+        return false;
+    }
     if (!pipeline->isRunning()) {
         LogMessage("SOb_GetNextVisionPipelineImageSet: Vision pipeline is not running for robot ID {}", robot_id);
         return false;
@@ -326,20 +338,6 @@ bool UNITY_INTERFACE_API SOb_DisconnectFromSpot(int32_t robot_id) {
         return false; // Robot ID not found
     }
     try {
-        // First, clean up any associated vision pipeline
-        auto pipeline_it = SOb::__vision_pipelines.find(robot_id);
-        if (pipeline_it != SOb::__vision_pipelines.end()) {
-            SOb::LogMessage("SOb_DisconnectFromSpot: Stopping vision pipeline for robot ID {}", robot_id);
-            
-            // Take ownership of the pipeline to prevent access during cleanup
-            auto pipeline = std::move(pipeline_it->second);
-            SOb::__vision_pipelines.erase(pipeline_it);
-            
-            // Now safely stop the pipeline
-            pipeline->stop();
-            SOb::LogMessage("SOb_DisconnectFromSpot: Vision pipeline stopped and removed for robot ID {}", robot_id);
-        }
-        
         // Then remove the robot connection
         SOb::__robot_connections.erase(it); // Remove from the map
         SOb::LogMessage("SOb_DisconnectFromSpot: Successfully disconnected robot ID {}", robot_id);
@@ -352,26 +350,49 @@ bool UNITY_INTERFACE_API SOb_DisconnectFromSpot(int32_t robot_id) {
 
 // Start reading spot camera feeds. Runs in a separate thread.
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_ReadCameraFeeds(int32_t robot_id, uint32_t cam_bitmask) {
+int32_t UNITY_INTERFACE_API SOb_CreateCameraStream(int32_t robot_id, uint32_t cam_bitmask) {
     auto it = SOb::__robot_connections.find(robot_id);
     if (it == SOb::__robot_connections.end()) {
-        SOb::LogMessage("SOb_ReadCameraFeeds: Robot ID {} not found", robot_id);
+        SOb::LogMessage("SOb_CreateCameraStream: Robot ID {} not found", robot_id);
+        return -1; // Robot ID not found
+    }
+
+    try {
+        int32_t stream_id = it->second->createCamStream(cam_bitmask);
+        if (stream_id < 0) {
+            SOb::LogMessage("SOb_CreateCameraStream: Failed to start reading cameras for robot ID {}", robot_id);
+            return -1;
+        }
+        SOb::LogMessage("SOb_CreateCameraStream: Successfully started reading cameras for robot ID {}", robot_id);
+        return stream_id; // Success
+    } catch (const std::exception& e) {
+        SOb::LogMessage("SOb_CreateCameraStream: Exception while reading cameras for robot ID {}: {}", robot_id, e.what());
+        return -1; // Error during camera reading
+    }
+}
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_stream_id) {
+    auto it = SOb::__robot_connections.find(robot_id);
+    if (it == SOb::__robot_connections.end()) {
+        SOb::LogMessage("SOb_DestroyCameraStream: Robot ID {} not found", robot_id);
         return false; // Robot ID not found
     }
 
     try {
-        bool success = it->second.streamCameras(cam_bitmask);
-        if (!success) {
-            SOb::LogMessage("SOb_ReadCameraFeeds: Failed to start reading cameras for robot ID {}", robot_id);
-            return false;
+        if (it->second->removeCamStream(cam_stream_id)) {
+            SOb::LogMessage("SOb_DestroyCameraStream: Successfully destroyed camera stream {} for robot ID {}", cam_stream_id, robot_id);
+            return true; // Success
+        } else {
+            SOb::LogMessage("SOb_DestroyCameraStream: Failed to destroy camera stream {} for robot ID {}", cam_stream_id, robot_id);
+            return false; // Failure
         }
-        SOb::LogMessage("SOb_ReadCameraFeeds: Successfully started reading cameras for robot ID {}", robot_id);
-        return true; // Success
     } catch (const std::exception& e) {
-        SOb::LogMessage("SOb_ReadCameraFeeds: Exception while reading cameras for robot ID {}: {}", robot_id, e.what());
-        return false; // Error during camera reading
+        SOb::LogMessage("SOb_DestroyCameraStream: Exception while destroying camera stream {} for robot ID {}: {}", cam_stream_id, robot_id, e.what());
+        return false; // Error during destruction
     }
 }
+
 
 UNITY_INTERFACE_EXPORT
 SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* backend) {
@@ -398,11 +419,15 @@ SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* ba
 
 UNITY_INTERFACE_EXPORT
 void UNITY_INTERFACE_API SOb_UnloadModel(SObModel model) {
-    SOb::unloadModel(model);
+    try {
+        SOb::unloadModel(model);
+    } catch (const std::exception& e) {
+        SOb::LogMessage("SOb_UnloadModel: Exception while unloading model: {}", e.what());
+    }
 }
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, SObModel model) {
+bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, int32_t cam_stream_id, SObModel model) {
     using namespace SOb;
     try {
         auto robot_it = __robot_connections.find(robot_id);
@@ -411,8 +436,8 @@ bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, SObModel mod
             return false;
         }
 
-        if (!robot_it->second.isConnected() || !robot_it->second.isStreaming()) {
-            LogMessage("SOb_LaunchVisionPipeline: Robot ID {} must be connected and streaming", robot_id);
+        if (!robot_it->second->isConnected()) {
+            LogMessage("SOb_LaunchVisionPipeline: Robot ID {} must be connected", robot_id);
             return false;
         }
 
@@ -421,45 +446,15 @@ bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, SObModel mod
             return false;
         }
 
-        // Check if pipeline already exists for this robot
-        if (__vision_pipelines.find(robot_id) != __vision_pipelines.end()) {
-            LogMessage("SOb_LaunchVisionPipeline: Vision pipeline already exists for robot ID {}", robot_id);
-            return false;
-        }
-
         // Cast the model to the proper type
         auto ml_model = reinterpret_cast<MLModel*>(model);
         
         // Create shared pointer to robot connection
-        const SpotConnection& spot_connection = robot_it->second;
-        
-        // Get batch size from the number of cameras being processed
-        int32_t batch_size = spot_connection.getCurrentNumCams();
-        LogMessage("SOb_LaunchVisionPipeline: Using batch size {} based on number of cameras", batch_size);
-        
-        // Define tensor shapes using the actual batch size from spot connection
-        TensorShape input_shape(batch_size, 4, 480, 640);   // NCHW format with dynamic batch size
-        TensorShape depth_shape(batch_size, 1, 480, 640);   // Single channel depth with dynamic batch size
-        TensorShape output_shape(batch_size, 1, 480, 640);  // Output shape with dynamic batch size
-        
-        // Create vision pipeline
-        auto pipeline = std::make_unique<VisionPipeline>(
-            *ml_model,
-            spot_connection,
-            input_shape,
-            depth_shape,
-            output_shape,
-            5
-        );
-        
-        // Start the pipeline
-        if (!pipeline->start()) {
+        SpotConnection& spot_connection = *robot_it->second;
+        if (!spot_connection.createVisionPipeline(*ml_model, cam_stream_id)) {
             LogMessage("SOb_LaunchVisionPipeline: Failed to start vision pipeline for robot ID {}", robot_id);
             return false;
         }
-        
-        // Store the pipeline
-        __vision_pipelines[robot_id] = std::move(pipeline);
         
         LogMessage("SOb_LaunchVisionPipeline: Successfully launched vision pipeline for robot ID {}", robot_id);
         return true;
@@ -471,24 +466,28 @@ bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, SObModel mod
 }
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id) {
+bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id, int32_t cam_stream_id) {
     using namespace SOb;
     try {
-        auto pipeline_it = __vision_pipelines.find(robot_id);
-        if (pipeline_it == __vision_pipelines.end()) {
-            LogMessage("SOb_StopVisionPipeline: Vision pipeline not found for robot ID {}", robot_id);
+        auto robot_it = __robot_connections.find(robot_id);
+        if (robot_it == __robot_connections.end()) {
+            LogMessage("SOb_StopVisionPipeline: Robot ID {} not found", robot_id);
             return false;
         }
 
-        auto& pipeline = pipeline_it->second;
-        pipeline->stop();
-        __vision_pipelines.erase(pipeline_it);
-        
-        LogMessage("SOb_StopVisionPipeline: Successfully stopped vision pipeline for robot ID {}", robot_id);
+        // Create shared pointer to robot connection
+        SpotConnection& spot_connection = *robot_it->second;
+        if (!spot_connection.removeVisionPipeline(cam_stream_id)) {
+            return false;
+        }
+
+        LogMessage("SOb_StopVisionPipeline: Successfully stopped vision pipeline for robot ID {} @ stream-ID {}",
+            robot_id, cam_stream_id);
         return true;
-        
+
     } catch (const std::exception& e) {
-        LogMessage("SOb_StopVisionPipeline: Exception while stopping vision pipeline for robot ID {}: {}", robot_id, e.what());
+        LogMessage("SOb_StopVisionPipeline: Exception while stopping vision pipeline for robot ID {} @ stream-ID: {}",
+            robot_id, cam_stream_id, e.what());
         return false;
     }
 }
@@ -496,6 +495,7 @@ bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id) {
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
     int32_t robot_id,
+    int32_t cam_stream_id,
     uint32_t cam_bit,         // Single bit only
     void* out_img_tex,        // ID3D12Resource* (aka texture)
     void* out_depth_tex,      // ID3D12Resource* (aka texture)
@@ -505,6 +505,7 @@ bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
     try {
         bool ret = SOb::registerOutputTextures(
             robot_id,
+            cam_stream_id,
             cam_bit,
             out_img_tex,
             out_depth_tex,
@@ -512,13 +513,16 @@ bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
             depth_buffer_size
         );
         if (!ret) {
-            SOb::LogMessage("SOb_RegisterOutputTextures: Failed to register output textures for robot ID {}", robot_id);
+            SOb::LogMessage("SOb_RegisterOutputTextures: Failed to register output textures for robot ID {} @ cam-stream ID {}",
+                robot_id, cam_stream_id);
             return false;
         }
-        SOb::LogMessage("SOb_RegisterOutputTextures: Successfully registered output textures for robot ID {}", robot_id);
+        SOb::LogMessage("SOb_RegisterOutputTextures: Successfully registered output textures for robot ID {} @ cam-stream ID {}",
+            robot_id, cam_stream_id);
         return true;
     } catch (const std::exception& e) {
-        SOb::LogMessage("SOb_RegisterOutputTextures: Exception while registering output textures for robot ID {}: {}", robot_id, e.what());
+        SOb::LogMessage("SOb_RegisterOutputTextures: Exception while registering output textures for robot ID {} @ cam-stream ID {}: {}",
+            robot_id, cam_stream_id, e.what());
         return false;
     }
 }
@@ -542,6 +546,7 @@ bool UNITY_INTERFACE_API SOb_ClearUnityReadbackBuffers(int32_t robot_id) {
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
+    int32_t cam_stream_id,
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
@@ -552,14 +557,16 @@ bool UNITY_INTERFACE_API SOb_GetNextImageSet(
             return false;
         }
         
-        bool ret = SOb::getNextImageSet(robot_id, n_images_requested, images, depths);
+        bool ret = SOb::getNextImageSet(robot_id, cam_stream_id, n_images_requested, images, depths);
         if (!ret) {
-            SOb::LogMessage("SOb_GetNextImageSet: Failed to get next image set for robot ID {}", robot_id);
+            // SOb::LogMessage("SOb_GetNextImageSet: Failed to get next image set for robot ID {} @ cam-stream ID {}",
+            //     robot_id, cam_stream_id);
             return false; // Failed to get images
         }
         return ret;
     } catch (const std::exception& e) {
-        SOb::LogMessage("SOb::GetNextImageSet: Exception while getting next image set for robot ID {}: {}", robot_id, e.what());
+        SOb::LogMessage("SOb::GetNextImageSet: Exception while getting next image set for robot ID {} @ cam-stream ID {}: {}",
+            robot_id, cam_stream_id, e.what());
         return false;
     }
 }
@@ -567,6 +574,7 @@ bool UNITY_INTERFACE_API SOb_GetNextImageSet(
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextVisionPipelineImageSet(
     int32_t robot_id,
+    int32_t cam_stream_id,
     int32_t n_images_requested,
     uint8_t** images,
     float** depths
@@ -577,7 +585,7 @@ bool UNITY_INTERFACE_API SOb_GetNextVisionPipelineImageSet(
             return false;
         }
         
-        bool ret = SOb::getNextImageSetFromVisionPipeline(robot_id, n_images_requested, images, depths);
+        bool ret = SOb::getNextImageSetFromVisionPipeline(robot_id, cam_stream_id, n_images_requested, images, depths);
         if (!ret) {
             SOb::LogMessage("SOb_GetNextVisionPipelineImageSet: Failed to get next image set from vision pipeline for robot ID {}", robot_id);
             return false;
@@ -590,9 +598,9 @@ bool UNITY_INTERFACE_API SOb_GetNextVisionPipelineImageSet(
 }
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id) {
+bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id, int32_t cam_stream_id) {
     try {
-        bool ret = SOb::uploadNextImageSetToUnity(robot_id);
+        bool ret = SOb::uploadNextImageSetToUnity(robot_id, cam_stream_id);
         if (!ret) {
             SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers: Failed to upload next image set for robot ID {}", robot_id);
             return false; // Failed to get images
@@ -605,9 +613,9 @@ bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id) {
 }
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id) {
+bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id, int32_t cam_stream_id) {
     try {
-        bool ret = SOb::uploadNextVisionPipelineImageSetToUnity(robot_id);
+        bool ret = SOb::uploadNextVisionPipelineImageSetToUnity(robot_id, cam_stream_id);
         if (!ret) {
             SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers: Failed to upload next vision pipeline image set for robot ID {}", robot_id);
             return false; // Failed to get images
@@ -666,4 +674,3 @@ void UNITY_INTERFACE_API SOb_ToggleDebugDumps(const char* dump_path) {
 }
 
 } // extern "C"
-
