@@ -145,8 +145,8 @@ static bool getNextImageSet(
 
     // Pop images from the circular buffer
     if (stream->getCurrentImages(n_images_requested, images, depths)) {
-        LogMessage("SOb_GetNextImageSet: Successfully retrieved {} images for robot ID {}",
-            n_images_requested, robot_id);
+        LogMessage("SOb_GetNextImageSet: Successfully retrieved {} images for robot ID {} @ cam-stream ID {}",
+            n_images_requested, robot_id, cam_stream_id);
         return true;
     } else {
         // LogMessage("SOb_GetNextImageSet: Failed to retrieve images for robot ID {}", robot_id);
@@ -559,8 +559,8 @@ bool UNITY_INTERFACE_API SOb_GetNextImageSet(
         
         bool ret = SOb::getNextImageSet(robot_id, cam_stream_id, n_images_requested, images, depths);
         if (!ret) {
-            SOb::LogMessage("SOb_GetNextImageSet: Failed to get next image set for robot ID {} @ cam-stream ID {}",
-                robot_id, cam_stream_id);
+            // SOb::LogMessage("SOb_GetNextImageSet: Failed to get next image set for robot ID {} @ cam-stream ID {}",
+            //     robot_id, cam_stream_id);
             return false; // Failed to get images
         }
         return ret;

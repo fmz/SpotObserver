@@ -430,9 +430,6 @@ bool VisionPipeline::getCurrentImages(
     uint8_t* rgb_data_out = d_rgb_data_      + read_idx * n_elems_rgb_total;
     float* depth_data_out = d_output_buffer_ + read_idx * n_elems_depth_total;
 
-    LogMessage("VisionPipeline::getCurrentImages, popping {} images from index {}",
-               input_shape_.N, read_idx);
-
     for (int32_t i = 0; i < n_images_requested; i++) {
         images[i] = rgb_data_out   + i * n_elems_per_rgb;
         depths[i] = depth_data_out + i * n_elems_per_depth;
