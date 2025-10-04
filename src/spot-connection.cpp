@@ -198,14 +198,14 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "cudaMemcpyAsync RGB"
             );
 
-            // DumpRGBImageFromCuda(
-            //     rgb_write_ptr,
-            //     cv_img.cols,
-            //     cv_img.rows,
-            //     cv_img.channels(),
-            //     "rgb",
-            //     n_rgbs_written + write_idx * n_images_per_response_
-            // );
+            DumpRGBImageFromCuda(
+                rgb_write_ptr,
+                cv_img.cols,
+                cv_img.rows,
+                cv_img.channels(),
+                "rgb",
+                n_rgbs_written + write_idx * n_images_per_response_
+            );
 
             rgb_write_ptr += n_elems_per_rgb_;
             n_rgbs_written++;
@@ -239,13 +239,13 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 "cudaMemcpyAsync DEPTH"
             );
 
-            // DumpDepthImageFromCuda(
-            //     depth_write_ptr,
-            //     cv_img.cols,
-            //     cv_img.rows,
-            //     "depth",
-            //     n_depths_written + write_idx * n_images_per_response_
-            // );
+            DumpDepthImageFromCuda(
+                depth_write_ptr,
+                cv_img.cols,
+                cv_img.rows,
+                "depth",
+                n_depths_written + write_idx * n_images_per_response_
+            );
 
             depth_write_ptr += n_elems_per_depth_;
             depth_cache_ptr += n_elems_per_depth_;
