@@ -350,11 +350,11 @@ static std::vector<SpotCamera> convert_bitmask_to_spot_cam_vector(uint32_t bitma
 
 SpotCamStream::SpotCamStream(
     SpotConnection& robot,
-    std::shared_ptr<bosdyn::client::ImageClient> image_client,
+    bosdyn::client::ImageClient* image_client,
     int32_t image_lifo_max_size
 )
     : robot_(robot)
-    , image_client_(std::move(image_client))
+    , image_client_(image_client)
     , image_lifo_(image_lifo_max_size)
     , streaming_(false)
 {
@@ -646,7 +646,7 @@ SpotConnection::SpotConnection(
                        image_client_result.status.message()));
         }
 
-        image_client_ = std::shared_ptr<bosdyn::client::ImageClient>(image_client_result.response);
+        image_client_ = image_client_result.response;
 
         LogMessage("SpotConnection::connect: Connected to Spot robot at {}", robot_ip);
 
@@ -659,15 +659,18 @@ SpotConnection::SpotConnection(
 }
 
 SpotConnection::~SpotConnection() {
+    LogMessage("SpotConnection::~SpotConnection: Disconnecting from robot");
+
     vision_pipelines_.clear();
     cam_streams_.clear();
 
     if (connected_) {
-        LogMessage("SpotConnection::~SpotConnection: Disconnecting from robot");
         robot_.reset();
         sdk_.reset();
+        // TODO: figure out how to cleanup image_client_
         connected_ = false;
     }
+    LogMessage("SpotConnection::~SpotConnection: Robot state fully cleaned up");
 }
 
 int32_t SpotConnection::createCamStream(uint32_t cam_mask) {

@@ -382,10 +382,15 @@ int main(int argc, char* argv[]) {
             }
 
             for (int32_t stream = 0; stream < cam_stream_ids[spot_id].size(); stream++) {
+                int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
+                if (cam_stream_id < 0) {
+                    std::cout << "Skipping Spot " << spot << " Stream " << stream << " as it is not valid." << std::endl;
+                    continue;
+                }
+
                 uint32_t num_images_requested = num_images_requested_per_stream[stream];
                 uint8_t** images_set = images_gpu[stream];
                 float** depths_set = depths_gpu[stream];
-                int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
 
                 // Get GPU pointers from SpotObserver
                 if (using_vision_pipeline && stream == 0) {

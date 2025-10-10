@@ -819,10 +819,6 @@ cudaError_t preprocess_depth_image2(
 
     cudaError_t err = cudaSuccess;
 
-    // Preserve valid pixels
-    err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
-    if (err != cudaSuccess) return err;
-
     if (do_neighbor_averaging) {
         dim3 block(16, 16);
         dim3 grid((W + block.x - 1) / block.x,
@@ -862,6 +858,10 @@ cudaError_t preprocess_depth_image2(
         const int2_* final_seeds = ping ? seeds_a : seeds_b;
         finalize_fill_kernel<<<grid, block, 0, stream>>>(final_seeds, depth_image_in, d_out, W, H, threshold);
         err = cudaGetLastError();
+        if (err != cudaSuccess) return err;
+    } else {
+        // Just copy input to output buffer
+        err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
         if (err != cudaSuccess) return err;
     }
 
@@ -1159,7 +1159,7 @@ __global__ void nhwc_to_nchw_rgb_float_kernel(
             
             int out_p = out_y * out_W + out_x;
             int base = n * 3 * out_pixels_per_img + out_p;   // position of R plane element
-            out[base]                        = px.x * scale;
+            out[base]                          = px.x * scale;
             out[base +     out_pixels_per_img] = px.y * scale;
             out[base + 2 * out_pixels_per_img] = px.z * scale;
         }
@@ -1244,13 +1244,13 @@ __global__ void prefill_depth_from_cache(
     if (x >= width || y >= height) return;
 
     int idx = y * width + x;
-    float new_val = new_depth[idx];
-    float old_val = cached_depth[idx];
+    float new_val    = new_depth[idx];
+    float cached_val = cached_depth[idx];
 
     // Check if new depth value is valid
     bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
     // Update the new_depth buffer in-place to have gaps filled
-    output_depth[idx] = new_valid ? old_val : new_val;
+    output_depth[idx] = new_valid ? new_val : cached_val;
 }
 
 cudaError_t prefill_invalid_depth(

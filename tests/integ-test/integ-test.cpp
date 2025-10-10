@@ -71,7 +71,7 @@ int main(int argc, char* argv[]) {
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND};
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT , HAND};
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -168,10 +168,15 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             for (int32_t stream = 0; stream < cam_stream_ids[spot_id].size(); stream++) {
+                int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
+                if (cam_stream_id < 0) {
+                    std::cout << "Skipping Spot " << spot << " Stream " << stream << " as it is not valid." << std::endl;
+                    continue;
+                }
+
                 uint32_t num_images_requested = num_images_requested_per_stream[stream];
                 uint8_t** images_set = images[stream];
                 float** depths_set = depths[stream];
-                int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
 
                 if (using_vision_pipeline && stream == 0) {
                     if (!SOb_GetNextVisionPipelineImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
