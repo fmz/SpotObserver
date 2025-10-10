@@ -478,6 +478,8 @@ bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id, int32_t cam_st
         // Create shared pointer to robot connection
         SpotConnection& spot_connection = *robot_it->second;
         if (!spot_connection.removeVisionPipeline(cam_stream_id)) {
+            LogMessage("SOb_StopVisionPipeline: Failed to stop vision pipeline for robot ID {} @ stream-ID {}",
+            robot_id, cam_stream_id);
             return false;
         }
 

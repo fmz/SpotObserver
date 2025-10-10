@@ -231,29 +231,29 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 input_shape_float.W = input_shape_.H;
             }
 
-            TensorShape depth_shape_single = depth_shape_;
+            TensorShape depth_shape = depth_shape_;
             if (do_rotate_90_cw) {
-                depth_shape_single.H = depth_shape_.W / depth_scale_factor;
-                depth_shape_single.W = depth_shape_.H / depth_scale_factor;
+                depth_shape.H = depth_shape_.W / depth_scale_factor;
+                depth_shape.W = depth_shape_.H / depth_scale_factor;
             } else {
-                depth_shape_single.H = depth_shape_.H / depth_scale_factor;
-                depth_shape_single.W = depth_shape_.W / depth_scale_factor;
+                depth_shape.H = depth_shape_.H / depth_scale_factor;
+                depth_shape.W = depth_shape_.W / depth_scale_factor;
             }
 
-            TensorShape output_shape_single = output_shape_;
+            TensorShape output_shape = output_shape_;
             if (do_rotate_90_cw) {
-                output_shape_single.H = output_shape_.W;
-                output_shape_single.W = output_shape_.H;
+                output_shape.H = output_shape_.W;
+                output_shape.W = output_shape_.H;
             } else {
-                output_shape_single.H = output_shape_.H;
-                output_shape_single.W = output_shape_.W;
+                output_shape.H = output_shape_.H;
+                output_shape.W = output_shape_.W;
             }
             LogMessage("num_images_per_iter = {}", num_images_per_iter);
 
             for (size_t i = 0; i < num_images_per_iter; i++) {
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
-                float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape_single.C * depth_shape_single.H * depth_shape_single.W;
+                float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape.C * depth_shape.H * depth_shape.W;
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
                 float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
@@ -270,18 +270,19 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         100.0f,
                         cuda_stream_
                     ), "prefill_invalid_depth");
-                    //
-                    // checkCudaError(preprocess_depth_image2(
-                    //     cur_preprocessed_depth_ptr,
-                    //     cur_preprocessed_depth_ptr,
-                    //     depth_shape_.W,
-                    //     depth_shape_.H,
-                    //     false,
-                    //     depth_scale_factor,
-                    //     cuda_ws_.d_depth_preprocessor_workspace_,
-                    //     do_rotate_90_cw,
-                    //     cuda_stream_ // NEW
-                    // ), "preprocess_depth_image");
+
+                    // Downscale
+                    checkCudaError(preprocess_depth_image2(
+                        cur_preprocessed_depth_ptr,
+                        cur_preprocessed_depth_ptr,
+                        depth_shape_.W,
+                        depth_shape_.H,
+                        false,
+                        depth_scale_factor,
+                        cuda_ws_.d_depth_preprocessor_workspace_,
+                        do_rotate_90_cw,
+                        cuda_stream_
+                    ), "preprocess_depth_image");
 
                 } else {
                     checkCudaError(preprocess_depth_image2(
@@ -311,8 +312,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 cuda_ws_.d_preprocessed_depth_data_,
                 d_depth_output_ptr,
                 input_shape_float,
-                depth_shape_single,
-                output_shape_single
+                depth_shape,
+                output_shape
             );
 
             if (!inference_success) {
@@ -336,8 +337,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 float* temp_output_ptr = reinterpret_cast<float*>(cuda_ws_.d_depth_preprocessor_workspace_);
                 checkCudaError(postprocess_depth_image(
                     cur_depth_output_ptr,
-                    output_shape_single.W,
-                    output_shape_single.H,
+                    output_shape.W,
+                    output_shape.H,
                     temp_output_ptr,
                     do_rotate_90_cw,
                     cuda_stream_
@@ -345,10 +346,10 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
                 checkCudaError(update_depth_cache(
                     cur_depth_output_ptr,
-                    cur_preprocessed_depth_ptr,
+                    cur_depth_input_ptr,
                     depth_cache_ptr,
-                    output_shape_single.W,
-                    output_shape_single.H,
+                    output_shape.W,
+                    output_shape.H,
                     0.01f,
                     100.0f,
                     cuda_stream_
