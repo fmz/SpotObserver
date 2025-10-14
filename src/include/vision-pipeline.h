@@ -54,6 +54,9 @@ private:
     float* d_output_buffer_{nullptr};
     uint8_t* d_rgb_data_{nullptr};
 
+    int32_t dump_id = 0;
+    int32_t thread_num;
+
     void pipelineWorker(std::stop_token stop_token);
     bool allocateCudaBuffers();
     void deallocateCudaBuffers();

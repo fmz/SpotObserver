@@ -819,6 +819,10 @@ cudaError_t preprocess_depth_image2(
 
     cudaError_t err = cudaSuccess;
 
+    // Preserve valid pixels
+    err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    if (err != cudaSuccess) return err;
+
     if (do_neighbor_averaging) {
         dim3 block(16, 16);
         dim3 grid((W + block.x - 1) / block.x,
@@ -859,11 +863,12 @@ cudaError_t preprocess_depth_image2(
         finalize_fill_kernel<<<grid, block, 0, stream>>>(final_seeds, depth_image_in, d_out, W, H, threshold);
         err = cudaGetLastError();
         if (err != cudaSuccess) return err;
-    } else {
-        // Just copy input to output buffer
-        err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
-        if (err != cudaSuccess) return err;
     }
+    // } else {
+    //     // Just copy input to output buffer
+    //     err = cudaMemcpyAsync(d_out, depth_image_in, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    //     if (err != cudaSuccess) return err;
+    // }
 
     if (downscale_factor > 1) {
         if ((downscale_factor & (downscale_factor - 1)) != 0) {
@@ -1305,9 +1310,13 @@ __global__ void update_depth_cache_kernel(
     bool old_valid = (old_val >= min_valid_depth && old_val <= max_valid_depth);
     
     if (new_valid) {
-        cached_depth[idx] = new_val;
+        if (old_valid) {
+            cached_depth[idx] = old_val * 0.5f + new_val * 0.5f;
+        } else {
+            cached_depth[idx] = new_val;
+        }
     } else if (old_valid) {
-        cached_depth[idx] = old_val * 0.5f + generated_val * 0.5f;
+        cached_depth[idx] = old_val * 0.8f + generated_val * 0.2f;
     } else {
         cached_depth[idx] = generated_val;
     }
