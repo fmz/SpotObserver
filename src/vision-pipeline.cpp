@@ -12,7 +12,7 @@
 
 namespace SOb {
 
-static int32_t dump_id = 900;
+static int32_t thread_id_ = 0;
 
 VisionPipeline::VisionPipeline(
     MLModel& model,
@@ -28,6 +28,7 @@ VisionPipeline::VisionPipeline(
     , output_shape_(output_shape)
     , max_size_(max_results)
     , cuda_stream_(spot_cam_stream_.getCudaStream())
+    , thread_num(thread_id_++)
 { }
 
 VisionPipeline::~VisionPipeline() {
@@ -271,6 +272,14 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         cuda_stream_
                     ), "prefill_invalid_depth");
 
+                    DumpDepthImageFromCuda(
+                        cur_preprocessed_depth_ptr,
+                        depth_shape_.W,
+                        depth_shape_.H,
+                        "depth-post-prefill",
+                        dump_id+i,
+                        thread_num
+                    );
                     // Downscale
                     checkCudaError(preprocess_depth_image2(
                         cur_preprocessed_depth_ptr,
@@ -283,6 +292,14 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         do_rotate_90_cw,
                         cuda_stream_
                     ), "preprocess_depth_image");
+                    DumpDepthImageFromCuda(
+                            cur_preprocessed_depth_ptr,
+                            depth_shape.W,
+                            depth_shape.H,
+                            "depth-post-downscale",
+                            dump_id+i,
+                            thread_num
+                    );
 
                 } else {
                     checkCudaError(preprocess_depth_image2(
@@ -329,7 +346,6 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             for (size_t i = 0; i < num_images_per_iter; i++) {
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
-                float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
                 float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
@@ -337,23 +353,23 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 float* temp_output_ptr = reinterpret_cast<float*>(cuda_ws_.d_depth_preprocessor_workspace_);
                 checkCudaError(postprocess_depth_image(
                     cur_depth_output_ptr,
-                    output_shape.W,
-                    output_shape.H,
+                    output_shape_.W,
+                    output_shape_.H,
                     temp_output_ptr,
                     do_rotate_90_cw,
                     cuda_stream_
                 ), "postprocess_depth_image");
-
-                checkCudaError(update_depth_cache(
-                    cur_depth_output_ptr,
-                    cur_depth_input_ptr,
-                    depth_cache_ptr,
-                    output_shape.W,
-                    output_shape.H,
-                    0.01f,
-                    100.0f,
-                    cuda_stream_
-                ), "update_depth_cache");
+                //
+                // checkCudaError(update_depth_cache(
+                //     cur_depth_output_ptr,
+                //     cur_depth_input_ptr,
+                //     depth_cache_ptr,
+                //     output_shape_.W,
+                //     output_shape_.H,
+                //     0.01f,
+                //     100.0f,
+                //     cuda_stream_
+                // ), "update_depth_cache");
 
                 // Ensure dumps see completed work (dumpers likely use default stream)
                 checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before dumps");
@@ -363,23 +379,25 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     input_shape_.W,
                     input_shape_.H,
                     "input-rgb",
-                    dump_id
+                    dump_id+i,
+                    thread_num
                 );
                 DumpDepthImageFromCuda(
                     cur_depth_input_ptr,
                     depth_shape_.W,
                     depth_shape_.H,
                     "input-depth",
-                    dump_id
+                    dump_id+i,
+                    thread_num
                 );
                 DumpDepthImageFromCuda(
-                    d_depth_output_ptr,
+                    cur_depth_output_ptr,
                     depth_shape_.W,
                     depth_shape_.H,
                     "output-depth",
-                    dump_id
+                    dump_id+i,
+                    thread_num
                 );
-                dump_id++;
             }
 
             checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after postprocess");
@@ -394,6 +412,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("VisionPipeline: Updating write index from {} to {}",
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
+            // first_run_ = false;
+            dump_id += num_images_per_iter;
 
         } catch (const std::exception& e) {
             LogMessage("Exception in pipeline worker: {}", e.what());
@@ -439,4 +459,4 @@ bool VisionPipeline::getCurrentImages(
     return true;
 }
 
-} // namespace SOb
+} // namespace 

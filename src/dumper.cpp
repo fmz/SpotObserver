@@ -34,6 +34,17 @@ bool create_directory_if_not_exists(const std::string& path) {
     return true; // Directory created successfully
 }
 
+static std::string get_file_path(
+    const std::string& path,
+    const std::string& subdir,
+    const std::string& base_name,
+    int32_t dump_id_major,
+    int32_t dump_id_minor,
+    const std::string& extension
+) {
+    return path + "/" + subdir + "/" + base_name + std::to_string(dump_id_major) + "_" + std::to_string(dump_id_minor) + extension;
+}
+
 bool ToggleDumping(const std::string& dump_path) {
     if (dump_path.empty()) {
         m_dumps_enabled = false;
@@ -70,7 +81,8 @@ static void _dump_RGB_image(
     int32_t height,
     int32_t channels,
     const std::string& subdir,
-    int32_t dump_id
+    int32_t dump_id_major,
+    int32_t dump_id_minor
 ) {
     // Generate filename
     std::string subdir_path = m_dump_path + "/" + subdir;
@@ -78,7 +90,14 @@ static void _dump_RGB_image(
         LogMessage("_dump_RGB_image: Failed to create directory: {}", subdir_path);
         return;
     }
-    std::string file_path = m_dump_path + "/" + subdir + "/rgb_" + std::to_string(dump_id) + ".png";
+    std::string file_path = get_file_path(
+        m_dump_path,
+        subdir,
+        "rgb_",
+        dump_id_major,
+        dump_id_minor,
+        ".png"
+    );
 
     // Write image to file
     const int stride_in_bytes = width * channels;
@@ -88,14 +107,14 @@ static void _dump_RGB_image(
 }
 
 
-void DumpRGBImageFromCudaHWC(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
+void DumpRGBImageFromCudaHWC(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id_major, int32_t dump_id_minor) {
     if (!m_dumps_enabled) {
         return;
     }
 
     const size_t num_pixels = width * height;
     const size_t float_size = num_pixels * 3 * sizeof(float);
-    
+
     // Allocate host memory for float image
     std::vector<float> h_image(num_pixels * 3);
 
@@ -115,10 +134,10 @@ void DumpRGBImageFromCudaHWC(const float* image, int32_t width, int32_t height, 
         h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i * 3 + 2])) * 255.0f);
     }
 
-   return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id);
+   return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id_major, dump_id_minor);
 }
 
-void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
+void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id_major, int32_t dump_id_minor) {
     if (!m_dumps_enabled) {
         return;
     }
@@ -145,8 +164,8 @@ void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, 
         h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + 2 * num_pixels])) * 255.0f);
     }
 
-    LogMessage("Dumping float RGB image of size {}x{} to {}/rgb_{}.png", width, height, subdir, dump_id);
-    return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id);
+    LogMessage("Dumping float RGB image of size {}x{} to {}/rgb_{}_{}.png", width, height, subdir, dump_id_major, dump_id_minor);
+    return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id_major, dump_id_minor);
 }
 
 void DumpRGBImageFromCuda(
@@ -155,7 +174,8 @@ void DumpRGBImageFromCuda(
     int32_t height,
     int32_t num_channels,
     const std::string& subdir,
-    int32_t dump_id
+    int32_t dump_id_major,
+    int32_t dump_id_minor
 ) {
     if (!m_dumps_enabled) {
         return;
@@ -174,13 +194,19 @@ void DumpRGBImageFromCuda(
         LogMessage("Failed to copy RGB image from device to host: {}", cudaGetErrorString(err));
         return;
     }
-    LogMessage("Dumping uint8 RGB image of size {}x{} to {}/rgb_{}.png", width, height, subdir, dump_id);
+    LogMessage("Dumping uint8 RGB image of size {}x{} to {}/rgb_{}_{}.png", width, height, subdir, dump_id_major, dump_id_minor);
 
-    return _dump_RGB_image(h_image, width, height, num_channels, subdir, dump_id);
-
+    return _dump_RGB_image(h_image, width, height, num_channels, subdir, dump_id_major, dump_id_minor);
 }
 
-void DumpDepthImageFromCuda(const float* depth, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
+void DumpDepthImageFromCuda(
+    const float* depth,
+    int32_t width,
+    int32_t height,
+    const std::string& subdir,
+    int32_t dump_id_major,
+    int32_t dump_id_minor
+) {
     if (!m_dumps_enabled) {
         return;
     }
@@ -226,7 +252,15 @@ void DumpDepthImageFromCuda(const float* depth, int32_t width, int32_t height, c
         LogMessage("Failed to create directory: {}", subdir_path);
         return;
     }
-    std::string file_path = m_dump_path + "/" + subdir + "/depth_" + std::to_string(dump_id) + ".png";
+
+    std::string file_path = get_file_path(
+        m_dump_path,
+        subdir,
+        "depth_",
+        dump_id_major,
+        dump_id_minor,
+        ".png"
+    );
 
     // Write image to file
     const int channels = 1; // Grayscale
