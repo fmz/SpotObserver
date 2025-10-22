@@ -135,6 +135,8 @@ bool ReaderWriterCBuf::initialize(
  * Push image data to queue (non-blocking, drops oldest if full)
  */
 void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api::ImageResponse>& responses) {
+    std::cout << "Dummy: " << (dummy ? "true" : "false") << std::endl;
+    // AATASK: this function needs a dummy mode that just fakes the data
     using namespace std::chrono;
 
     if (n_elems_per_rgb_ == 0 || n_elems_per_depth_ == 0) {
@@ -158,6 +160,71 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
     int32_t n_rgbs_written = 0;
     int32_t n_depths_written = 0;
+
+    if (dummy) {
+        cv::Mat cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_rgb{}.png", 1), cv::IMREAD_UNCHANGED);
+
+        std::vector<cv::Mat> channels;
+        cv::split(cv_img, channels);
+
+        // Create an alpha channel initialized to 255 (fully opaque)
+        cv::Mat alpha_channel = cv::Mat::ones(cv_img.size(), CV_8U) * 255;
+
+        // Add the alpha channel to the vector of channels
+        channels.push_back(alpha_channel);
+
+        // Merge the channels to create a BGRA image
+        cv::merge(channels, cv_img);
+        LogMessage("Dummy mode: read image with size {}x{} and {} channels",
+                   cv_img.cols, cv_img.rows, cv_img.channels());
+
+        // this code can be decoupled from our friend spot so it doesnt need to be repeated
+        size_t image_size = cv_img.cols * cv_img.rows * 4;//(img.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
+            if (image_size != n_elems_per_rgb_) {
+                LogMessage("Image size mismatch: expected {}, got {}", n_elems_per_rgb_, image_size);
+                throw std::runtime_error("ReaderWriterCBuf::push: Image size mismatch");
+            }
+
+            // See if we need to do any cam-specific preprocessing:
+            switch (cameras_[n_rgbs_written]) {
+            case SpotCamera::FRONTLEFT:
+            case SpotCamera::FRONTRIGHT:
+                break;
+            }
+
+            LogMessage("Copying RGB image to CUDA");
+
+            checkCudaError(
+                cudaMemcpyAsync(
+                    rgb_write_ptr,
+                    cv_img.data,
+                    image_size * sizeof(uint8_t),
+                    cudaMemcpyHostToDevice,
+                    cuda_stream_ /* use per-connection stream */
+                ),
+                "cudaMemcpyAsync RGB"
+            );
+
+            LogMessage("Finished copying RGB image to CUDA");
+
+            rgb_write_ptr += n_elems_per_rgb_;
+            n_rgbs_written++;
+        
+        checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after push");
+
+        // Update indices/flags
+        assert(n_rgbs_written == n_depths_written);
+        // Update the read index to the write index we just wrote to.
+        read_idx_.store(write_idx, std::memory_order_release);
+        new_data_.store(true, std::memory_order_release);
+        LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
+                write_idx, (write_idx + 1) % max_size_);
+        write_idx = (write_idx + 1) % max_size_;
+        write_idx_.store(write_idx, std::memory_order_release);
+        first_run_ = false;
+        return;
+
+    }
 
     for (const auto& response : responses) {
         const auto& img = response.shot().image();
@@ -411,6 +478,10 @@ bosdyn::api::GetImageRequest SpotCamStream::_createImageRequest(
 
 void SpotCamStream::_startStreamingThread() {
     // Create and start thread
+    if (!image_client_ && !dummy) {
+        std::cerr << "Image client not initialized" << std::endl;
+        return;
+    }
     image_streamer_thread_ = std::make_unique<std::jthread>([this](std::stop_token stop_token) {
         _spotCamReaderThread(stop_token);
     });
@@ -423,6 +494,14 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
     while (!stop_token.stop_requested() && !quit_requested_.load()) {
         try {
             auto start = std::chrono::high_resolution_clock::now();
+
+            if (dummy) {
+                google::protobuf::RepeatedPtrField<bosdyn::api::ImageResponse> dummy_responses;
+                image_lifo_.push(dummy_responses);
+                LogMessage("Dummy mode: pushed dummy image responses");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                continue;
+            }
 
             // Request images from all cameras
             bosdyn::client::GetImageResultType response = image_client_->GetImage(current_request_);
@@ -493,13 +572,37 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
 
         num_cams_requested = rgb_sources.size();
 
-        current_request_ = _createImageRequest(rgb_sources, depth_sources);
+        if (!dummy) current_request_ = _createImageRequest(rgb_sources, depth_sources);
         if (image_streamer_thread_ != nullptr) {
             _joinStreamingThread();
         }
     }
 
     try {
+        // AATASK: rewrite this part to give needed info from disk images
+        if (dummy) {
+            cv::Mat image = cv::imread(std::format("..\\..\\saved_images\\spot_rgb{}.png", 1), cv::IMREAD_COLOR);
+            cv::Size ref_size = image.size();
+            // Check if the image was loaded successfully
+            if (image.empty()) {
+                std::cerr << "Error: Could not open or find the image at " << std::format("..\\..\\saved_images\\spot_rgb{}.png", 1) << std::endl;
+                return false; // Indicate an error
+            }
+
+            image_lifo_.initialize(
+                ref_size.width * ref_size.height * 4, // RGBA
+                ref_size.width * ref_size.height,     // Depth
+                camera_order_
+            );
+
+            _startStreamingThread();
+            streaming_ = true;
+            current_cam_mask_ = cam_mask;
+            current_num_cams_ = num_cams_requested;
+            return true;
+
+
+        } 
         constexpr int32_t max_connection_retries = 3;
         // Query the robot for images and fill in image metadata
         // Max 3 retries
@@ -558,6 +661,7 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                     return false;
                 }
             }
+            
 
             // (Re)initialize circular buffer
             image_lifo_.initialize(
@@ -621,6 +725,13 @@ SpotConnection::SpotConnection(
     }
 
     try {
+        if (dummy) {
+            LogMessage("SpotConnection::connect: Dummy mode enabled, skipping actual connection");
+            connected_ = true;
+            
+            return;
+        }
+
         // Create robot using ClientSDK
         bosdyn::client::Result<std::unique_ptr<bosdyn::client::Robot>> robot_result = sdk_->CreateRobot(robot_ip);
         if (!robot_result.status) {

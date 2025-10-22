@@ -19,7 +19,9 @@ static int32_t connect_to_spot(
     const std::string& username,
     const std::string& password
 ) {
-    std::cout << "Connecting to Spot robot at " << robot_ip << " with user " << username << std::endl;
+    if (getDummy()) {
+        std::cout << "Using dummy connection" << std::endl;
+    } else std::cout << "Connecting to Spot robot at " << robot_ip << " with user " << username << std::endl;
     int32_t spot_id = SOb_ConnectToSpot(robot_ip.c_str(), username.c_str(), password.c_str());
     if (spot_id < 0) {
         std::cerr << "Failed to connect to Spot robot" << std::endl;
@@ -53,6 +55,8 @@ static int32_t disconnect_from_spots(const int32_t spot_ids[], size_t num_spots)
     return 0;
 }
 
+
+
 int main(int argc, char* argv[]) {
     using namespace std::chrono;
 
@@ -71,7 +75,7 @@ int main(int argc, char* argv[]) {
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND };
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND }; // rm hand for vision?
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -83,7 +87,29 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    std::cout << "Connected to Spot robots with IDs: " << spot_ids[0] << ", " << spot_ids[1] << std::endl;
+
+    setDummy(true);
+    int dummy_id;
+    // bool run_on_dummy_images = true;
+    for (size_t i = 0; i < 2; i++) {
+        if (spot_ids[i] >= 0) {
+            setDummy(false);
+            break;
+        }
+    }
+    if (!getDummy()) {
+        std::cout << "Connected to Spot robots with IDs: " << spot_ids[0] << ", " << spot_ids[1] << std::endl;
+    }
+    else {
+        std::cout << "No Spot robots connected so running on dummy images." << std::endl;
+        // run the connect function here anyway to create a dummy connection
+        dummy_id = connect_to_spot_and_start_cam_feed(robot_ips[0], username, password, cam_bitmask);
+            if (dummy_id < 0) {
+                std::cerr << "Failed to create dummy connection" << std::endl;
+                return -1;
+            }
+        // save first 10 images from each feed to disk
+    }
 
     for (size_t i = 0; i < 2; i++) {
         if (spot_ids[i] < 0) continue;
@@ -130,6 +156,18 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "Vision pipeline launched on robot " << i << std::endl;
         }
+
+        if (getDummy()) {
+            bool ret = SOb_LaunchVisionPipeline(dummy_id, model);
+            if (!ret) {
+                std::cerr << "Failed to launch vision pipeline on dummy connection" << std::endl;
+                cv::destroyAllWindows();
+                SOb_DisconnectFromSpot(dummy_id);
+                SOb_UnloadModel(model);
+                return -1;
+            }
+            std::cout << "Vision pipeline launched on dummy connection" << std::endl;
+        }
     }
 
     // Initialized output pointers
@@ -148,6 +186,7 @@ int main(int argc, char* argv[]) {
     std::vector<float> depth_cpu_buffer(640 * 480);
 
     bool new_images = false;
+    int writingimages = 50; // how many images to write to disk for dummy usage
     time_point<high_resolution_clock> start_time = high_resolution_clock::now();
     bool exit_requested = false;
     while (!exit_requested) {
@@ -163,10 +202,28 @@ int main(int argc, char* argv[]) {
 
         for (int32_t spot = 0; spot < 2; spot++) {
             int32_t spot_id = spot_ids[spot];
-            if (spot_id < 0) {
+            if (getDummy()) {
+                spot_id = dummy_id;
+            }
+            if (spot_id < 0 && !getDummy()) {
                 std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
                 continue;
             }
+
+            if (getDummy() && spot == 1) {
+                continue;
+            }
+
+            /* else if (getDummy() && spot == 0) {
+                if (using_vision_pipeline) {
+                    if (!SOb_GetNextVisionPipelineImageSet(dummy_id, int32_t(num_images_requested), images, depths)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        continue;
+                    }
+                }
+            } */
+
+
             for (int32_t stream = 0; stream < cam_stream_ids[spot_id].size(); stream++) {
                 int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
                 if (cam_stream_id < 0) {
@@ -213,6 +270,16 @@ int main(int argc, char* argv[]) {
 
                     cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " RGB" + std::to_string(i), image);
                     cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " Depth" + std::to_string(i), depth);
+
+                    // save images to disk for dummy usage with vision pipeline
+                    if (!using_vision_pipeline && !getDummy() && writingimages > 0 && num_images_requested == 2) {
+                        std::string img_filename = std::format("..\\..\\saved_images\\spot_rgb{}.png", writingimages);
+                        std::string depth_filename = std::format("..\\..\\saved_images\\spot_depth{}.png", writingimages);
+                        cv::imwrite(img_filename, image);
+                        cv::imwrite(depth_filename, depth * 255);
+                        std::cout << "Wrote " << img_filename << " and " << depth_filename << std::endl;
+                        writingimages--;
+                    }
                 }
                 if (cv::waitKey(1) == 'q') {
                     exit_requested = true;

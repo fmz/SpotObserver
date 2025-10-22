@@ -17,13 +17,14 @@
 namespace SOb {
 
 // Global state
+bool dummy = false;
 
 // Function pointer for Unity logging callback
 LogCallback unityLogCallback = nullptr;
 bool logging_enabled = true;
 
 // Map to hold robot connections by ID
-static int32_t __next_robot_id = 0; // Incremental ID for each robot connection
+static int32_t __next_robot_id = 1; // Incremental ID for each robot connection (dummy is 0)
 static std::unordered_map<int32_t, std::unique_ptr<SpotConnection>> __robot_connections;
 
 // Keeping track of loaded models
@@ -91,7 +92,28 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 }
 
 static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& username, const std::string& password) {
+    // AATASK: if dummy create one connection with robot id 0
+    // AATASK: make neater
     try {
+        if (SOb::dummy) {
+            if (__robot_connections.find(0) == __robot_connections.end()) {
+                auto [it, inserted] = __robot_connections.try_emplace(0);
+                if (inserted) {
+                    bool success = it->second.connect(robot_ip, username, password);
+                    if (!success) {
+                        __robot_connections.erase(it);
+                        LogMessage("SOb::ConnectToSpot: Failed to connect to dummy connection");
+                        return -1;
+                    }
+                    LogMessage("SOb::ConnectToSpot: Created dummy SpotConnection with ID 0");
+                    return 0;
+                }
+            } else {
+                LogMessage("SOb::ConnectToSpot: Dummy SpotConnection already exists with ID 0");
+                return -1;
+            }
+        }
+
         int32_t robot_id = __next_robot_id;
         __next_robot_id++;
         auto [it, inserted] =
@@ -290,6 +312,16 @@ static void unloadModel(SObModel model) {
 
 extern "C" {
 
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API getDummy() {
+    return SOb::dummy;
+}
+
+UNITY_INTERFACE_EXPORT
+void UNITY_INTERFACE_API setDummy(bool val) {
+    SOb::dummy = val;
+}
+
 void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* unity) {
     SOb::LogMessage("SpotObserver Plugin Load!");
     try {
@@ -312,6 +344,10 @@ void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginUnload() {
 UNITY_INTERFACE_EXPORT
 int32_t UNITY_INTERFACE_API SOb_ConnectToSpot(const char* robot_ip, const char* username, const char* password) {
     try {
+        if (SOb::dummy) {
+            return SOb::ConnectToSpot("dummy", "dummy", "dummy");
+        }
+
         SOb::SetDLLDirectory();
 
         if (!robot_ip || !username || !password) {
@@ -323,7 +359,7 @@ int32_t UNITY_INTERFACE_API SOb_ConnectToSpot(const char* robot_ip, const char* 
         const std::string username_str = username;
         const std::string password_str = password;
 
-        return SOb::ConnectToSpot(robot_ip_str, username_str, password_str);
+        return SOb::ConnectToSpot(robot_ip_str, username_str, password_str); 
     } catch (const std::exception& e) {
         SOb::LogMessage("SOb_ConnectToSpot: Exception while connecting to robot {}: {}", robot_ip ? robot_ip : "null", e.what());
         return -1; // Return -1 on error
@@ -379,6 +415,7 @@ bool UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_s
         return false; // Robot ID not found
     }
 
+    // AATASK: if dummy then still stream
     try {
         if (it->second->removeCamStream(cam_stream_id)) {
             SOb::LogMessage("SOb_DestroyCameraStream: Successfully destroyed camera stream {} for robot ID {}", cam_stream_id, robot_id);
@@ -396,6 +433,7 @@ bool UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_s
 
 UNITY_INTERFACE_EXPORT
 SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* backend) {
+    std::cout << "Using dummy:" << SOb::dummy << std::endl;
     if (!modelPath || !backend) {
         SOb::LogMessage("SOb_LoadModel: Invalid null pointer parameters");
         return nullptr;
@@ -430,6 +468,7 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, int32_t cam_stream_id, SObModel model) {
     using namespace SOb;
     try {
+        // AATASK: if robot_id == -1, find dummy robot connection
         auto robot_it = __robot_connections.find(robot_id);
         if (robot_it == __robot_connections.end()) {
             LogMessage("SOb_LaunchVisionPipeline: Robot ID {} not found", robot_id);
@@ -581,6 +620,7 @@ bool UNITY_INTERFACE_API SOb_GetNextVisionPipelineImageSet(
     uint8_t** images,
     float** depths
 ) {
+    // AATASK: if robot_id == -1, use dummy images
     try {
         if (!images || !depths) {
             SOb::LogMessage("SOb_GetNextVisionPipelineImageSet: Invalid null pointer parameters (images or depths)");

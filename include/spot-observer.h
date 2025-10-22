@@ -13,6 +13,20 @@
 extern "C" {
 #endif
 
+// Make dummy available to other files in namespace
+// change so all files use getter func?
+namespace SOb {
+ extern bool dummy;
+}
+
+// Make avaiable to integ-test
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API getDummy();
+UNITY_INTERFACE_EXPORT
+void UNITY_INTERFACE_API setDummy(bool val);
+
+
 // Define a function pointer type for logging
 typedef void (*SOb_LogCallback)(const char* message);
 
@@ -27,6 +41,7 @@ enum SpotCamera {
     HAND        = 0x20,
     NUM_CAMERAS = 0x40,
 };
+
 
 // Unity Stuff
 void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* unity);
