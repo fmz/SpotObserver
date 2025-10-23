@@ -66,6 +66,8 @@ cudaError_t update_depth_cache(
     const float* generated_depth,
     const float* sparse_depth,
     float* cached_depth, // Input/output: running average buffer
+    float alpha_valid,   // If old and new depth are valid, use this alpha
+    float alpha_invalid, // If old depth is valid but new depth is invalid, use this alpha (between old depth and generated depth)
     int width,
     int height,
     float min_valid_depth = 0.01f,

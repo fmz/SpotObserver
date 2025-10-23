@@ -364,6 +364,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 //     cur_depth_output_ptr,
                 //     cur_depth_input_ptr,
                 //     depth_cache_ptr,
+                //     0.5,
+                //     0.1,
                 //     output_shape_.W,
                 //     output_shape_.H,
                 //     0.01f,
