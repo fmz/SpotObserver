@@ -71,7 +71,7 @@ int main(int argc, char* argv[]) {
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT };
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND };
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;

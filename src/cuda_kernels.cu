@@ -1290,6 +1290,8 @@ __global__ void update_depth_cache_kernel(
     const float* __restrict__ generated_depth,
     const float* __restrict__ sparse_depth,
     float* __restrict__ cached_depth,
+    float alpha_valid,
+    float alpha_invalid,
     int width,
     int height,
     float min_valid_depth,
@@ -1311,12 +1313,12 @@ __global__ void update_depth_cache_kernel(
     
     if (new_valid) {
         if (old_valid) {
-            cached_depth[idx] = old_val * 0.5f + new_val * 0.5f;
+            cached_depth[idx] = old_val * (1.f-alpha_valid) + new_val * alpha_valid;
         } else {
             cached_depth[idx] = new_val;
         }
     } else if (old_valid) {
-        cached_depth[idx] = old_val * 0.8f + generated_val * 0.2f;
+        cached_depth[idx] = old_val * (1.f-alpha_invalid) + generated_val * alpha_invalid;
     } else {
         cached_depth[idx] = generated_val;
     }
@@ -1327,6 +1329,8 @@ cudaError_t update_depth_cache(
     const float* generated_depth,
     const float* sparse_depth,
     float* cached_depth,
+    float alpha_valid,
+    float alpha_invalid,
     int width,
     int height,
     float min_valid_depth,
@@ -1339,6 +1343,7 @@ cudaError_t update_depth_cache(
               
     update_depth_cache_kernel<<<grid, block, 0, stream>>>(
         generated_depth, sparse_depth, cached_depth,
+        alpha_valid, alpha_invalid,
         width, height,
         min_valid_depth, max_valid_depth
     );
