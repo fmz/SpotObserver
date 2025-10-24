@@ -103,7 +103,7 @@ int main(int argc, char* argv[]) {
     else {
         std::cout << "No Spot robots connected so running on dummy images." << std::endl;
         // run the connect function here anyway to create a dummy connection
-        dummy_id = connect_to_spot_and_start_cam_feed(robot_ips[0], username, password, cam_bitmask);
+        dummy_id = connect_to_spot(robot_ips[0], username, password);
             if (dummy_id < 0) {
                 std::cerr << "Failed to create dummy connection" << std::endl;
                 return -1;
@@ -121,6 +121,22 @@ int main(int argc, char* argv[]) {
                 return -1;
             }
             cam_stream_ids[spot_ids[i]].push_back(cam_stream_id);
+        }
+    }
+
+    if (getDummy()) {
+        for (uint32_t cam_bitmask : cam_bitmasks) {
+            if (cam_bitmask != (FRONTRIGHT | FRONTLEFT)) {
+                std::cout << "Skipping non-front cameras for dummy connection." << std::endl;
+                continue;
+            }
+            int32_t cam_stream_id = start_cam_stream(dummy_id, cam_bitmask);
+
+            if (cam_stream_id < 0) {
+                SOb_DisconnectFromSpot(dummy_id);
+                return -1;
+            }
+            cam_stream_ids[dummy_id].push_back(cam_stream_id);
         }
     }
 
@@ -158,7 +174,8 @@ int main(int argc, char* argv[]) {
         }
 
         if (getDummy()) {
-            bool ret = SOb_LaunchVisionPipeline(dummy_id, model);
+            std::cout << "Launching vision pipeline on dummy connection." << std::endl;
+            bool ret = SOb_LaunchVisionPipeline(dummy_id, cam_stream_ids[dummy_id][0], model);
             if (!ret) {
                 std::cerr << "Failed to launch vision pipeline on dummy connection" << std::endl;
                 cv::destroyAllWindows();
@@ -210,7 +227,6 @@ int main(int argc, char* argv[]) {
                 std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
                 continue;
             }
-
             if (getDummy() && spot == 1) {
                 continue;
             }

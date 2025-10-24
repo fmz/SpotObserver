@@ -99,17 +99,22 @@ static int32_t ConnectToSpot(const std::string& robot_ip, const std::string& use
     try {
         if (SOb::dummy) {
             if (__robot_connections.find(0) == __robot_connections.end()) {
-                auto [it, inserted] = __robot_connections.try_emplace(0);
-                if (inserted) {
-                    bool success = it->second.connect(robot_ip, username, password);
-                    if (!success) {
-                        __robot_connections.erase(it);
-                        LogMessage("SOb::ConnectToSpot: Failed to connect to dummy connection");
-                        return -1;
-                    }
-                    LogMessage("SOb::ConnectToSpot: Created dummy SpotConnection with ID 0");
-                    return 0;
+                auto [it, inserted] = __robot_connections.try_emplace(0, std::make_unique<SpotConnection>(robot_ip, username, password));
+                if (!inserted) {
+                    LogMessage("SOb::ConnectToSpot: Failed to connect to robot {}", robot_ip);
+                    return -1;
                 }
+                return 0;
+                // if (inserted) {
+                //     bool success = it->second.connect(robot_ip, username, password);
+                //     if (!success) {
+                //         __robot_connections.erase(it);
+                //         LogMessage("SOb::ConnectToSpot: Failed to connect to dummy connection");
+                //         return -1;
+                //     }
+                //     LogMessage("SOb::ConnectToSpot: Created dummy SpotConnection with ID 0");
+                //     return 0;
+                // }
             } else {
                 LogMessage("SOb::ConnectToSpot: Dummy SpotConnection already exists with ID 0");
                 return -1;
@@ -470,12 +475,16 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, int32_t cam_stream_id, SObModel model) {
     using namespace SOb;
     try {
-        // AATASK: if robot_id == -1, find dummy robot connection
+
+        LogMessage("SOb_LaunchVisionPipeline: Launching vision pipeline for robot ID {} on stream ID {}", robot_id, cam_stream_id);
+        
         auto robot_it = __robot_connections.find(robot_id);
         if (robot_it == __robot_connections.end()) {
             LogMessage("SOb_LaunchVisionPipeline: Robot ID {} not found", robot_id);
             return false;
         }
+
+        LogMessage("SOb_LaunchVisionPipeline: Launching vision pipeline for robot ID {} on stream ID {}", robot_id, cam_stream_id);
 
         if (!robot_it->second->isConnected()) {
             LogMessage("SOb_LaunchVisionPipeline: Robot ID {} must be connected", robot_id);
@@ -486,6 +495,8 @@ bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(int32_t robot_id, int32_t cam_
             LogMessage("SOb_LaunchVisionPipeline: Invalid model provided");
             return false;
         }
+
+        
 
         // Cast the model to the proper type
         auto ml_model = reinterpret_cast<MLModel*>(model);

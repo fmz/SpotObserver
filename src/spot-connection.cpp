@@ -673,6 +673,20 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                 return false; // Indicate an error
             }
 
+            current_rgb_shape_ = TensorShape{
+                size_t(num_cams_requested),
+                4, //(image_responses[0].shot().image().pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3)
+                size_t(ref_size.height),
+                size_t(ref_size.width)
+            };
+
+            current_depth_shape_ = TensorShape{
+                size_t(num_cams_requested),
+                1,
+                size_t(ref_size.height),
+                size_t(ref_size.width)
+            };
+
             image_lifo_.initialize(
                 ref_size.width * ref_size.height * 4, // RGBA
                 ref_size.width * ref_size.height,     // Depth
@@ -931,6 +945,7 @@ SpotCamStream* SpotConnection::getCamStream(int32_t stream_id) {
 }
 
 bool SpotConnection::createVisionPipeline(MLModel& model, int32_t stream_id) {
+    LogMessage("SpotConnection::createVisionPipeline: Creating vision pipeline for stream ", stream_id);
     SpotCamStream* cam_stream = getCamStream(stream_id);
     if (cam_stream == nullptr || !cam_stream->isStreaming()) {
         LogMessage("SpotConnection::createVisionPipeline: Camera stream {} doesn't exist. "
