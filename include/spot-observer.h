@@ -17,6 +17,7 @@ extern "C" {
 // change so all files use getter func?
 namespace SOb {
  extern bool dummy;
+ extern int taken_from_dummy;
 }
 
 // Make avaiable to integ-test

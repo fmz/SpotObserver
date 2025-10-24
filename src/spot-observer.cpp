@@ -18,6 +18,7 @@ namespace SOb {
 
 // Global state
 bool dummy = false;
+int taken_from_dummy = 0;
 
 // Function pointer for Unity logging callback
 LogCallback unityLogCallback = nullptr;

@@ -162,67 +162,144 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     int32_t n_depths_written = 0;
 
     if (dummy) {
-        cv::Mat cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_rgb{}.png", 1), cv::IMREAD_UNCHANGED);
+        if (taken_from_dummy > 100) {
+            taken_from_dummy = 0;
+            LogMessage("Dummy mode: reset taken_from_dummy counter");
+        }
 
-        std::vector<cv::Mat> channels;
-        cv::split(cv_img, channels);
+        if (taken_from_dummy%2 == 0) {
+            cv::Mat cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_rgb{}.png", 1 + (taken_from_dummy/2)), cv::IMREAD_UNCHANGED);
 
-        // Create an alpha channel initialized to 255 (fully opaque)
-        cv::Mat alpha_channel = cv::Mat::ones(cv_img.size(), CV_8U) * 255;
+            std::vector<cv::Mat> channels;
+            cv::split(cv_img, channels);
 
-        // Add the alpha channel to the vector of channels
-        channels.push_back(alpha_channel);
+            // Create an alpha channel initialized to 255 (fully opaque)
+            cv::Mat alpha_channel = cv::Mat::ones(cv_img.size(), CV_8U) * 255;
 
-        // Merge the channels to create a BGRA image
-        cv::merge(channels, cv_img);
-        LogMessage("Dummy mode: read image with size {}x{} and {} channels",
-                   cv_img.cols, cv_img.rows, cv_img.channels());
+            // Add the alpha channel to the vector of channels
+            channels.push_back(alpha_channel);
 
-        // this code can be decoupled from our friend spot so it doesnt need to be repeated
-        size_t image_size = cv_img.cols * cv_img.rows * 4;//(img.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
-            if (image_size != n_elems_per_rgb_) {
-                LogMessage("Image size mismatch: expected {}, got {}", n_elems_per_rgb_, image_size);
-                throw std::runtime_error("ReaderWriterCBuf::push: Image size mismatch");
+            // Merge the channels to create a BGRA image
+            cv::merge(channels, cv_img);
+            LogMessage("Dummy mode: read image with size {}x{} and {} channels",
+                    cv_img.cols, cv_img.rows, cv_img.channels());
+
+            // this code can be decoupled from our friend spot so it doesnt need to be repeated
+            size_t image_size = cv_img.cols * cv_img.rows * 4;//(img.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
+                if (image_size != n_elems_per_rgb_) {
+                    LogMessage("Image size mismatch: expected {}, got {}", n_elems_per_rgb_, image_size);
+                    throw std::runtime_error("ReaderWriterCBuf::push: Image size mismatch");
+                }
+
+                // See if we need to do any cam-specific preprocessing:
+                switch (cameras_[n_rgbs_written]) {
+                case SpotCamera::FRONTLEFT:
+                case SpotCamera::FRONTRIGHT:
+                    break;
+                }
+
+                LogMessage("Copying RGB image to CUDA");
+
+                checkCudaError(
+                    cudaMemcpyAsync(
+                        rgb_write_ptr,
+                        cv_img.data,
+                        image_size * sizeof(uint8_t),
+                        cudaMemcpyHostToDevice,
+                        cuda_stream_ /* use per-connection stream */
+                    ),
+                    "cudaMemcpyAsync RGB"
+                );
+
+                LogMessage("Finished copying RGB image to CUDA");
+
+                rgb_write_ptr += n_elems_per_rgb_;
+                n_rgbs_written++;
+            
+            checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after push");
+
+            // Update indices/flags
+            assert(n_rgbs_written == n_depths_written);
+            // Update the read index to the write index we just wrote to.
+            read_idx_.store(write_idx, std::memory_order_release);
+            new_data_.store(true, std::memory_order_release);
+            LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
+                    write_idx, (write_idx + 1) % max_size_);
+            write_idx = (write_idx + 1) % max_size_;
+            write_idx_.store(write_idx, std::memory_order_release);
+            first_run_ = false;
+  
+        } else {
+            cv::Mat cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_depth{}.png", (taken_from_dummy/2)+1), cv::IMREAD_UNCHANGED);
+
+            // we multiplied depth by 255 when saving, so divide back here
+            cv_img.convertTo(cv_img, CV_32FC1, 1.0/255.0);
+            
+            LogMessage("Dummy mode: read depth image with size {}x{}",
+                    cv_img.cols, cv_img.rows);
+
+            int depth_width = cv_img.cols;
+            int depth_height = cv_img.rows;
+
+            size_t depth_size = depth_width * depth_height;
+            if (depth_size != n_elems_per_depth_) {
+                LogMessage("Depth size mismatch: expected {}, got {}", n_elems_per_depth_, depth_size);
+                throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
             }
 
-            // See if we need to do any cam-specific preprocessing:
-            switch (cameras_[n_rgbs_written]) {
-            case SpotCamera::FRONTLEFT:
-            case SpotCamera::FRONTRIGHT:
-                break;
-            }
-
-            LogMessage("Copying RGB image to CUDA");
+            // LogMessage("Copying depth image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
+            //            depth_size, write_idx, size_t(depth_write_ptr));
 
             checkCudaError(
                 cudaMemcpyAsync(
-                    rgb_write_ptr,
+                    depth_write_ptr,
                     cv_img.data,
-                    image_size * sizeof(uint8_t),
+                    depth_size * sizeof(float),
                     cudaMemcpyHostToDevice,
-                    cuda_stream_ /* use per-connection stream */
+                    cuda_stream_
                 ),
-                "cudaMemcpyAsync RGB"
+                "cudaMemcpyAsync DEPTH"
             );
 
-            LogMessage("Finished copying RGB image to CUDA");
+            // If dumping requires device->host copies on default stream, this ensures correctness:
+            // checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before debug dump");
+            DumpDepthImageFromCuda(
+                depth_write_ptr,
+                cv_img.cols,
+                cv_img.rows,
+                "pre-depth-cache",
+                n_depths_written + write_idx * n_images_per_response_
+            );
 
-            rgb_write_ptr += n_elems_per_rgb_;
-            n_rgbs_written++;
-        
-        checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after push");
+            // checkCudaError(update_depth_cache(depth_write_ptr, depth_cache_ptr, depth_width, depth_height, cuda_stream_), "update_depth_cache");
 
-        // Update indices/flags
-        assert(n_rgbs_written == n_depths_written);
-        // Update the read index to the write index we just wrote to.
-        read_idx_.store(write_idx, std::memory_order_release);
-        new_data_.store(true, std::memory_order_release);
-        LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
-                write_idx, (write_idx + 1) % max_size_);
-        write_idx = (write_idx + 1) % max_size_;
-        write_idx_.store(write_idx, std::memory_order_release);
-        first_run_ = false;
+            DumpDepthImageFromCuda(
+                depth_write_ptr,
+                cv_img.cols,
+                cv_img.rows,
+                "post-depth-cache",
+                n_depths_written + write_idx * n_images_per_response_
+            );
+
+            depth_write_ptr += n_elems_per_depth_;
+            depth_cache_ptr += n_elems_per_depth_;
+            n_depths_written++;
+
+            assert(n_rgbs_written == n_depths_written);
+            // Update the read index to the write index we just wrote to.
+            read_idx_.store(write_idx, std::memory_order_release);
+            new_data_.store(true, std::memory_order_release);
+            LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
+                    write_idx, (write_idx + 1) % max_size_);
+            write_idx = (write_idx + 1) % max_size_;
+            write_idx_.store(write_idx, std::memory_order_release);
+            first_run_ = false;
+  
+        }
+
+        taken_from_dummy++;
         return;
+        
 
     }
 
