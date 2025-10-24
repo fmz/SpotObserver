@@ -170,6 +170,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+
     // Initialized output pointers
     std::vector<uint32_t> num_images_requested_per_stream;
     std::vector<uint8_t**> images;

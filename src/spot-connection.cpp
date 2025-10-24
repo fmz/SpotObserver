@@ -162,13 +162,19 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     int32_t n_depths_written = 0;
 
     if (dummy) {
-        if (taken_from_dummy > 100) {
+        if (going_up && taken_from_dummy >= 100) {
+            taken_from_dummy = 99;
+            going_up = false;
+            LogMessage("Dummy mode: reset taken_from_dummy counter");
+        } else if (!going_up && taken_from_dummy < 0) {
             taken_from_dummy = 0;
+            going_up = true;
             LogMessage("Dummy mode: reset taken_from_dummy counter");
         }
 
         if (taken_from_dummy%2 == 0) {
             cv::Mat cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_rgb{}.png", 1 + (taken_from_dummy/2)), cv::IMREAD_UNCHANGED);
+            cv::cvtColor(cv_img, cv_img, cv::COLOR_BGR2RGB);
 
             std::vector<cv::Mat> channels;
             cv::split(cv_img, channels);
@@ -234,7 +240,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
             // we multiplied depth by 255 when saving, so divide back here
             cv_img.convertTo(cv_img, CV_32FC1, 1.0/255.0);
-            
+
             LogMessage("Dummy mode: read depth image with size {}x{}",
                     cv_img.cols, cv_img.rows);
 
@@ -297,7 +303,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
   
         }
 
-        taken_from_dummy++;
+        if (going_up) taken_from_dummy++;
+        else taken_from_dummy--;
         return;
         
 
@@ -576,7 +583,7 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
                 google::protobuf::RepeatedPtrField<bosdyn::api::ImageResponse> dummy_responses;
                 image_lifo_.push(dummy_responses);
                 LogMessage("Dummy mode: pushed dummy image responses");
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
 

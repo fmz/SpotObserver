@@ -18,6 +18,7 @@ extern "C" {
 namespace SOb {
  extern bool dummy;
  extern int taken_from_dummy;
+ extern bool going_up;
 }
 
 // Make avaiable to integ-test
