@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND }; // rm hand for vision?
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT, FRONTLEFT, HAND }; // rm hand for vision? // FRONTRIGHT | FRONTLEFT
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -204,7 +204,13 @@ int main(int argc, char* argv[]) {
     std::vector<float> depth_cpu_buffer(640 * 480);
 
     bool new_images = false;
-    int writingimages = 50; // how many images to write to disk for dummy usage
+    int writingimages[5][5]; // how many images to write to disk for dummy usage
+    // initialize every val in writingimages to 20
+    for (int i = 0; i < 5; i++) {
+        for (int j = 0; j < 5; j++) {
+            writingimages[i][j] = 20;
+        }
+    }
     time_point<high_resolution_clock> start_time = high_resolution_clock::now();
     bool exit_requested = false;
     while (!exit_requested) {
@@ -265,6 +271,7 @@ int main(int argc, char* argv[]) {
                 }
                 new_images = true;
                 for (uint32_t i = 0; i < num_images_requested; i++) {
+                    std::cout << "Reading Spot " << spot << " Stream " << stream << " Image " << i << std::endl;
                     cudaMemcpyAsync(
                         image_cpu_buffer.data(),
                         images_set[i],
@@ -289,13 +296,13 @@ int main(int argc, char* argv[]) {
                     cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " Depth" + std::to_string(i), depth);
 
                     // save images to disk for dummy usage with vision pipeline
-                    if (!using_vision_pipeline && !getDummy() && writingimages > 0 && num_images_requested == 2) {
-                        std::string img_filename = std::format("..\\..\\saved_images\\spot_rgb{}.png", writingimages);
-                        std::string depth_filename = std::format("..\\..\\saved_images\\spot_depth{}.png", writingimages);
+                    if (!using_vision_pipeline && !getDummy() && writingimages[stream][i] > 0) {
+                        std::string img_filename = std::format("..\\..\\saved_imagesv3\\spot_rgb_stream{}_index{}_image{}.png", stream, i, writingimages[stream][i]);
+                        std::string depth_filename = std::format("..\\..\\saved_imagesv3\\spot_depth_stream{}_index{}_image{}.png", stream, i, writingimages[stream][i]);
                         cv::imwrite(img_filename, image);
                         cv::imwrite(depth_filename, depth * 255);
                         std::cout << "Wrote " << img_filename << " and " << depth_filename << std::endl;
-                        writingimages--;
+                        writingimages[stream][i]--;
                     }
                 }
                 if (cv::waitKey(1) == 'q') {
