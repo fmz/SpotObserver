@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT, FRONTLEFT, HAND }; // rm hand for vision? // FRONTRIGHT | FRONTLEFT
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND }; // rm hand for vision? // FRONTRIGHT | FRONTLEFT
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -296,14 +296,14 @@ int main(int argc, char* argv[]) {
                     cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " Depth" + std::to_string(i), depth);
 
                     // save images to disk for dummy usage with vision pipeline
-                    if (!using_vision_pipeline && !getDummy() && writingimages[stream][i] > 0) {
-                        std::string img_filename = std::format("..\\..\\saved_imagesv3\\spot_rgb_stream{}_index{}_image{}.png", stream, i, writingimages[stream][i]);
-                        std::string depth_filename = std::format("..\\..\\saved_imagesv3\\spot_depth_stream{}_index{}_image{}.png", stream, i, writingimages[stream][i]);
-                        cv::imwrite(img_filename, image);
-                        cv::imwrite(depth_filename, depth * 255);
-                        std::cout << "Wrote " << img_filename << " and " << depth_filename << std::endl;
-                        writingimages[stream][i]--;
-                    }
+                    // if (!using_vision_pipeline && !getDummy() && writingimages[stream][i] > 0) {
+                    //     std::string img_filename = std::format("..\\..\\saved_imagesv2\\spot_rgb_stream{}_index{}_image{}.png", stream, i, writingimages[stream][i]);
+                    //     std::string depth_filename = std::format("..\\..\\saved_imagesv2\\spot_depth_stream{}_index{}_image{}.png", stream, i, writingimages[stream][i]);
+                    //     cv::imwrite(img_filename, image);
+                    //     cv::imwrite(depth_filename, depth * 255);
+                    //     std::cout << "Wrote " << img_filename << " and " << depth_filename << std::endl;
+                    //     writingimages[stream][i]--;
+                    // }
                 }
                 if (cv::waitKey(1) == 'q') {
                     exit_requested = true;

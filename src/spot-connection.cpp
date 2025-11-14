@@ -135,7 +135,7 @@ bool ReaderWriterCBuf::initialize(
  * Push image data to queue (non-blocking, drops oldest if full)
  */
 void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api::ImageResponse>& responses) {
-    std::cout << "Dummy: " << (dummy ? "true" : "false") << std::endl;
+    // std::cout << "Dummy: " << (dummy ? "true" : "false") << std::endl;
     using namespace std::chrono;
 
     if (n_elems_per_rgb_ == 0 || n_elems_per_depth_ == 0) {
@@ -161,19 +161,17 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     int32_t n_depths_written = 0;
 
     if (dummy) {
-
         for (int i = 0; i < 2; i++) {
         if (going_up && taken_from_dummy >= 100) {
-            taken_from_dummy = 99;
+            taken_from_dummy = 97;
             going_up = false;
             LogMessage("Dummy mode: reset taken_from_dummy counter");
-        } else if (!going_up && taken_from_dummy < 0) {
-            taken_from_dummy = 0;
+        } else if (!going_up && taken_from_dummy <= 0) {
+            taken_from_dummy = 2;
             going_up = true;
             LogMessage("Dummy mode: reset taken_from_dummy counter");
         }
 
-        // if (taken_from_dummy%2 == 0) {
             cv::Mat cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_rgb{}.png", 1 + (taken_from_dummy/2)), cv::IMREAD_UNCHANGED);
             cv::cvtColor(cv_img, cv_img, cv::COLOR_BGR2RGB);
 
@@ -206,7 +204,6 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 }
 
                 LogMessage("Copying RGB image to CUDA");
-
                 checkCudaError(
                     cudaMemcpyAsync(
                         rgb_write_ptr,
@@ -217,18 +214,16 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     ),
                     "cudaMemcpyAsync RGB"
                 );
-
                 LogMessage("Finished copying RGB image to CUDA");
 
                 rgb_write_ptr += n_elems_per_rgb_;
                 n_rgbs_written++;
             
-        // } else {
-        if (going_up) taken_from_dummy++;
-        else taken_from_dummy--;
+        // if (going_up) taken_from_dummy++;
+        // else taken_from_dummy--;
 
         // cv::Mat
-            cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_depth{}.png", (taken_from_dummy/2)+1), cv::IMREAD_UNCHANGED);
+            cv_img = cv::imread(std::format("..\\..\\saved_images\\spot_depth{}.png", 1 + (taken_from_dummy/2)), cv::IMREAD_UNCHANGED);
 
             // we multiplied depth by 255 when saving, so divide back here
             cv_img.convertTo(cv_img, CV_32FC1, 1.0/255.0);
@@ -269,8 +264,6 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 n_depths_written + write_idx * n_images_per_response_
             );
 
-            // checkCudaError(update_depth_cache(depth_write_ptr, depth_cache_ptr, depth_width, depth_height, cuda_stream_), "update_depth_cache");
-
             DumpDepthImageFromCuda(
                 depth_write_ptr,
                 cv_img.cols,
@@ -282,18 +275,6 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             depth_write_ptr += n_elems_per_depth_;
             depth_cache_ptr += n_elems_per_depth_;
             n_depths_written++;
-
-            // assert(n_rgbs_written == n_depths_written);
-            // // Update the read index to the write index we just wrote to.
-            // read_idx_.store(write_idx, std::memory_order_release);
-            // new_data_.store(true, std::memory_order_release);
-            // LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
-            //         write_idx, (write_idx + 1) % max_size_);
-            // write_idx = (write_idx + 1) % max_size_;
-            // write_idx_.store(write_idx, std::memory_order_release);
-            // first_run_ = false;
-  
-        // }
 
         checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after push");
 
@@ -308,8 +289,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         write_idx_.store(write_idx, std::memory_order_release);
         first_run_ = false;
 
-        if (going_up) taken_from_dummy++;
-        else taken_from_dummy--;
+        if (going_up) taken_from_dummy+=2;
+        else taken_from_dummy-=2;
 
         }
         return;
