@@ -164,12 +164,14 @@ void VisionPipeline::deallocateCudaBuffers() {
 }
 
 void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
+
+
     size_t num_images_per_iter = output_shape_.N;
 
     uint8_t** rgb_images = new uint8_t*[num_images_per_iter];
     float** depth_images = new float*[num_images_per_iter];
 
-    size_t num_rgb_elemenets   = input_shape_.N * input_shape_.C * input_shape_.H * input_shape_.W;
+    size_t num_rgb_elemenets   = input_shape_.N * input_shape_.C * input_shape_.H * input_shape_.W; // change w num elems
     size_t num_depth_elements  = depth_shape_.N * depth_shape_.C * depth_shape_.H * depth_shape_.W;
     size_t num_output_elements = output_shape_.N * output_shape_.C * output_shape_.H * output_shape_.W;
 
@@ -177,7 +179,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
         auto start_time = std::chrono::high_resolution_clock::now();
         try {
             // Get current images from SpotConnection
-            if (!spot_cam_stream_.getCurrentImages(
+            if (!spot_cam_stream_.getCurrentImages( 
                     input_shape_.N,
                     rgb_images,
                     depth_images)
@@ -185,6 +187,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
+                // num_input_images_fetched = input_shape_.N;
+            // }
 
             // Prepare device pointers
             uint8_t* d_rgb_ptr = d_rgb_data_ + write_idx_ * num_rgb_elemenets;
@@ -215,7 +219,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             convert_uint8_img_to_float_img(
                 d_rgb_ptr,
                 cuda_ws_.d_rgb_float_data_,
-                input_shape_.N,
+                input_shape_.N, // times number of images
                 input_shape_.H,
                 input_shape_.W,
                 input_shape_.C,
@@ -260,6 +264,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
+                
+                // run kernel here on the depth images fetched to fill invalid depth values with prev
                 if (!first_run_) {
                     checkCudaError(prefill_invalid_depth(
                         cur_depth_input_ptr,
@@ -360,18 +366,18 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     cuda_stream_
                 ), "postprocess_depth_image");
                 //
-                // checkCudaError(update_depth_cache(
-                //     cur_depth_output_ptr,
-                //     cur_depth_input_ptr,
-                //     depth_cache_ptr,
-                //     0.5,
-                //     0.1,
-                //     output_shape_.W,
-                //     output_shape_.H,
-                //     0.01f,
-                //     100.0f,
-                //     cuda_stream_
-                // ), "update_depth_cache");
+                checkCudaError(update_depth_cache(
+                    cur_depth_output_ptr,
+                    cur_depth_input_ptr,
+                    depth_cache_ptr,
+                    0.5, // can you change this depending on discrepancies in the images
+                    0.1,
+                    output_shape_.W,
+                    output_shape_.H,
+                    0.01f,
+                    100.0f,
+                    cuda_stream_
+                ), "update_depth_cache");
 
                 // Ensure dumps see completed work (dumpers likely use default stream)
                 checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before dumps");
@@ -414,7 +420,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("VisionPipeline: Updating write index from {} to {}",
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
-            // first_run_ = false;
+            first_run_ = false;
             dump_id += num_images_per_iter;
 
         } catch (const std::exception& e) {

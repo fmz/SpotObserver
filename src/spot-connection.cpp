@@ -278,6 +278,25 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
         checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after push");
 
+        // // Update indices/flags
+        // assert(n_rgbs_written == n_depths_written);
+        // // Update the read index to the write index we just wrote to.
+        // read_idx_.store(write_idx, std::memory_order_release);
+        // new_data_.store(true, std::memory_order_release);
+        // LogMessage("ReaderWriterCBuf::push: updating write index from {} to {}",
+        //             write_idx, (write_idx + 1) % max_size_);
+        // write_idx = (write_idx + 1) % max_size_;
+        // write_idx_.store(write_idx, std::memory_order_release);
+        // first_run_ = false;
+
+        if (going_up) taken_from_dummy+=2;
+        else taken_from_dummy-=2;
+
+        }
+        // things changing: write_idx now stores the last written to index, store prev and then increment to get the new position
+        // start by getting current write indx as prev images to read from, then increment it for next write, do the write, and make read index equal to it 
+
+
         // Update indices/flags
         assert(n_rgbs_written == n_depths_written);
         // Update the read index to the write index we just wrote to.
@@ -288,14 +307,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         write_idx = (write_idx + 1) % max_size_;
         write_idx_.store(write_idx, std::memory_order_release);
         first_run_ = false;
-
-        if (going_up) taken_from_dummy+=2;
-        else taken_from_dummy-=2;
-
-        }
         return;
-        
-
     }
 
     for (const auto& response : responses) {
@@ -790,6 +802,8 @@ bool SpotCamStream::getCurrentImages(
 
     return true;
 }
+
+
 
 ///////////////////////////////////////////////////////////////////////////////
 
