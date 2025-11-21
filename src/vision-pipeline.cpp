@@ -187,8 +187,6 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
-                // num_input_images_fetched = input_shape_.N;
-            // }
 
             // Prepare device pointers
             uint8_t* d_rgb_ptr = d_rgb_data_ + write_idx_ * num_rgb_elemenets;
@@ -219,7 +217,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             convert_uint8_img_to_float_img(
                 d_rgb_ptr,
                 cuda_ws_.d_rgb_float_data_,
-                input_shape_.N, // times number of images
+                input_shape_.N, 
                 input_shape_.H,
                 input_shape_.W,
                 input_shape_.C,
@@ -265,7 +263,6 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
                 
-                // run kernel here on the depth images fetched to fill invalid depth values with prev
                 if (!first_run_) {
                     checkCudaError(prefill_invalid_depth(
                         cur_depth_input_ptr,

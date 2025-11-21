@@ -1281,6 +1281,53 @@ cudaError_t prefill_invalid_depth(
     return cudaGetLastError();
 }
 
+// CUDA kernel for maintaining running cumulative input depth image
+__global__ void prefill_depth_from_prev(
+    float* __restrict__ new_depth,
+    float* __restrict__ prev_depth,
+    int width,
+    int height,
+    float min_valid_depth,
+    float max_valid_depth
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    float new_val  = new_depth[idx];
+    float prev_val = prev_depth[idx];
+
+    // Check if new depth value is valid
+    bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
+    // Update the new_depth buffer in-place to have gaps filled
+    new_depth[idx] = new_valid ? new_val : prev_val;
+}
+
+cudaError_t prefill_input_depth(
+    float* d_depth_data,
+    float* d_depth_prev,
+    int width,
+    int height,
+    float min_valid_depth,
+    float max_valid_depth,
+    cudaStream_t stream
+) {
+    dim3 block(32, 8);
+    dim3 grid((width + block.x - 1) / block.x,
+              (height + block.y - 1) / block.y);
+
+    prefill_depth_from_prev<<<grid, block, 0, stream>>>(
+        d_depth_data, d_depth_prev,
+        width, height,
+        min_valid_depth, max_valid_depth
+    );
+
+    return cudaGetLastError();
+}
+
+
 // CUDA kernel for maintaining running average of depth values
 // new_depth: current frame depth values
 // avg_depth: running average depth buffer (input/output)

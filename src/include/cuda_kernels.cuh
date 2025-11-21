@@ -75,4 +75,14 @@ cudaError_t update_depth_cache(
     cudaStream_t stream = 0
 );
 
+cudaError_t prefill_input_depth(
+    float* d_depth_data,
+    float* d_depth_prev,
+    int width,
+    int height,
+    float min_valid_depth = 0.01f,
+    float max_valid_depth = 100.0f,
+    cudaStream_t stream = 0
+);
+
 }
