@@ -21,7 +21,7 @@ namespace SOb {
  extern bool going_up;
 }
 
-// Make avaiable to integ-test
+// Make available to integ-test
 
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API getDummy();
