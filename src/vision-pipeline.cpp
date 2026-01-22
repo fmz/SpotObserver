@@ -417,7 +417,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("VisionPipeline: Updating write index from {} to {}",
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
-            first_run_ = false;
+            // first_run_ = false;
             dump_id += num_images_per_iter;
 
         } catch (const std::exception& e) {

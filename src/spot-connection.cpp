@@ -175,6 +175,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     LogMessage("ReaderWriterCBuf::push: was_new_data = {}", was_new_data);
     if (was_new_data) {
         accumulate_depth = true;
+        //accumulate_depth = false;
     }
 
         // things changing: write_idx now stores the last written to index, store prev and then increment to get the new position

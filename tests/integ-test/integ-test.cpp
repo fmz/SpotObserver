@@ -260,12 +260,12 @@ int main(int argc, char* argv[]) {
 
                 if (using_vision_pipeline && stream == 0) {
                     if (!SOb_GetNextVisionPipelineImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // changed from 10
                         continue;
                     }
                 } else {
                     if (!SOb_GetNextImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // changed from 50
                         continue;
                     }
                 }
