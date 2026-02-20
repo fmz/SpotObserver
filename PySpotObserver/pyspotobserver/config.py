@@ -24,23 +24,28 @@ class CameraType(IntFlag):
     @classmethod
     def get_source_name(cls, camera: "CameraType", depth: bool = False) -> str:
         """Get the Boston Dynamics API source name for a camera."""
-        base_names = {
-            cls.BACK: "back",
-            cls.FRONTLEFT: "frontleft",
-            cls.FRONTRIGHT: "frontright",
-            cls.LEFT: "left",
-            cls.RIGHT: "right",
-            cls.HAND: "hand",
+        rgb_names = {
+            cls.BACK: "back_fisheye_image",
+            cls.FRONTLEFT: "frontleft_fisheye_image",
+            cls.FRONTRIGHT: "frontright_fisheye_image",
+            cls.LEFT: "left_fisheye_image",
+            cls.RIGHT: "right_fisheye_image",
+            # Hand camera uses color sensor naming, not fisheye naming.
+            cls.HAND: "hand_color_image",
+        }
+        depth_names = {
+            cls.BACK: "back_depth_in_visual_frame",
+            cls.FRONTLEFT: "frontleft_depth_in_visual_frame",
+            cls.FRONTRIGHT: "frontright_depth_in_visual_frame",
+            cls.LEFT: "left_depth_in_visual_frame",
+            cls.RIGHT: "right_depth_in_visual_frame",
+            # Hand depth is aligned to hand color frame.
+            cls.HAND: "hand_depth_in_hand_color_frame",
         }
 
-        base = base_names.get(camera)
-        if base is None:
+        if camera not in rgb_names:
             raise ValueError(f"Invalid camera type: {camera}")
-
-        if depth:
-            return f"{base}_depth_in_visual_frame"
-        else:
-            return f"{base}_fisheye_image"
+        return depth_names[camera] if depth else rgb_names[camera]
 
 
 @dataclass
