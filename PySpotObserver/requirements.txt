@@ -1,0 +1,12 @@
+# Core dependencies
+bosdyn-client>=5.0.0  # Boston Dynamics Spot SDK
+numpy>=2.0.0,<2.4.0         # Array operations
+opencv-python>=4.12.0         # Image processing and display
+pyyaml>=6.0.0                # YAML configuration support
+
+# Optional dependencies
+# For development
+pytest>=7.4.0                # Testing framework
+pytest-asyncio>=0.21.0       # Async test support
+black>=23.0.0                # Code formatting
+mypy>=1.5.0                  # Type checking
