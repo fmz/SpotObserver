@@ -1,0 +1,21 @@
+# Example configuration file for PySpotObserver
+
+# Robot connection details
+robot_ip: "128.148.138.22"
+username: "user"
+password: "bigbubbabigbubba"
+
+# Streaming settings
+image_buffer_size: 5
+image_quality_percent: 100.0
+request_timeout_seconds: 5.0
+
+# Advanced settings
+sdk_name: "PySpotObserver"
+connection_retry_attempts: 3
+connection_retry_delay_ms: 100
+
+# Custom parameters (optional)
+extra_params:
+  description: "Example streaming configuration"
+  location: "Lab"
