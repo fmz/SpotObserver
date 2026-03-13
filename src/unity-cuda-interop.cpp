@@ -3,10 +3,11 @@
 //
 
 #include "unity-cuda-interop.h"
-
+#include "utils.h"
 #include "d3dx12.h"
 #include <unordered_map>
 #include <string>
+#include <chrono>
 
 namespace SOb {
 
@@ -671,11 +672,37 @@ static bool uploadImageSetToUnityCommon(
     return true;
 }
 
+struct TimingInfo {
+    std::chrono::high_resolution_clock::time_point last_run_time;
+    double accum_diff_between_run_times;
+    int32_t num_iterations;
+    
+    // TimingInfo(std::chrono::high_resolution_clock::time_point run_time, double accum_init, int32_t num_init): last_run_time(run_time), accum_diff_between_run_times(accum_init), num_iterations(num_init) {}
+};
+static std::unordered_map<int32_t, std::unordered_map<int32_t, TimingInfo>> timing_map; 
+static int32_t NUM_ITERATIONS = 100;
+
 bool uploadNextImageSetToUnity(int32_t robot_id, int32_t cam_stream_id) {
     return uploadImageSetToUnityCommon(robot_id, cam_stream_id, SOb_GetNextImageSet, "robot");
 }
 
 bool uploadNextVisionPipelineImageSetToUnity(int32_t robot_id, int32_t cam_stream_id) {
+    auto curr_time = std::chrono::high_resolution_clock::now();
+    if (timing_map.count(robot_id) > 0 && timing_map[robot_id].count(cam_stream_id) > 0) {
+        double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_map[robot_id][cam_stream_id].last_run_time).count();
+        timing_map[robot_id][cam_stream_id] = {curr_time, timing_map[robot_id][cam_stream_id].accum_diff_between_run_times+time_since_last, timing_map[robot_id][cam_stream_id].num_iterations+1};
+        // cout every x iterations
+        if (timing_map[robot_id][cam_stream_id].num_iterations == NUM_ITERATIONS) {
+            std::cout << std::format("uploadNextVisionPipelineImageSetToUnity: Average time between function iterations over {} iterations, robot {}, stream {}: {} ms", 
+                                        timing_map[robot_id][cam_stream_id].num_iterations,
+                                        robot_id,
+                                        cam_stream_id,
+                                        timing_map[robot_id][cam_stream_id].accum_diff_between_run_times/NUM_ITERATIONS);
+            timing_map[robot_id][cam_stream_id] = {curr_time, 0.0, 0};
+        }
+    } else {
+        timing_map[robot_id][cam_stream_id] = {curr_time, 0.0, 0};
+    }
     return uploadImageSetToUnityCommon(robot_id, cam_stream_id, SOb_GetNextVisionPipelineImageSet, "vision pipeline");
 }
 
