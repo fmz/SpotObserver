@@ -416,6 +416,30 @@ void SpotCamStream::_startStreamingThread() {
     });
 }
 
+struct TimingInfo {
+    std::chrono::high_resolution_clock::time_point last_run_time;
+    double accum_diff_between_run_times;
+    int32_t num_iterations;
+};
+static std::unordered_map<int32_t, TimingInfo> timing_map; 
+static int32_t NUM_ITERATIONS = 100;
+
+void local_silly_timing_fn(std::chrono::high_resolution_clock::time_point curr_time, uint32_t cam_stream_id) {
+    if (timing_map.count(cam_stream_id) > 0) {
+        double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_map[cam_stream_id].last_run_time).count();
+        timing_map[cam_stream_id] = {curr_time, timing_map[cam_stream_id].accum_diff_between_run_times+time_since_last, timing_map[cam_stream_id].num_iterations+1};
+        if (timing_map[cam_stream_id].num_iterations == NUM_ITERATIONS) {
+            std::cout << std::format("readerThread: Average time between function iterations over {} iterations, thread {}: {} ms", 
+                                        timing_map[cam_stream_id].num_iterations,
+                                        cam_stream_id,
+                                        timing_map[cam_stream_id].accum_diff_between_run_times/NUM_ITERATIONS);
+            timing_map[cam_stream_id] = {curr_time, 0.0, 0};
+        }
+    } else {
+        timing_map[cam_stream_id] = {curr_time, 0.0, 0};
+    }
+}
+
 // Image producer thread that requests images from the robot
 void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
     LogMessage("Producer thread started");
@@ -423,6 +447,7 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
     while (!stop_token.stop_requested() && !quit_requested_.load()) {
         try {
             auto start = std::chrono::high_resolution_clock::now();
+            local_silly_timing_fn(start, current_cam_mask_);
 
             // Request images from all cameras
             bosdyn::client::GetImageResultType response = image_client_->GetImage(current_request_);
@@ -438,8 +463,10 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
             // Process and queue images
             image_lifo_.push(response.response.image_responses());
             auto end = std::chrono::high_resolution_clock::now();
-            LogMessage("Total time for GetImage and push: {:.4f} ms",
-                       std::chrono::duration<double, std::milli>(end - start).count());
+            // LogMessage("Total time for GetImage and push: {:.4f} ms",
+            //            std::chrono::duration<double, std::milli>(end - start).count());
+            
+            
         } catch (const std::exception& e) {
             LogMessage("Error in producer thread: {}", e.what());
             std::this_thread::sleep_for(std::chrono::seconds(1));
