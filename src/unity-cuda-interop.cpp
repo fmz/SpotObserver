@@ -691,7 +691,6 @@ bool uploadNextVisionPipelineImageSetToUnity(int32_t robot_id, int32_t cam_strea
     if (timing_map.count(robot_id) > 0 && timing_map[robot_id].count(cam_stream_id) > 0) {
         double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_map[robot_id][cam_stream_id].last_run_time).count();
         timing_map[robot_id][cam_stream_id] = {curr_time, timing_map[robot_id][cam_stream_id].accum_diff_between_run_times+time_since_last, timing_map[robot_id][cam_stream_id].num_iterations+1};
-        // cout every x iterations
         if (timing_map[robot_id][cam_stream_id].num_iterations == NUM_ITERATIONS) {
             std::cout << std::format("uploadNextVisionPipelineImageSetToUnity: Average time between function iterations over {} iterations, robot {}, stream {}: {} ms", 
                                         timing_map[robot_id][cam_stream_id].num_iterations,

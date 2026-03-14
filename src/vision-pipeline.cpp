@@ -163,6 +163,30 @@ void VisionPipeline::deallocateCudaBuffers() {
     }
 }
 
+struct TimingInfo {
+    std::chrono::high_resolution_clock::time_point last_run_time;
+    double accum_diff_between_run_times;
+    int32_t num_iterations;
+};
+static std::unordered_map<int32_t, TimingInfo> timing_map_pipeline; 
+static int32_t NUM_ITERATIONS_PIPELINE = 100;
+
+void local_silly_timing_fn_pipeline(std::chrono::high_resolution_clock::time_point curr_time, uint32_t cam_stream_id) {
+    if (timing_map_pipeline.count(cam_stream_id) > 0) {
+        double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_map_pipeline[cam_stream_id].last_run_time).count();
+        timing_map_pipeline[cam_stream_id] = {curr_time, timing_map_pipeline[cam_stream_id].accum_diff_between_run_times+time_since_last, timing_map_pipeline[cam_stream_id].num_iterations+1};
+        if (timing_map_pipeline[cam_stream_id].num_iterations == NUM_ITERATIONS_PIPELINE) {
+            std::cout << std::format("pipelineWorker: Average time between function iterations over {} iterations, thread {}: {} ms", 
+                                        timing_map_pipeline[cam_stream_id].num_iterations,
+                                        cam_stream_id,
+                                        timing_map_pipeline[cam_stream_id].accum_diff_between_run_times/NUM_ITERATIONS_PIPELINE);
+            timing_map_pipeline[cam_stream_id] = {curr_time, 0.0, 0};
+        }
+    } else {
+        timing_map_pipeline[cam_stream_id] = {curr_time, 0.0, 0};
+    }
+}
+
 void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
     size_t num_images_per_iter = output_shape_.N;
 
@@ -175,6 +199,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
     while (!stop_token.stop_requested() && running_.load()) {
         auto start_time = std::chrono::high_resolution_clock::now();
+        local_silly_timing_fn_pipeline(start_time, thread_num);
         try {
             // Get current images from SpotConnection
             if (!spot_cam_stream_.getCurrentImages(
@@ -423,8 +448,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        LogMessage("VisionPipeline iteration time: {} ms", duration.count());
+        // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        // LogMessage("VisionPipeline iteration time: {} ms", duration.count());
     }
 
     // Cleanup
