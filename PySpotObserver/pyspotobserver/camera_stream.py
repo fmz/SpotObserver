@@ -187,12 +187,14 @@ class SpotCamStream:
         self._streaming = False
         self._stop_event.set()
 
-        # Wait for thread to finish (with timeout)
+        # Wait for thread to finish. The SDK request timeout bounds how long the
+        # producer can stay blocked in get_image().
+        join_timeout = max(1.0, self._config.request_timeout_seconds + 1.0)
         if self._stream_thread and self._stream_thread.is_alive():
-            self._stream_thread.join(timeout=5.0)
+            self._stream_thread.join(timeout=join_timeout)
             if self._stream_thread.is_alive():
-                logger.warning(
-                    f"Stream '{self._stream_id}': Thread did not stop gracefully"
+                raise SpotCamStreamError(
+                    f"Stream '{self._stream_id}': Thread did not stop within {join_timeout:.1f}s"
                 )
 
         self._stream_thread = None
@@ -227,20 +229,44 @@ class SpotCamStream:
         Raises:
             SpotCamStreamError: If not streaming or timeout occurs
         """
-        if not self._streaming:
+        if not self._streaming and self._image_queue.empty():
             raise SpotCamStreamError("Not currently streaming")
 
-        try:
-            frame = self._image_queue.get(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        poll_interval = 0.1
+
+        while True:
+            if not self._streaming and self._image_queue.empty():
+                raise SpotCamStreamError("Stream stopped before images were available")
+
+            frame = self._peek_latest_frame()
+            if frame is not None:
+                if not copy:
+                    return frame.rgb_images, frame.depth_images
+                return (
+                    [img.copy() for img in frame.rgb_images],
+                    [img.copy() for img in frame.depth_images],
+                )
+
+            wait_timeout = poll_interval
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SpotCamStreamError(
+                        f"Timeout waiting for images (timeout={timeout}s)"
+                    )
+                wait_timeout = min(wait_timeout, remaining)
+
+            try:
+                frame = self._image_queue.get(timeout=wait_timeout)
+            except Empty:
+                continue
+
             if not copy:
                 return frame.rgb_images, frame.depth_images
             return (
                 [img.copy() for img in frame.rgb_images],
                 [img.copy() for img in frame.depth_images],
-            )
-        except Empty:
-            raise SpotCamStreamError(
-                f"Timeout waiting for images (timeout={timeout}s)"
             )
 
     async def async_get_current_images(
@@ -306,31 +332,6 @@ class SpotCamStream:
         """
         logger.debug(f"Stream '{self._stream_id}': Thread started")
 
-        # Prime the stream with an initial request to infer image shapes and
-        # preallocate a static frame pool before the main loop.
-        try:
-            image_requests = self._build_image_requests()
-            initial_responses = self._image_client.get_image(
-                image_requests,
-                timeout=self._config.request_timeout_seconds,
-            )
-            initial_decoded = self._decode_initial_responses(initial_responses)
-            self._initialize_frame_pool(initial_decoded)
-
-            # Fill and enqueue the first frame without re-decoding
-            frame = self._next_frame_from_pool()
-            self._fill_frame_from_decoded(initial_decoded, frame)
-            self._enqueue_frame(frame)
-            self._frame_count += 1
-        except Exception as e:
-            self._error_count += 1
-            logger.error(
-                f"Stream '{self._stream_id}': Error during initial request: {e}",
-                exc_info=True,
-            )
-            # Back off on error before entering loop
-            time.sleep(0.01)
-
         while not self._stop_event.is_set() and self._streaming:
             try:
                 # Build image requests for all cameras (RGB + depth)
@@ -344,9 +345,16 @@ class SpotCamStream:
                 )
                 request_time = time.monotonic() - start_time
 
-                # Process responses into preallocated frame
-                frame = self._next_frame_from_pool()
-                self._fill_frame_from_responses(image_responses, frame)
+                # Initialize the frame pool from the first successful response,
+                # then reuse it for all subsequent frames.
+                if not self._frame_pool:
+                    initial_decoded = self._decode_initial_responses(image_responses)
+                    self._initialize_frame_pool(initial_decoded)
+                    frame = self._next_frame_from_pool()
+                    self._fill_frame_from_decoded(initial_decoded, frame)
+                else:
+                    frame = self._next_frame_from_pool()
+                    self._fill_frame_from_responses(image_responses, frame)
                 self._enqueue_frame(frame)
                 self._frame_count += 1
 
@@ -483,6 +491,15 @@ class SpotCamStream:
                 logger.warning(
                     f"Stream '{self._stream_id}': Failed to enqueue frame: {e}"
                 )
+
+    def _peek_latest_frame(self) -> Optional[ImageFrame]:
+        """
+        Return the newest buffered frame without consuming queued frames.
+        """
+        with self._image_queue.mutex:
+            if not self._image_queue.queue:
+                return None
+            return self._image_queue.queue[-1]
 
     def _fill_frame_from_responses(
         self,

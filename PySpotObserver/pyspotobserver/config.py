@@ -3,9 +3,9 @@ Configuration dataclasses and enums for PySpotObserver.
 """
 
 from dataclasses import dataclass, field
-from enum import IntFlag, auto
+from enum import IntFlag
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 import yaml
 
 
@@ -57,8 +57,8 @@ class SpotConfig:
     """
     # Connection settings
     robot_ip: str
-    username: str = "user"
-    password: str = "bigbubbabigbubba"
+    username: str = ""
+    password: str = ""
 
     # Streaming settings
     image_buffer_size: int = 5
