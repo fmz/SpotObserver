@@ -2,8 +2,8 @@
 
 # Robot connection details
 robot_ip: "128.148.138.22"
-username: "user"
-password: "bigbubbabigbubba"
+username: ""
+password: ""
 
 # Streaming settings
 image_buffer_size: 5

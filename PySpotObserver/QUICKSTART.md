@@ -23,8 +23,8 @@ from pyspotobserver import SpotConfig
 
 config = SpotConfig(
     robot_ip="192.168.80.3",  # Replace with your robot's IP
-    username="user",
-    password="bigbubbabigbubba"
+    username="",
+    password=""
 )
 ```
 
