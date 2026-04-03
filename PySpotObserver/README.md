@@ -37,8 +37,8 @@ from pyspotobserver import SpotConfig, SpotConnection, CameraType
 # Create configuration
 config = SpotConfig(
     robot_ip="192.168.80.3",
-    username="user",
-    password="bigbubbabigbubba"
+    username="",
+    password=""
 )
 
 # Connect and stream
@@ -93,8 +93,8 @@ Example `config.yaml`:
 
 ```yaml
 robot_ip: "192.168.80.3"
-username: "user"
-password: "bigbubbabigbubba"
+username: ""
+password: ""
 image_buffer_size: 5
 image_quality_percent: 100.0
 ```
@@ -141,9 +141,7 @@ Images are returned as NumPy arrays:
 
 See the `examples/` directory for complete working examples:
 
-- **basic_streaming.py**: Simple synchronous streaming with OpenCV display
-- **async_streaming.py**: Async/await pattern demonstration
-- **multi_stream.py**: Multiple concurrent streams with different cameras
+- **basic_streaming.py**: Unified streaming example with sync, async, single-stream, multi-stream, and timing flags
 - **config_example.yaml**: Example configuration file
 - **benchmark_allocation.py**: Allocation vs in-place conversion benchmark
 
