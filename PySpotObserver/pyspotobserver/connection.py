@@ -213,12 +213,20 @@ class SpotConnection:
         logger.info("Disconnecting from robot...")
 
         # Stop all camera streams first
+        stop_errors = []
         for stream_id, stream in list(self._cam_streams.items()):
             try:
                 logger.debug(f"Stopping stream: {stream_id}")
                 stream.stop_streaming()
             except Exception as e:
                 logger.error(f"Error stopping stream {stream_id}: {e}")
+                stop_errors.append((stream_id, e))
+
+        if stop_errors:
+            raise SpotConnectionError(
+                "Failed to stop all streams cleanly during disconnect: "
+                + ", ".join(f"{stream_id} ({error})" for stream_id, error in stop_errors)
+            )
 
         self._cam_streams.clear()
 
@@ -353,12 +361,19 @@ class SpotConnection:
         """
         Stop all camera streams without disconnecting.
         """
+        stop_errors = []
         for stream_id, stream in list(self._cam_streams.items()):
             try:
                 logger.debug(f"Stopping stream: {stream_id}")
                 stream.stop_streaming()
             except Exception as e:
                 logger.error(f"Error stopping stream {stream_id}: {e}")
+                stop_errors.append((stream_id, e))
+        if stop_errors:
+            raise SpotConnectionError(
+                "Failed to stop all streams cleanly: "
+                + ", ".join(f"{stream_id} ({error})" for stream_id, error in stop_errors)
+            )
 
     def get_or_create_stream(
         self,

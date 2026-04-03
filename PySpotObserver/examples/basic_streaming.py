@@ -51,15 +51,23 @@ class TimingStats:
 
 
 @dataclass
+class FetchResult:
+    rgb_images: Sequence[np.ndarray]
+    depth_images: Sequence[np.ndarray]
+    fetch_seconds: float
+
+
+@dataclass
 class StreamSpec:
     label: str
+    stream_label: str
     stream_id: str
     cameras: list[CameraType]
     robot_label: str
 
     @property
     def display_label(self) -> str:
-        return f"{self.label} [{self.robot_label}]"
+        return f"{self.stream_label} [{self.robot_label}]"
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,11 +80,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--secondary-cameras",
-        help="Optional comma-separated cameras for a second stream.",
+        help="Optional comma-separated cameras for a second stream configuration on each connected robot.",
     )
     parser.add_argument(
         "--secondary-robot-ip",
-        help="Optional second robot IP. When provided, the secondary stream runs on this robot.",
+        help="Optional second robot IP. When provided, the configured stream set is started on this robot too.",
     )
     parser.add_argument(
         "--duration",
@@ -119,23 +127,31 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_stream_specs(args: argparse.Namespace) -> list[StreamSpec]:
-    specs = [
-        StreamSpec(
-            label="primary",
-            stream_id=args.stream_id,
-            cameras=parse_camera_list(args.cameras),
-            robot_label="primary",
-        )
+    primary_cameras = parse_camera_list(args.cameras)
+    stream_templates = [
+        ("primary", args.stream_id, primary_cameras),
     ]
     if args.secondary_cameras:
-        specs.append(
-            StreamSpec(
-                label="secondary",
-                stream_id=args.secondary_stream_id,
-                cameras=parse_camera_list(args.secondary_cameras),
-                robot_label="secondary" if args.secondary_robot_ip else "primary",
-            )
+        stream_templates.append(
+            ("secondary", args.secondary_stream_id, parse_camera_list(args.secondary_cameras))
         )
+
+    robot_labels = ["primary"]
+    if args.secondary_robot_ip:
+        robot_labels.append("secondary")
+
+    specs = []
+    for robot_label in robot_labels:
+        for stream_label, stream_id, cameras in stream_templates:
+            specs.append(
+                StreamSpec(
+                    label=f"{robot_label}:{stream_label}",
+                    stream_label=stream_label,
+                    stream_id=stream_id,
+                    cameras=cameras.copy(),
+                    robot_label=robot_label,
+                )
+            )
     return specs
 
 
@@ -178,7 +194,7 @@ def print_timing_summary(
         robot_stats.loop_seconds += stats.loop_seconds
 
     if len(timing_by_robot) > 1:
-        print("Per-robot totals:")
+        print("Per-robot aggregate throughput:")
         for robot_label, stats in timing_by_robot.items():
             avg_fetch_ms = (stats.fetch_seconds / stats.frames) * 1000.0 if stats.frames else 0.0
             avg_display_ms = (stats.display_seconds / stats.frames) * 1000.0 if stats.frames else 0.0
@@ -254,7 +270,7 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
                     timing_by_label[spec.label].add(
                         fetch_seconds=fetch_elapsed,
                         display_seconds=display_elapsed,
-                        loop_seconds=time.perf_counter() - loop_start,
+                        loop_seconds=fetch_elapsed + display_elapsed,
                     )
 
                     if should_quit:
@@ -265,8 +281,14 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
     return 0
 
 
-async def fetch_stream_async(stream, timeout: float):
-    return await stream.async_get_current_images(timeout=timeout)
+async def fetch_stream_async(stream, timeout: float) -> FetchResult:
+    fetch_start = time.perf_counter()
+    rgb_images, depth_images = await stream.async_get_current_images(timeout=timeout)
+    return FetchResult(
+        rgb_images=rgb_images,
+        depth_images=depth_images,
+        fetch_seconds=time.perf_counter() - fetch_start,
+    )
 
 
 async def run_async(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
@@ -286,25 +308,27 @@ async def run_async(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
         try:
             start_time = time.perf_counter()
             while time.perf_counter() - start_time < args.duration:
-                loop_starts = {spec.label: time.perf_counter() for spec in specs}
-                fetch_start = time.perf_counter()
                 results = await asyncio.gather(
                     *(fetch_stream_async(streams[spec.label], args.timeout) for spec in specs)
                 )
-                total_fetch_elapsed = time.perf_counter() - fetch_start
 
                 should_quit = False
-                for spec, (rgb_images, depth_images) in zip(specs, results):
+                for spec, result in zip(specs, results):
                     display_elapsed = 0.0
                     if not args.no_display:
                         display_start = time.perf_counter()
-                        should_quit = display_images(spec.display_label, streams[spec.label], rgb_images, depth_images) or should_quit
+                        should_quit = display_images(
+                            spec.display_label,
+                            streams[spec.label],
+                            result.rgb_images,
+                            result.depth_images,
+                        ) or should_quit
                         display_elapsed = time.perf_counter() - display_start
 
                     timing_by_label[spec.label].add(
-                        fetch_seconds=total_fetch_elapsed / len(specs),
+                        fetch_seconds=result.fetch_seconds,
                         display_seconds=display_elapsed,
-                        loop_seconds=time.perf_counter() - loop_starts[spec.label],
+                        loop_seconds=result.fetch_seconds + display_elapsed,
                     )
 
                 if should_quit:
