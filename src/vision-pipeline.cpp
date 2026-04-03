@@ -12,7 +12,7 @@
 
 namespace SOb {
 
-static int32_t thread_id_ = 0;
+static int32_t S_thread_id_ = 0;
 
 VisionPipeline::VisionPipeline(
     MLModel& model,
@@ -28,7 +28,7 @@ VisionPipeline::VisionPipeline(
     , output_shape_(output_shape)
     , max_size_(max_results)
     , cuda_stream_(spot_cam_stream_.getCudaStream())
-    , thread_num(thread_id_++)
+    , thread_num(S_thread_id_++)
 { }
 
 VisionPipeline::~VisionPipeline() {
@@ -163,29 +163,25 @@ void VisionPipeline::deallocateCudaBuffers() {
     }
 }
 
-struct TimingInfo {
-    std::chrono::high_resolution_clock::time_point last_run_time;
-    double accum_diff_between_run_times;
-    int32_t num_iterations;
-};
-static std::unordered_map<int32_t, TimingInfo> timing_map_pipeline; 
 static int32_t NUM_ITERATIONS_PIPELINE = 100;
 
-void local_silly_timing_fn_pipeline(std::chrono::high_resolution_clock::time_point curr_time, uint32_t cam_stream_id) {
-    if (timing_map_pipeline.count(cam_stream_id) > 0) {
-        double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_map_pipeline[cam_stream_id].last_run_time).count();
-        timing_map_pipeline[cam_stream_id] = {curr_time, timing_map_pipeline[cam_stream_id].accum_diff_between_run_times+time_since_last, timing_map_pipeline[cam_stream_id].num_iterations+1};
-        if (timing_map_pipeline[cam_stream_id].num_iterations == NUM_ITERATIONS_PIPELINE) {
-            std::cout << std::format("pipelineWorker: Average time between function iterations over {} iterations, thread {}: {} ms", 
-                                        timing_map_pipeline[cam_stream_id].num_iterations,
-                                        cam_stream_id,
-                                        timing_map_pipeline[cam_stream_id].accum_diff_between_run_times/NUM_ITERATIONS_PIPELINE);
-            timing_map_pipeline[cam_stream_id] = {curr_time, 0.0, 0};
+void VisionPipeline::updateTimingInfo(std::chrono::high_resolution_clock::time_point curr_time) {
+    if (timing_info_valid_) {
+        double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_info_.last_run_time).count();
+        timing_info_ = {curr_time, timing_info_.accum_diff_between_run_times+time_since_last, timing_info_.num_iterations+1};
+        if (timing_info_.num_iterations == NUM_ITERATIONS_PIPELINE) {
+            std::cout << std::format("pipelineWorker: Average time between function iterations over {} iterations, thread {}: {} ms\n",
+                                        timing_info_.num_iterations,
+                                        thread_num,
+                                        timing_info_.accum_diff_between_run_times/NUM_ITERATIONS_PIPELINE);
+            timing_info_ = {curr_time, 0.0, 0};
         }
     } else {
-        timing_map_pipeline[cam_stream_id] = {curr_time, 0.0, 0};
+        timing_info_ = {curr_time, 0.0, 0};
+        timing_info_valid_ = true;
     }
 }
+
 
 void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
     size_t num_images_per_iter = output_shape_.N;
@@ -198,8 +194,6 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
     size_t num_output_elements = output_shape_.N * output_shape_.C * output_shape_.H * output_shape_.W;
 
     while (!stop_token.stop_requested() && running_.load()) {
-        auto start_time = std::chrono::high_resolution_clock::now();
-        local_silly_timing_fn_pipeline(start_time, thread_num);
         try {
             // Get current images from SpotConnection
             if (!spot_cam_stream_.getCurrentImages(
@@ -210,6 +204,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
+            auto start_time = std::chrono::high_resolution_clock::now();
+            updateTimingInfo(start_time);
 
             // Prepare device pointers
             uint8_t* d_rgb_ptr = d_rgb_data_ + write_idx_ * num_rgb_elemenets;
@@ -342,8 +338,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             }
 
             auto preprocess_time = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(preprocess_time - start_time);
-            LogMessage("VisionPipeline preprocess time: {} ms", duration.count());
+            auto preprocess_duration = std::chrono::duration_cast<std::chrono::milliseconds>(preprocess_time - start_time);
+            LogMessage("VisionPipeline preprocess time: {} ms", preprocess_duration.count());
 
             // Stream-scoped sync before inference (keeps other connections running)
             checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize before running inference");
@@ -365,8 +361,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
 
             auto inference_time = std::chrono::high_resolution_clock::now();
-            duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
-            LogMessage("VisionPipeline inference time: {} ms", duration.count());
+            auto inference_duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
+            LogMessage("VisionPipeline inference time: {} ms", inference_duration.count());
 
             for (size_t i = 0; i < num_images_per_iter; i++) {
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
@@ -429,8 +425,11 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
             checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after postprocess");
             auto postprocess_time = std::chrono::high_resolution_clock::now();
-            duration = std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_time - inference_time);
-            LogMessage("VisionPipeline postprocess time: {} ms", duration.count());
+            auto postprocess_duration = std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_time - inference_time);
+            LogMessage("VisionPipeline postprocess time: {} ms", postprocess_duration.count());
+
+            auto total_duration = preprocess_duration + inference_duration + postprocess_duration;
+            std::cout << std::format("VisionPipeline total duration: {} ms\n", total_duration.count());
 
             // Publish only after stream work completes
             read_idx_.store(write_idx_, std::memory_order_release);

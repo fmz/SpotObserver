@@ -57,9 +57,14 @@ private:
     int32_t dump_id = 0;
     int32_t thread_num;
 
+    TimingInfo timing_info_;
+    bool timing_info_valid_ = false;
+
     void pipelineWorker(std::stop_token stop_token);
     bool allocateCudaBuffers();
     void deallocateCudaBuffers();
+
+    void updateTimingInfo(std::chrono::high_resolution_clock::time_point curr_time);
     
 public:
     VisionPipeline(

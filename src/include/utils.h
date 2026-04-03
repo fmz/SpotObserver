@@ -7,6 +7,7 @@
 #include "logger.h"
 #include <cuda_runtime.h>
 #include <stdexcept>
+#include <chrono>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -61,5 +62,11 @@ inline bool checkCUDA(cudaError_t err, const std::string& fmt)
 inline uint32_t __num_set_bits(uint32_t bitmask) {
     return __popcnt(bitmask);
 }
+
+struct TimingInfo {
+    std::chrono::high_resolution_clock::time_point last_run_time;
+    double accum_diff_between_run_times;
+    int32_t num_iterations;
+};
 
 }
