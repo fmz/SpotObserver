@@ -33,9 +33,9 @@ setup(
     ],
     python_requires=">=3.9",
     install_requires=[
-        "bosdyn-client>=4.0.0,<5.0.0",
-        "numpy>=1.24.0,<2.0.0",
-        "opencv-python>=4.8.0",
+        "bosdyn-client>=5.0.0",
+        "numpy>=2.0.0,<2.4.0",
+        "opencv-python>=4.12.0",
         "pyyaml>=6.0.0",
     ],
     extras_require={
