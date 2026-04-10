@@ -16,6 +16,7 @@ from bosdyn.api import image_pb2
 from bosdyn.client.image import ImageClient, build_image_request
 
 from .config import SpotConfig, CameraType
+from .color_correction import _ROBOT_CCMS
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,13 @@ class SpotCamStream:
         # Preallocated frame pool (initialized once we know image shapes)
         self._frame_pool: List[ImageFrame] = []
         self._frame_pool_index: int = 0
+
+        # Color correction matrices (None if robot IP is not recognized)
+        self._ccms: Optional[dict] = _ROBOT_CCMS.get(config.robot_ip)
+        if self._ccms is not None:
+            logger.info(f"SpotCamStream '{stream_id}': Color correction enabled for {config.robot_ip}")
+        else:
+            logger.info(f"SpotCamStream '{stream_id}': No color correction (unrecognized IP {config.robot_ip})")
 
         # Statistics
         self._frame_count = 0
@@ -526,6 +534,8 @@ class SpotCamStream:
                 is_depth=False,
                 out_array=frame.rgb_images[i],
             )
+            if self._ccms is not None:
+                self._apply_ccm_inplace(frame.rgb_images[i], self._ccms[self._camera_order[i]])
             self._convert_image_response_inplace(
                 responses[depth_idx],
                 is_depth=True,
@@ -586,7 +596,10 @@ class SpotCamStream:
         for i in range(n_cameras):
             rgb_idx = i * 2
             depth_idx = i * 2 + 1
-            decoded.append(self._convert_image_response_alloc(responses[rgb_idx], is_depth=False))
+            rgb = self._convert_image_response_alloc(responses[rgb_idx], is_depth=False)
+            if self._ccms is not None:
+                self._apply_ccm_inplace(rgb, self._ccms[self._camera_order[i]])
+            decoded.append(rgb)
             decoded.append(self._convert_image_response_alloc(responses[depth_idx], is_depth=True))
         return decoded
 
@@ -758,6 +771,17 @@ class SpotCamStream:
             raise SpotCamStreamError(
                 f"Unsupported image format: {image_proto.format}"
             )
+
+    @staticmethod
+    def _apply_ccm_inplace(img: np.ndarray, matrix: np.ndarray) -> None:
+        """
+        Apply a 3x3 color correction matrix to an (H, W, 3) float32 image in-place.
+
+        Computes corrected = matrix @ pixel for each pixel (column-vector form),
+        equivalent to img @ matrix.T in numpy row-vector form, then clips to [0, 1].
+        """
+        img[:] = img @ matrix.T
+        np.clip(img, 0.0, 1.0, out=img)
 
     @staticmethod
     def _valid_camera_mask() -> int:

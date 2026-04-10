@@ -1,7 +1,9 @@
 # Example configuration file for PySpotObserver
 
 # Robot connection details
-robot_ip: "128.148.138.22"
+# TUSKER: "128.148.138.22"
+# GOUGER: "128.148.138.21"
+robot_ip: "128.148.138.22" 
 username: ""
 password: ""
 
