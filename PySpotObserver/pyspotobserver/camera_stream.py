@@ -401,6 +401,7 @@ class SpotCamStream:
                     rgb_source,
                     quality_percent=self._config.image_quality_percent,
                     image_format=image_pb2.Image.FORMAT_JPEG,
+                    pixel_format=image_pb2.Image.PIXEL_FORMAT_RGB_U8
                 )
             )
 
@@ -529,13 +530,16 @@ class SpotCamStream:
             rgb_idx = i * 2
             depth_idx = i * 2 + 1
 
+            ccm = None
+            if self._ccms is not None:
+                 ccm = self._ccms[self._camera_order[i]]
             self._convert_image_response_inplace(
                 responses[rgb_idx],
                 is_depth=False,
                 out_array=frame.rgb_images[i],
+                ccm=ccm
             )
-            if self._ccms is not None:
-                self._apply_ccm_inplace(frame.rgb_images[i], self._ccms[self._camera_order[i]])
+           
             self._convert_image_response_inplace(
                 responses[depth_idx],
                 is_depth=True,
@@ -665,6 +669,7 @@ class SpotCamStream:
         response: image_pb2.ImageResponse,
         is_depth: bool,
         out_array: np.ndarray,
+        ccm: Optional[np.ndarray] = None
     ) -> None:
         """
         Convert ImageResponse protobuf to numpy array in-place.
@@ -696,6 +701,9 @@ class SpotCamStream:
                     f"Output array shape mismatch: {out_array.shape} vs {img.shape}"
                 )
             np.multiply(img, 1.0 / 255.0, out=out_array, casting="unsafe")
+            if ccm is not None:
+                img = img @ ccm.T
+                np.clip(img, 0.0, 1.0, out=img)
             return
 
         elif image_proto.format == image_pb2.Image.FORMAT_RAW:

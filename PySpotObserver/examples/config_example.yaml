@@ -10,7 +10,7 @@ password: ""
 # Streaming settings
 image_buffer_size: 5
 image_quality_percent: 100.0
-request_timeout_seconds: 5.0
+request_timeout_seconds: 10.0
 
 # Advanced settings
 sdk_name: "PySpotObserver"
