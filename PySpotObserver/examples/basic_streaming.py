@@ -159,6 +159,7 @@ def display_images(window_prefix: str, stream, rgb_images: Sequence[np.ndarray],
     for i, (rgb, depth) in enumerate(zip(rgb_images, depth_images)):
         camera_name = stream.get_camera_order()[i].name
         rgb_display = (rgb * 255).astype(np.uint8)
+        rgb_display = cv2.cvtColor(rgb_display, cv2.COLOR_RGB2BGR)
         depth_normalized = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
         cv2.imshow(f"{window_prefix} - {camera_name} - RGB", rgb_display)

@@ -67,7 +67,7 @@ class SpotConfig:
     image_quality_percent: float = 100.0
     """JPEG quality for RGB images (0-100)"""
 
-    request_timeout_seconds: float = 5.0
+    request_timeout_seconds: float = 500.0
     """Timeout for image requests"""
 
     # Advanced settings
