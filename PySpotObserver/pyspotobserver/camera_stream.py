@@ -17,6 +17,8 @@ from bosdyn.client.image import ImageClient, build_image_request
 
 from .config import SpotConfig, CameraType
 from .color_correction import _ROBOT_CCMS
+from .vision_pipeline import run_vision_pipeline
+
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +219,7 @@ class SpotCamStream:
         self,
         timeout: Optional[float] = None,
         copy: bool = False,
+        run_pipeline: bool = False,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Get the most recent frame of images.
@@ -249,12 +252,16 @@ class SpotCamStream:
 
             frame = self._peek_latest_frame()
             if frame is not None:
-                if not copy:
-                    return frame.rgb_images, frame.depth_images
-                return (
-                    [img.copy() for img in frame.rgb_images],
-                    [img.copy() for img in frame.depth_images],
-                )
+                rgb, depth = frame.rgb_images, frame.depth_images
+
+                if copy:
+                    rgb = [img.copy() for img in rgb]
+                    depth = [img.copy() for img in depth]
+
+                if run_pipeline and self._vision_pipeline:
+                    return run_vision_pipeline(rgb, depth)
+
+                return rgb, depth
 
             wait_timeout = poll_interval
             if deadline is not None:
@@ -270,17 +277,22 @@ class SpotCamStream:
             except Empty:
                 continue
 
-            if not copy:
-                return frame.rgb_images, frame.depth_images
-            return (
-                [img.copy() for img in frame.rgb_images],
-                [img.copy() for img in frame.depth_images],
-            )
+            rgb, depth = frame.rgb_images, frame.depth_images
+
+            if copy:
+                rgb = [img.copy() for img in rgb]
+                depth = [img.copy() for img in depth]
+
+            if run_pipeline and self._vision_pipeline:
+                return run_vision_pipeline(rgb, depth)
+
+            return rgb, depth
 
     async def async_get_current_images(
         self,
         timeout: Optional[float] = None,
         copy: bool = False,
+        run_pipeline: bool = False,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Async version of get_current_images().
@@ -300,9 +312,18 @@ class SpotCamStream:
             SpotCamStreamError: If not streaming or timeout occurs
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self.get_current_images, timeout, copy
-        )
+
+        if not run_pipeline:
+            return await loop.run_in_executor(
+                None, self.get_current_images, timeout, copy, False
+            )
+
+        # Run full pipeline in executor
+        def _get_and_process():
+            rgb, depth = self.get_current_images(timeout, copy, False)
+            return run_vision_pipeline(rgb, depth)
+
+        return await loop.run_in_executor(None, _get_and_process)
 
     def get_camera_order(self) -> List[CameraType]:
         """
