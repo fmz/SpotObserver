@@ -6,6 +6,7 @@
 #include "cuda_kernels.cuh"
 #include "utils.h"
 #include "dumper.h"
+#include "unity-cuda-interop.h"
 
 #include <chrono>
 #include <algorithm>
@@ -98,6 +99,11 @@ void VisionPipeline::stop() {
 
 bool VisionPipeline::allocateCudaBuffers() {
     deallocateCudaBuffers();
+
+    if (!ensureCudaDeviceForD3D12Interop()) {
+        LogMessage("Failed to select D3D12 interop CUDA device");
+        return false;
+    }
 
     size_t rgb_image_size_batch = input_shape_.N * input_shape_.C * input_shape_.H * input_shape_.W * sizeof(uint8_t);
     size_t rgb_buffer_size = max_size_ * rgb_image_size_batch;

@@ -42,6 +42,13 @@ bool registerOutputTextures(
 
 bool uploadNextImageSetToUnity(int32_t robot_id, int32_t cam_stream_id);
 bool uploadNextVisionPipelineImageSetToUnity(int32_t robot_id, int32_t cam_stream_id);
+void* getRenderEventFunc();
+bool enqueueUnityUpload(int32_t robot_id, int32_t cam_stream_id, int32_t source_kind);
 bool clearOutputTextures(int32_t robot_id);
+bool ensureCudaDeviceForD3D12Interop();
+int getD3D12InteropCudaDevice();
+#ifdef SOB_ENABLE_TEST_HOOKS
+bool setTestUnityUploadImageProvider(SOb_TestImageProvider provider);
+#endif
 
 }

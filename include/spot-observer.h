@@ -18,6 +18,28 @@ typedef void (*SOb_LogCallback)(const char* message);
 
 typedef void* SObModel;
 
+#ifdef SOB_ENABLE_TEST_HOOKS
+typedef bool (UNITY_INTERFACE_API *SOb_TestImageProvider)(
+    int32_t robot_id,
+    int32_t cam_stream_id,
+    int32_t n_images_requested,
+    uint8_t** images,
+    float** depths
+);
+#endif
+
+enum SOb_UnityUploadSourceKind {
+    SOb_UnityUploadSource_RawCameraFrames = 0,
+    SOb_UnityUploadSource_VisionPipelineFrames = 1,
+#ifdef SOB_ENABLE_TEST_HOOKS
+    SOb_UnityUploadSource_TestFrames = 1000,
+#endif
+};
+
+enum {
+    SOb_UnityUploadEventId = 0x534F6255, // "SObU"
+};
+
 enum SpotCamera {
     BACK        = 0x1,
     FRONTLEFT   = 0x2,
@@ -69,6 +91,17 @@ bool UNITY_INTERFACE_API SOb_RegisterUnityReadbackBuffers(
 
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ClearUnityReadbackBuffers(int32_t robot_id);
+
+UNITY_INTERFACE_EXPORT
+void* UNITY_INTERFACE_API SOb_GetRenderEventFunc();
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_EnqueueUnityUpload(int32_t robot_id, int32_t cam_stream_id, int32_t source_kind);
+
+#ifdef SOB_ENABLE_TEST_HOOKS
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_Test_SetUnityUploadImageProvider(SOb_TestImageProvider provider);
+#endif
 
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_LaunchVisionPipeline(
