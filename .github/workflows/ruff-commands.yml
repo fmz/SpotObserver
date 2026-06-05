@@ -1,0 +1,407 @@
+# =============================================================================
+# Ruff Slash Commands Workflow
+# =============================================================================
+# Triggered by PR comments with @ruff or /ruff commands.
+# Matches actual ruff CLI syntax.
+#
+# Commands (canonical source: .github/scripts/ruff/lib.sh:print_bot_commands_markdown):
+#   check           - Run lint check (adds 🚀 or ❌ reaction)
+#   check --fix     - Auto-fix lint issues, commit to PR branch
+#   format          - Auto-format code, commit to PR branch
+#   format --check  - Check formatting only (no changes)
+#   fix             - Shorthand for: check --fix && format
+#
+# Prefix with @ruff or /ruff in PR comments (e.g., /ruff check --fix)
+#
+# =============================================================================
+
+name: Ruff Commands
+
+on:
+    issue_comment:
+        types: [created]
+
+jobs:
+    # ===========================================================================
+    # Parse command from PR comment
+    # ===========================================================================
+    parse-command:
+        if: >
+            github.event.issue.pull_request && (
+              startsWith(github.event.comment.body, '/ruff') ||
+              startsWith(github.event.comment.body, '@ruff')
+            )
+        runs-on: ubuntu-latest
+        outputs:
+            command: ${{ steps.parse.outputs.command }}
+            pr_number: ${{ steps.pr.outputs.number }}
+            pr_ref: ${{ steps.pr.outputs.ref }}
+            pr_head_ref: ${{ steps.pr.outputs.head_ref }}
+        steps:
+            - name: Parse command
+              id: parse
+              env:
+                  COMMENT_BODY: ${{ github.event.comment.body }}
+              run: |
+                  COMMENT="$COMMENT_BODY"
+                  # Normalize: strip @ruff or /ruff prefix
+                  CMD=$(echo "$COMMENT" | sed -E 's/^[@/]ruff[[:space:]]*//')
+                  echo "Normalized command: '$CMD'"
+
+                  # Match CLI-style commands
+                  if [[ "$CMD" == "fix"* ]]; then
+                    # Shorthand for check --fix && format
+                    echo "command=fix-all" >> "$GITHUB_OUTPUT"
+                  elif [[ "$CMD" == "check --fix"* ]] || [[ "$CMD" == "check-fix"* ]]; then
+                    echo "command=check-fix" >> "$GITHUB_OUTPUT"
+                  elif [[ "$CMD" == "check"* ]]; then
+                    echo "command=check" >> "$GITHUB_OUTPUT"
+                  elif [[ "$CMD" == "format --check"* ]] || [[ "$CMD" == "format-check"* ]]; then
+                    echo "command=format-check" >> "$GITHUB_OUTPUT"
+                  elif [[ "$CMD" == "format"* ]]; then
+                    echo "command=format" >> "$GITHUB_OUTPUT"
+                  else
+                    # Default: just @ruff or /ruff with no subcommand = check
+                    echo "command=check" >> "$GITHUB_OUTPUT"
+                  fi
+                  echo "Parsed: $(grep command "$GITHUB_OUTPUT")"
+
+            - name: Get PR details
+              id: pr
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const { data: pr } = await github.rest.pulls.get({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        pull_number: context.issue.number
+                      });
+                      core.setOutput('ref', pr.head.sha);
+                      core.setOutput('number', pr.number);
+                      core.setOutput('head_ref', pr.head.ref);
+                      console.log(`PR #${pr.number}: ${pr.head.ref} @ ${pr.head.sha}`);
+
+            - name: Add eyes reaction
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      await github.rest.reactions.createForIssueComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        comment_id: context.payload.comment.id,
+                        content: 'eyes'
+                      });
+
+    # ===========================================================================
+    # Check job: @ruff check or @ruff format --check
+    # ===========================================================================
+    check:
+        needs: [parse-command]
+        if: >
+            needs.parse-command.outputs.command == 'check' ||
+            needs.parse-command.outputs.command == 'format-check'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  ref: ${{ needs.parse-command.outputs.pr_ref }}
+
+            - name: Install ruff
+              run: pip install ruff
+
+            - name: Run ruff check
+              id: ruff_check
+              if: needs.parse-command.outputs.command == 'check'
+              continue-on-error: true
+              run: ruff check . --output-format github
+
+            - name: Run ruff format --check
+              id: ruff_format
+              if: needs.parse-command.outputs.command == 'format-check'
+              continue-on-error: true
+              run: ruff format --check .
+
+            - name: Add result reaction
+              id: result_reaction
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const checkOutcome = '${{ steps.ruff_check.outcome }}';
+                      const formatOutcome = '${{ steps.ruff_format.outcome }}';
+                      const command = '${{ needs.parse-command.outputs.command }}';
+
+                      // Each command only cares about its own concern
+                      // - check: lint only
+                      // - format-check: format only
+                      let success;
+                      if (command === 'format-check') {
+                        success = formatOutcome !== 'failure';
+                      } else {
+                        success = checkOutcome !== 'failure';  // Lint only
+                      }
+
+                      await github.rest.reactions.createForIssueComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        comment_id: context.payload.comment.id,
+                        content: success ? 'rocket' : 'confused'
+                      });
+
+                      core.setOutput('success', success);
+                      core.setOutput('check_failed', checkOutcome === 'failure');
+                      core.setOutput('format_failed', formatOutcome === 'failure');
+
+            - name: Explain failure
+              if: steps.result_reaction.outputs.success == 'false'
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const command = '${{ needs.parse-command.outputs.command }}';
+                      const checkFailed = '${{ steps.result_reaction.outputs.check_failed }}' === 'true';
+                      const formatFailed = '${{ steps.result_reaction.outputs.format_failed }}' === 'true';
+                      const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${{ github.run_id }}`;
+
+                      // Only mention failures relevant to the command
+                      let message = '😕 **Issues remain after running command.**\n\n';
+                      if (command === 'format-check' && formatFailed) {
+                        message += '- ❌ Format check found issues\n';
+                      } else if (command === 'check' && checkFailed) {
+                        message += '- ❌ Lint check found issues (may need manual fix)\n';
+                      }
+                      message += `\n[View full logs →](${runUrl})`;
+
+                      await github.rest.issues.createComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        body: message
+                      });
+
+    # ===========================================================================
+    # Check-fix job: @ruff check --fix
+    # ===========================================================================
+    check-fix:
+        needs: [parse-command]
+        if: >
+            needs.parse-command.outputs.command == 'check-fix' ||
+            needs.parse-command.outputs.command == 'fix-all'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            pull-requests: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ needs.parse-command.outputs.pr_head_ref }}
+                  fetch-depth: 0
+
+            - name: Install ruff
+              run: pip install ruff
+
+            - name: Run ruff check --fix
+              run: ruff check --fix . || true
+
+            - name: Commit and push
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git add -A
+                  if git diff --staged --quiet; then
+                    echo "No changes to commit"
+                  else
+                    git commit -m "ruff check --fix"
+                    git push
+                  fi
+
+    # ===========================================================================
+    # Format job: @ruff format or part of @ruff fix
+    # ===========================================================================
+    format:
+        needs: [parse-command, check-fix]
+        # Run if format command, OR after check-fix for fix-all
+        # Use always() to run even if check-fix was skipped
+        if: >
+            always() && (
+              needs.parse-command.outputs.command == 'format' ||
+              needs.parse-command.outputs.command == 'fix-all'
+            )
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            pull-requests: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ needs.parse-command.outputs.pr_head_ref }}
+                  fetch-depth: 0
+
+            - name: Pull latest (in case check-fix job pushed)
+              run: git pull --rebase origin ${{ needs.parse-command.outputs.pr_head_ref }} || true
+
+            - name: Install ruff
+              run: pip install ruff
+
+            - name: Run ruff format
+              run: ruff format .
+
+            - name: Commit and push
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git add -A
+                  if git diff --staged --quiet; then
+                    echo "No changes to commit"
+                  else
+                    git commit -m "ruff format"
+                    git push
+                  fi
+
+    # ===========================================================================
+    # Post-fix reaction: add emoji after fix/format completes
+    # ===========================================================================
+    post-fix-reaction:
+        needs: [parse-command, check-fix, format]
+        if: >
+            always() && (
+              needs.parse-command.outputs.command == 'check-fix' ||
+              needs.parse-command.outputs.command == 'format' ||
+              needs.parse-command.outputs.command == 'fix-all'
+            )
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ needs.parse-command.outputs.pr_head_ref }}
+                  fetch-depth: 0
+
+            - name: Pull latest
+              run: git pull --rebase origin ${{ needs.parse-command.outputs.pr_head_ref }} || true
+
+            - name: Install ruff
+              run: pip install ruff
+
+            - name: Check final status
+              id: final_check
+              env:
+                  COMMAND: ${{ needs.parse-command.outputs.command }}
+              run: |
+                  set -o pipefail
+                  echo "Command: $COMMAND"
+
+                  # Default to true (not applicable)
+                  echo "check_ok=true" >> "$GITHUB_OUTPUT"
+                  echo "format_ok=true" >> "$GITHUB_OUTPUT"
+
+                  # Only check what's relevant to the command
+                  case "$COMMAND" in
+                    check-fix)
+                      echo "Verifying: lint status"
+                      if ruff check . --output-format concise 2>&1 | head -20; then
+                        echo "  ✓ Lint: passed"
+                        echo "check_ok=true" >> "$GITHUB_OUTPUT"
+                      else
+                        echo "  ✗ Lint: issues remain"
+                        echo "check_ok=false" >> "$GITHUB_OUTPUT"
+                      fi
+                      ;;
+                    format)
+                      echo "Verifying: format status"
+                      if ruff format --check . 2>&1 | head -20; then
+                        echo "  ✓ Format: passed"
+                        echo "format_ok=true" >> "$GITHUB_OUTPUT"
+                      else
+                        echo "  ✗ Format: issues remain"
+                        echo "format_ok=false" >> "$GITHUB_OUTPUT"
+                      fi
+                      ;;
+                    fix-all)
+                      echo "Verifying: lint and format status"
+                      if ruff check . --output-format concise 2>&1 | head -20; then
+                        echo "  ✓ Lint: passed"
+                        echo "check_ok=true" >> "$GITHUB_OUTPUT"
+                      else
+                        echo "  ✗ Lint: issues remain"
+                        echo "check_ok=false" >> "$GITHUB_OUTPUT"
+                      fi
+                      if ruff format --check . 2>&1 | head -20; then
+                        echo "  ✓ Format: passed"
+                        echo "format_ok=true" >> "$GITHUB_OUTPUT"
+                      else
+                        echo "  ✗ Format: issues remain"
+                        echo "format_ok=false" >> "$GITHUB_OUTPUT"
+                      fi
+                      ;;
+                  esac
+
+            - name: Add result reaction
+              id: result_reaction
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const command = '${{ needs.parse-command.outputs.command }}';
+                      const checkOk = '${{ steps.final_check.outputs.check_ok }}' === 'true';
+                      const formatOk = '${{ steps.final_check.outputs.format_ok }}' === 'true';
+
+                      // Success based on what the command cares about
+                      let success;
+                      if (command === 'format') {
+                        success = formatOk;
+                      } else if (command === 'check-fix') {
+                        success = checkOk;
+                      } else {
+                        // fix-all: both must pass
+                        success = checkOk && formatOk;
+                      }
+
+                      await github.rest.reactions.createForIssueComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        comment_id: context.payload.comment.id,
+                        content: success ? 'rocket' : 'confused'
+                      });
+
+                      core.setOutput('success', success);
+                      core.setOutput('check_failed', !checkOk);
+                      core.setOutput('format_failed', !formatOk);
+
+            - name: Explain failure
+              if: steps.result_reaction.outputs.success == 'false'
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const command = '${{ needs.parse-command.outputs.command }}';
+                      const checkFailed = '${{ steps.result_reaction.outputs.check_failed }}' === 'true';
+                      const formatFailed = '${{ steps.result_reaction.outputs.format_failed }}' === 'true';
+                      const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${{ github.run_id }}`;
+
+                      // Only mention failures relevant to the command
+                      let message = '😕 **Issues remain after running command.**\n\n';
+                      if (command === 'format') {
+                        message += '- ❌ Format check found issues\n';
+                      } else if (command === 'check-fix') {
+                        message += '- ❌ Lint check found issues (may need manual fix)\n';
+                      } else {
+                        // fix-all: mention both if both failed
+                        if (checkFailed && formatFailed) {
+                          message += '- ❌ Lint check found issues (may need manual fix)\n- ❌ Format check found issues\n';
+                        } else if (checkFailed) {
+                          message += '- ❌ Lint check found issues (may need manual fix)\n';
+                        } else if (formatFailed) {
+                          message += '- ❌ Format check found issues\n';
+                        }
+                      }
+                      message += `\n[View full logs →](${runUrl})`;
+
+                      await github.rest.issues.createComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        body: message
+                      });
