@@ -249,7 +249,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                     CV_32FC1,
                     depth_upscale_buffers_[depth_index].data()
                 );
-                cv::resize(cv_img, upscaled_depth, upscaled_depth.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                cv::resize(cv_img, upscaled_depth, upscaled_depth.size(), 0.0, 0.0, cv::INTER_CUBIC);
                 depth_upload_img = upscaled_depth;
                 LogMessage("Upscaled depth image from {}x{} to {}x{} before CUDA upload",
                            source_depth_width, source_depth_height, depth_target_width_, depth_target_height_);
