@@ -6,13 +6,16 @@ and streaming camera data with support for both synchronous and asynchronous pat
 """
 
 from .config import SpotConfig, CameraType
-from .connection import SpotConnection
-from .camera_stream import SpotCamStream
+from .connection import SpotAuthenticationError, SpotConnection, SpotConnectionError
+from .camera_stream import SpotCamStream, SpotCamStreamError
 
 __version__ = "0.1.0"
 __all__ = [
     "SpotConfig",
     "CameraType",
     "SpotConnection",
+    "SpotConnectionError",
+    "SpotAuthenticationError",
     "SpotCamStream",
+    "SpotCamStreamError",
 ]

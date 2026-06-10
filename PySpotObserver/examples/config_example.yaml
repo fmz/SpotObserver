@@ -12,6 +12,12 @@ image_buffer_size: 5
 image_quality_percent: 100.0
 request_timeout_seconds: 10.0
 
+# Optional vision pipeline settings
+# vision_model_path: "C:/path/to/model.onnx"
+# vision_providers:
+#   - "CUDAExecutionProvider"
+#   - "CPUExecutionProvider"
+
 # Advanced settings
 sdk_name: "PySpotObserver"
 connection_retry_attempts: 3

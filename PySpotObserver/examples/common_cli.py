@@ -109,6 +109,10 @@ def build_config_from_args(args: argparse.Namespace) -> SpotConfig:
         config.password = args.password
     if hasattr(args, "image_buffer_size") and args.image_buffer_size is not None:
         config.image_buffer_size = args.image_buffer_size
+    if hasattr(args, "vision_model_path") and args.vision_model_path is not None:
+        config.vision_model_path = str(args.vision_model_path)
+    if hasattr(args, "vision_providers") and args.vision_providers:
+        config.vision_providers = args.vision_providers
 
     if not config.robot_ip:
         raise ValueError("Robot IP must be set in --config or with --robot-ip.")

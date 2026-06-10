@@ -14,6 +14,7 @@ import asyncio
 from contextlib import AsyncExitStack, ExitStack
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import time
 from typing import Sequence
 
@@ -128,6 +129,17 @@ def parse_args() -> argparse.Namespace:
         "--vision-pipeline",
         action="store_true",
         help="Run the vision pipeline on the Spot outputs"
+    )
+    parser.add_argument(
+        "--vision-model-path",
+        type=Path,
+        help="ONNX model path for --vision-pipeline. Overrides config and environment.",
+    )
+    parser.add_argument(
+        "--vision-provider",
+        action="append",
+        dest="vision_providers",
+        help="ONNX Runtime provider to request. Repeat to set provider preference order.",
     )
     return parser.parse_args()
 
@@ -265,7 +277,10 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
                     stream = streams[spec.label]
 
                     fetch_start = time.perf_counter()
-                    rgb_images, depth_images = stream.get_current_images(timeout=args.timeout)
+                    rgb_images, depth_images = stream.get_current_images(
+                        timeout=args.timeout,
+                        run_pipeline=args.vision_pipeline,
+                    )
                     fetch_elapsed = time.perf_counter() - fetch_start
 
                     display_elapsed = 0.0
