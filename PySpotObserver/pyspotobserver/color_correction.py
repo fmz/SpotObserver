@@ -2,8 +2,8 @@ import numpy as np
 from .config import CameraType
 
 # Known robot IPs
-_GOUGER_IP = "128.148.138.22"
-_TUSKER_IP = "128.148.138.21"
+_GOUGER_IP = "128.148.138.21"
+_TUSKER_IP = "128.148.138.22"
 
 _IDENTITY_3x3 = np.eye(3, dtype=np.float32)
 
