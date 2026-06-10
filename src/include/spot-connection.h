@@ -11,7 +11,12 @@
 #include <bosdyn/client/robot/robot.h>
 #include <bosdyn/client/image/image_client.h>
 
+#include <atomic>
+#include <memory>
 #include <stop_token>
+#include <unordered_map>
+#include <vector>
+
 #include <cuda_runtime.h>
 
 namespace SOb {
@@ -26,9 +31,12 @@ private:
 
     size_t n_elems_per_rgb_{0}; // Bytes per RGB image
     size_t n_elems_per_depth_{0}; // Bytes per depth image
+    int32_t depth_target_width_{0};
+    int32_t depth_target_height_{0};
 
     std::vector<SpotCamera> cameras_;
     size_t n_images_per_response_{0}; // Number of images per response
+    std::vector<std::vector<float>> depth_upscale_buffers_;
 
     // Circular buffer data. CUDA memory
     uint8_t* rgb_data_{nullptr};
@@ -52,6 +60,8 @@ public:
     bool initialize(
         size_t n_bytes_per_rgb,
         size_t n_bytes_per_depth,
+        int32_t depth_target_width,
+        int32_t depth_target_height,
         const std::vector<SpotCamera>& cameras
     );
 

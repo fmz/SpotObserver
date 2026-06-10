@@ -16,6 +16,10 @@
 
 namespace SOb {
 
+namespace {
+constexpr double kDepthRequestResizeRatio = 0.25; // 640x480 -> 160x120.
+}
+
 static cv::Mat convert_image_to_cv_mat(const bosdyn::api::Image& img, double depth_scale = 1.0) {
     if (img.format() == bosdyn::api::Image::FORMAT_JPEG) {
         // Decode JPEG data
@@ -93,16 +97,28 @@ ReaderWriterCBuf::~ReaderWriterCBuf() {
 bool ReaderWriterCBuf::initialize(
     size_t n_elems_per_rgb,
     size_t n_elems_per_depth,
+    int32_t depth_target_width,
+    int32_t depth_target_height,
     const std::vector<SpotCamera>& cameras
 ) {
     n_elems_per_rgb_ = n_elems_per_rgb;
     n_elems_per_depth_ = n_elems_per_depth;
+    depth_target_width_ = depth_target_width;
+    depth_target_height_ = depth_target_height;
     cameras_ = cameras;
     n_images_per_response_ = cameras.size();
+    depth_upscale_buffers_.resize(n_images_per_response_);
+    for (auto& buffer : depth_upscale_buffers_) {
+        buffer.resize(n_elems_per_depth_);
+    }
 
-    if (rgb_data_ != nullptr || depth_data_ != nullptr) {
-        if (!rgb_data_)   checkCudaError(cudaFree(rgb_data_), "cudaFree for RGB data");
-        if (!depth_data_) checkCudaError(cudaFree(depth_data_), "cudaFree for Depth data");
+    if (rgb_data_ != nullptr || depth_data_ != nullptr || cached_depth_ != nullptr) {
+        if (rgb_data_)   checkCudaError(cudaFree(rgb_data_), "cudaFree for RGB data");
+        if (depth_data_) checkCudaError(cudaFree(depth_data_), "cudaFree for Depth data");
+        if (cached_depth_) checkCudaError(cudaFree(cached_depth_), "cudaFree for Cached Depth data");
+        rgb_data_ = nullptr;
+        depth_data_ = nullptr;
+        cached_depth_ = nullptr;
 
         LogMessage("ReaderWriterCBuf::initialize: Re-initializing, freed existing buffers");
     }
@@ -117,8 +133,9 @@ bool ReaderWriterCBuf::initialize(
     checkCudaError(cudaMalloc(&cached_depth_, size_depth_per_response), "cudaMalloc for Cached Depth data");
 
     LogMessage("Allocated {} bytes for RGB data and {} bytes for Depth data in ReaderWriterCBuf"
-                "({} bytes per RGB, {} bytes per Depth, {} images per response, max size {})",
-               total_size_rgb, total_size_depth, n_elems_per_rgb * sizeof(uint8_t), n_elems_per_depth * sizeof(float), n_images_per_response_, max_size_);
+                "({} bytes per RGB, {} bytes per upscaled Depth, {} images per response, max size {}, depth target {}x{})",
+               total_size_rgb, total_size_depth, n_elems_per_rgb * sizeof(uint8_t), n_elems_per_depth * sizeof(float),
+               n_images_per_response_, max_size_, depth_target_width_, depth_target_height_);
     LogMessage("Min RGB address = {:#x}, Max RGB address = {:#x}",
                size_t(rgb_data_), size_t(rgb_data_) + total_size_rgb);
     LogMessage("Min depth address = {:#x}, Max depth address = {:#x}",
@@ -216,10 +233,29 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U16:
         {
             cv::Mat cv_img = convert_image_to_cv_mat(img, response.source().depth_scale());
-            int depth_width = cv_img.cols;
-            int depth_height = cv_img.rows;
+            const int source_depth_width = cv_img.cols;
+            const int source_depth_height = cv_img.rows;
+            cv::Mat depth_upload_img = cv_img;
 
-            size_t depth_size = depth_width * depth_height;
+            if (source_depth_width != depth_target_width_ || source_depth_height != depth_target_height_) {
+                const size_t depth_index = static_cast<size_t>(n_depths_written);
+                if (depth_index >= depth_upscale_buffers_.size()) {
+                    throw std::runtime_error("ReaderWriterCBuf::push: Depth response count exceeds configured camera count");
+                }
+
+                cv::Mat upscaled_depth(
+                    depth_target_height_,
+                    depth_target_width_,
+                    CV_32FC1,
+                    depth_upscale_buffers_[depth_index].data()
+                );
+                cv::resize(cv_img, upscaled_depth, upscaled_depth.size(), 0.0, 0.0, cv::INTER_NEAREST);
+                depth_upload_img = upscaled_depth;
+                LogMessage("Upscaled depth image from {}x{} to {}x{} before CUDA upload",
+                           source_depth_width, source_depth_height, depth_target_width_, depth_target_height_);
+            }
+
+            size_t depth_size = depth_upload_img.cols * depth_upload_img.rows;
             if (depth_size != n_elems_per_depth_) {
                 LogMessage("Depth size mismatch: expected {}, got {}", n_elems_per_depth_, depth_size);
                 throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
@@ -231,7 +267,7 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             checkCudaError(
                 cudaMemcpyAsync(
                     depth_write_ptr,
-                    cv_img.data,
+                    depth_upload_img.data,
                     depth_size * sizeof(float),
                     cudaMemcpyHostToDevice,
                     cuda_stream_
@@ -241,8 +277,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
 
             DumpDepthImageFromCuda(
                 depth_write_ptr,
-                cv_img.cols,
-                cv_img.rows,
+                depth_upload_img.cols,
+                depth_upload_img.rows,
                 "depth",
                 n_depths_written + write_idx * n_images_per_response_
             );
@@ -403,6 +439,7 @@ bosdyn::api::GetImageRequest SpotCamStream::_createImageRequest(
         image_request->set_quality_percent(100.0);
         // TODO: Use FORMAT_RLE format for depth (compresses 0s)
         image_request->set_image_format(bosdyn::api::Image_Format_FORMAT_RAW);
+        image_request->set_resize_ratio(kDepthRequestResizeRatio);
         image_request->set_pixel_format(bosdyn::api::Image::PIXEL_FORMAT_DEPTH_U16);
     }
 
@@ -540,29 +577,47 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                     return false;
                 }
             }
-            // Same thing for depth images
+            // The Spot request asks for low-res depth to reduce payload size. If
+            // the service honors that request, upscale to RGB-aligned full-size
+            // depth for downstream users. If the service ignores resize_ratio,
+            // preserve the returned depth dimensions.
+            const auto& first_depth_image = image_responses[num_cams_requested].shot().image();
+            const bool depth_was_resized =
+                first_depth_image.cols() < static_cast<int>(current_rgb_shape_.W) &&
+                first_depth_image.rows() < static_cast<int>(current_rgb_shape_.H);
             current_depth_shape_ = TensorShape{
                 size_t(num_cams_requested),
                 1,
-                size_t(image_responses[num_cams_requested].shot().image().rows()),
-                size_t(image_responses[num_cams_requested].shot().image().cols())
+                depth_was_resized ? current_rgb_shape_.H : size_t(first_depth_image.rows()),
+                depth_was_resized ? current_rgb_shape_.W : size_t(first_depth_image.cols())
             };
 
-            size_t depth_ref_size = current_depth_shape_.H * current_depth_shape_.W;
+            const size_t depth_response_ref_size =
+                first_depth_image.rows() * first_depth_image.cols();
             for (int32_t j = num_cams_requested + 1; j < image_responses.size(); j++) {
                 const auto& img_response = image_responses[j];
                 size_t depth_size = img_response.shot().image().rows() * img_response.shot().image().cols();
-                if (depth_ref_size != depth_size) {
+                if (depth_response_ref_size != depth_size) {
                     LogMessage("SpotCamStream::streamCameras: Inconsistent depth image sizes"
-                               "(expected {}, got {})", depth_ref_size, depth_size);
+                               "(expected {}, got {})", depth_response_ref_size, depth_size);
                     return false;
                 }
             }
+            LogMessage("Depth request resize ratio {} returned {}x{}; stream depth buffers will be {}x{}",
+                       kDepthRequestResizeRatio,
+                       first_depth_image.cols(),
+                       first_depth_image.rows(),
+                       current_depth_shape_.W,
+                       current_depth_shape_.H);
+
+            size_t depth_ref_size = current_depth_shape_.H * current_depth_shape_.W;
 
             // (Re)initialize circular buffer
             image_lifo_.initialize(
                 rgb_ref_size,
                 depth_ref_size,
+                static_cast<int32_t>(current_depth_shape_.W),
+                static_cast<int32_t>(current_depth_shape_.H),
                 camera_order_
             );
 
