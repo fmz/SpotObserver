@@ -100,7 +100,11 @@ validate_json() {
   local file="$1"
   local desc="$2"
 
-  if jq -e . "$file" >/dev/null 2>&1; then
+  # Ruff emits JSON-lines; when there are 0 issues, it may be an empty file.
+  if [ ! -s "$file" ]; then
+    log_ok "$desc: empty (0 issues)"
+    return 0
+  elif jq empty "$file" >/dev/null 2>&1; then
     log_ok "$desc: valid JSON"
     return 0
   else

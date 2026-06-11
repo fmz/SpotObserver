@@ -53,8 +53,9 @@ source "$SCRIPT_DIR/lib.sh"
 
 # All temp files go in .ruff-stats/ to avoid clutter
 D=".ruff-stats"
-rm -rf "$D"
 mkdir -p "$D"
+# Preserve format_*.txt artifacts created earlier in the workflow; clear everything else.
+ find "$D" -maxdepth 1 -type f ! -name 'format_*' -delete 2>/dev/null || true
 
 # =============================================================================
 # PR Branch Analysis
@@ -96,7 +97,7 @@ fi
 log_section "Analyzing main branch"
 
 # Stash any uncommitted changes
-git stash --quiet 2>/dev/null || true
+git stash --include-untracked --quiet 2>/dev/null || true
 
 # Checkout main branch
 if git checkout origin/main --quiet 2>/dev/null; then

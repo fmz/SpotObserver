@@ -3,9 +3,8 @@
 # =============================================================================
 # Runs on every PR push. Posts/updates summary comment with ruff statistics.
 #
-# Uses astral-sh/ruff-action (official GitHub Action by Ruff maintainers)
-# Docs: https://github.com/astral-sh/ruff-action
-#
+# Installs Ruff via pip and runs custom scripts to compute a delta vs origin/main.
+# Docs: https://docs.astral.sh/ruff/
 # For slash commands (/ruff fix, /ruff format), see: ruff-commands.yml
 #
 # =============================================================================
@@ -125,7 +124,7 @@ jobs:
           submodules: false
 
       - name: Install ruff
-        run: pip install ruff
+        run: pip install "ruff==0.15.2"
 
       # --- Format Check (PR-changed files only, delta-based) ---
       - name: Run ruff format
@@ -157,11 +156,23 @@ jobs:
             sed 's/^Would reformat: //' | sort > .ruff-stats/format_pr.txt || true
 
           # Check formatting on main branch (same files)
-          git stash --quiet || true
+          git stash --include-untracked --quiet || true
           git checkout origin/main --quiet
-          # shellcheck disable=SC2086
-          ruff format --check $PR_FILES 2>&1 | grep "^Would reformat:" | \
-            sed 's/^Would reformat: //' | sort > .ruff-stats/format_main.txt || true
+
+          MAIN_PR_FILES=""
+          for file in $PR_FILES; do
+            [ -f "$file" ] && MAIN_PR_FILES="$MAIN_PR_FILES $file"
+          done
+
+          if [ -n "$MAIN_PR_FILES"]; then
+            # shellcheck disable=SC2086
+            ruff format --check $PR_FILES 2>&1 | grep "^Would reformat:" | \
+              sed 's/^Would reformat: //' | sort > .ruff-stats/format_main.txt || true
+          else
+          # No files to check on main (e.g., all new files), so create empty format_main.txt
+            : > .ruff-stats/format_main.txt
+          fi
+          
           git checkout - --quiet
           git stash pop --quiet 2>/dev/null || true
 

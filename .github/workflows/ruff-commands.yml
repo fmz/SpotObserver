@@ -30,7 +30,7 @@ jobs:
             github.event.issue.pull_request && (
               startsWith(github.event.comment.body, '/ruff') ||
               startsWith(github.event.comment.body, '@ruff')
-            )
+            ) && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
         runs-on: ubuntu-latest
         outputs:
             command: ${{ steps.parse.outputs.command }}
