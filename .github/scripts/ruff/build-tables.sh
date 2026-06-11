@@ -152,10 +152,20 @@ while read rule; do
   delta=$((pr_count - main_count))
   [ "$delta" -eq 0 ] && continue
 
-  # Get description from actual violation (we already have it, no need for separate ruff rule call)
-  # Strip backtick-quoted identifiers to keep description generic across instances
-  DESC=$(jq -rs --arg rule "$rule" '[.[] | select(.code == $rule)][0].message // empty' "$D/pr_ruff_output.json" 2>/dev/null | sed 's/`[^`]*`//g; s/  */ /g; s/^ //; s/ $//' | tr -d '|\n\r')
-  URL=$(jq -rs --arg rule "$rule" '[.[] | select(.code == $rule)][0].url // empty' "$D/pr_ruff_output.json" 2>/dev/null)
+  # Get description from actual violation; strip backtick-quoted identifiers to keep it generic.
+  raw_desc=$(jq -rs --arg rule "$rule" '[.[] | select(.code == $rule)][0].message // empty' "$D/pr_ruff_output.json" 2>/dev/null || true)
+  raw_url=$(jq -rs --arg rule "$rule" '[.[] | select(.code == $rule)][0].url // empty' "$D/pr_ruff_output.json" 2>/dev/null || true)
+
+  if [ -z "$raw_desc" ]; then
+    raw_desc=$(jq -rs --arg rule "$rule" '[.[] | select(.code == $rule)][0].message // empty' "$D/main_ruff_output.json" 2>/dev/null || true)
+  fi
+
+  if [ -z "$raw_url" ]; then
+    raw_url=$(jq -rs --arg rule "$rule" '[.[] | select(.code == $rule)][0].url // empty' "$D/main_ruff_output.json" 2>/dev/null || true)
+  fi
+
+  DESC=$(printf '%s' "$raw_desc" | sed 's/`[^`]*`//g; s/  */ /g; s/^ //; s/ $//' | tr -d '|\n\r')
+  URL="$raw_url"
 
   category=$(get_category_from_rule "$rule")
 
@@ -199,12 +209,16 @@ if [ "$NEW_ISSUES" -gt 0 ]; then
   {
     # Build category summary data (for sorting and summary table)
     > "$D/new_category_summary.txt"
-    grep "^new|" "$D/all_rule_rows.txt" | cut -d'|' -f2 | sort -u | while read cat; do
+    grep "^new|" "$D/all_rule_rows.txt" | cut -d'|' -f2 | sort -u | while read -r cat; do
       cat_main=$(grep "^$cat " "$D/main_category_counts.txt" 2>/dev/null | awk '{print $2}' || echo "0")
       cat_main=${cat_main:-0}
+
       cat_pr=$(grep "^$cat " "$D/pr_category_counts.txt" 2>/dev/null | awk '{print $2}' || echo "0")
       cat_pr=${cat_pr:-0}
-      cat_delta=$((cat_pr - cat_main))
+
+      # Sum positive rule deltas for this category; category net delta may be <= 0.
+      cat_delta=$(awk -F'|' -v cat="$cat" '$1 == "new" && $2 == cat {sum += $3} END {print sum + 0}' "$D/all_rule_rows.txt")
+
       cat_info=$(get_category_info "$cat")
       cat_display=$(echo "$cat_info" | cut -d'|' -f1)
       cat_tool=$(echo "$cat_info" | cut -d'|' -f2)

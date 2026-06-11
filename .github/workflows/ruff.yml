@@ -164,9 +164,9 @@ jobs:
             [ -f "$file" ] && MAIN_PR_FILES="$MAIN_PR_FILES $file"
           done
 
-          if [ -n "$MAIN_PR_FILES"]; then
+          if [ -n "$MAIN_PR_FILES" ]; then
             # shellcheck disable=SC2086
-            ruff format --check $PR_FILES 2>&1 | grep "^Would reformat:" | \
+            ruff format --check $MAIN_PR_FILES 2>&1 | grep "^Would reformat:" | \
               sed 's/^Would reformat: //' | sort > .ruff-stats/format_main.txt || true
           else
           # No files to check on main (e.g., all new files), so create empty format_main.txt
