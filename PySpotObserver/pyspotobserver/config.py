@@ -20,6 +20,7 @@ class CameraType(IntFlag):
     LEFT = 0x8
     RIGHT = 0x10
     HAND = 0x20
+    FRONTSTITCHED = 0x40
 
     @classmethod
     def get_source_name(cls, camera: "CameraType", depth: bool = False) -> str:
