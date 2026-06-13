@@ -19,7 +19,7 @@ from .config import SpotConfig, CameraType
 from .color_correction import _ROBOT_CCMS
 from .stitch import (
     CamStitchParams, compute_stitch, extract_stitch_params,
-    STITCH_OUT_H, STITCH_OUT_W,
+    STITCH_OUT_W, STITCH_OUT_H,
 )
 
 _VIRTUAL_CAMERAS = frozenset({CameraType.FRONTSTITCHED})
@@ -489,7 +489,8 @@ class SpotCamStream:
             rgb_shapes.append(rgb_shape)
             depth_shapes.append(depth_shape)
 
-        # Add fixed output shape for the virtual FRONTSTITCHED slot
+        # Add output shape for the virtual FRONTSTITCHED slot.
+        # Height matches the front camera images so the full vertical FOV is captured.
         if self._stitch_enabled:
             rgb_shapes.insert(self._stitch_out_idx, (STITCH_OUT_H, STITCH_OUT_W, 3))
             depth_shapes.insert(self._stitch_out_idx, (STITCH_OUT_H, STITCH_OUT_W))
