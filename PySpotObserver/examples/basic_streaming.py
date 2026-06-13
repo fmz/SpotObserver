@@ -111,6 +111,14 @@ def parse_args() -> argparse.Namespace:
         help="Stream identifier for the optional second stream.",
     )
     parser.add_argument(
+        "--stitch",
+        action="store_true",
+        help=(
+            "Display the stitched front view alongside individual cameras. "
+            "Automatically adds FRONTLEFT and FRONTRIGHT to the primary stream if not already present."
+        ),
+    )
+    parser.add_argument(
         "--async-mode",
         action="store_true",
         help="Use async connection management and async frame retrieval.",
@@ -146,6 +154,12 @@ def parse_args() -> argparse.Namespace:
 
 def build_stream_specs(args: argparse.Namespace) -> list[StreamSpec]:
     primary_cameras = parse_camera_list(args.cameras)
+    if args.stitch:
+        for cam in (CameraType.FRONTLEFT, CameraType.FRONTRIGHT):
+            if cam not in primary_cameras:
+                primary_cameras.append(cam)
+        if CameraType.FRONTSTITCHED not in primary_cameras:
+            primary_cameras.append(CameraType.FRONTSTITCHED)
     stream_templates = [
         ("primary", args.stream_id, primary_cameras),
     ]
