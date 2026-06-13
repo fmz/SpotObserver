@@ -121,11 +121,6 @@ def parse_args() -> argparse.Namespace:
         help="Disable OpenCV windows and only log frame metadata.",
     )
     parser.add_argument(
-        "--debug-ccm",
-        action="store_true",
-        help="Save one before/after CCM image pair per camera to ccm_debug/ for inspection.",
-    )
-    parser.add_argument(
         "--print-timing",
         action="store_true",
         help="Print per-stream timing summary at the end of the run.",
@@ -272,10 +267,6 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
             logger.info("Connected to %s robot: %s", label, conn)
 
         streams = start_streams(connections, specs)
-
-        if args.debug_ccm:
-            for stream in streams.values():
-                stream.request_ccm_debug_frame()
 
         try:
             start_time = time.perf_counter()
