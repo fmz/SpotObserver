@@ -4,7 +4,6 @@ SpotCamStream - Manages camera streaming from Spot robot.
 
 import asyncio
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass
@@ -104,10 +103,6 @@ class SpotCamStream:
         # Statistics
         self._frame_count = 0
         self._error_count = 0
-
-        # Debug
-        self._debug_ccm_request = threading.Event()
-        self._debug_ccm_save_dir: str = "ccm_debug"
 
         logger.info(f"SpotCamStream '{stream_id}' initialized")
 
@@ -317,43 +312,6 @@ class SpotCamStream:
             List of CameraType enums in the order images are returned
         """
         return self._camera_order.copy()
-
-    def request_ccm_debug_frame(self, save_dir: str = "ccm_debug") -> None:
-        """
-        On the next streaming frame, save pre- and post-CCM images to disk.
-
-        Writes one PNG per active camera to save_dir/. Each file shows the
-        pre-CCM image on the left and post-CCM on the right, separated by a
-        4-pixel grey bar. Per-channel min/mean/max statistics are logged at
-        INFO level. No-op if CCM is not active for this robot IP.
-        """
-        os.makedirs(save_dir, exist_ok=True)
-        self._debug_ccm_save_dir = save_dir
-        self._debug_ccm_request.set()
-        logger.info("CCM debug capture requested — will save to '%s' on next frame.", save_dir)
-
-    def _save_ccm_debug_pair(
-        self,
-        before: np.ndarray,
-        after: np.ndarray,
-        camera_name: str,
-    ) -> None:
-        """Save a side-by-side before/after CCM PNG and log per-channel stats."""
-        before_u8 = (np.clip(before, 0.0, 1.0) * 255).astype(np.uint8)
-        after_u8  = (np.clip(after,  0.0, 1.0) * 255).astype(np.uint8)
-        before_bgr = cv2.cvtColor(before_u8, cv2.COLOR_RGB2BGR)
-        after_bgr  = cv2.cvtColor(after_u8,  cv2.COLOR_RGB2BGR)
-        sep = np.full((before_bgr.shape[0], 4, 3), 64, dtype=np.uint8)
-        combined = np.concatenate([before_bgr, sep, after_bgr], axis=1)
-        path = os.path.join(self._debug_ccm_save_dir, f"ccm_{camera_name}.png")
-        cv2.imwrite(path, combined)
-        logger.info("CCM debug '%s' saved → %s  (left=before, right=after)", camera_name, path)
-        for label, img in (("before", before), ("after", after)):
-            stats = "  ".join(
-                f"{ch}=[{img[:, :, j].min():.4f} {img[:, :, j].mean():.4f} {img[:, :, j].max():.4f}]"
-                for j, ch in enumerate("RGB")
-            )
-            logger.info("  %-6s  %s", label, stats)
 
     def _parse_camera_mask(self, mask: int) -> List[CameraType]:
         """
@@ -568,7 +526,6 @@ class SpotCamStream:
                 f"Expected {expected_count} responses, got {len(responses)}"
             )
 
-        debug = self._debug_ccm_request.is_set()
         for i in range(n_cameras):
             rgb_idx = i * 2
             depth_idx = i * 2 + 1
@@ -579,18 +536,12 @@ class SpotCamStream:
                 out_array=frame.rgb_images[i],
             )
             if self._ccms is not None:
-                if debug:
-                    before = frame.rgb_images[i].copy()
                 self._apply_ccm_inplace(frame.rgb_images[i], self._ccms[self._camera_order[i]])
-                if debug:
-                    self._save_ccm_debug_pair(before, frame.rgb_images[i], self._camera_order[i].name)
             self._convert_image_response_inplace(
                 responses[depth_idx],
                 is_depth=True,
                 out_array=frame.depth_images[i],
             )
-        if debug:
-            self._debug_ccm_request.clear()
 
         # Update timestamps
         frame.timestamp = time.monotonic()
@@ -642,22 +593,15 @@ class SpotCamStream:
                 f"Expected {expected_count} responses, got {len(responses)}"
             )
 
-        debug = self._debug_ccm_request.is_set()
         decoded: List[np.ndarray] = []
         for i in range(n_cameras):
             rgb_idx = i * 2
             depth_idx = i * 2 + 1
             rgb = self._convert_image_response_alloc(responses[rgb_idx], is_depth=False)
             if self._ccms is not None:
-                if debug:
-                    before = rgb.copy()
                 self._apply_ccm_inplace(rgb, self._ccms[self._camera_order[i]])
-                if debug:
-                    self._save_ccm_debug_pair(before, rgb, self._camera_order[i].name)
             decoded.append(rgb)
             decoded.append(self._convert_image_response_alloc(responses[depth_idx], is_depth=True))
-        if debug:
-            self._debug_ccm_request.clear()
         return decoded
 
     def _convert_image_response_alloc(
@@ -838,12 +782,12 @@ class SpotCamStream:
         The CCM was calibrated in linear light, so we gamma-decode before
         applying and gamma-encode after (matching the extract_matrices.py pipeline).
         """
-        # sRGB EOTF: gamma decode to linear
+        # Decode from sRGB -> linear RGB
         linear = np.where(img <= 0.04045, img / 12.92, ((img + 0.055) / 1.055) ** 2.4)
         # Apply CCM in linear space
         linear = linear @ matrix
         np.clip(linear, 0.0, 1.0, out=linear)
-        # sRGB OETF: gamma encode back to sRGB
+        # Encode back from linear RGB -> sRGB
         img[:] = np.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1.0 / 2.4) - 0.055)
         np.clip(img, 0.0, 1.0, out=img)
 
