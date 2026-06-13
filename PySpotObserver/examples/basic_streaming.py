@@ -119,6 +119,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable OpenCV windows and only log frame metadata.",
     )
     parser.add_argument(
+        "--debug-ccm",
+        action="store_true",
+        help="Save one before/after CCM image pair per camera to ccm_debug/ for inspection.",
+    )
+    parser.add_argument(
         "--print-timing",
         action="store_true",
         help="Print per-stream timing summary at the end of the run.",
@@ -159,9 +164,10 @@ def display_images(window_prefix: str, stream, rgb_images: Sequence[np.ndarray],
     for i, (rgb, depth) in enumerate(zip(rgb_images, depth_images)):
         camera_name = stream.get_camera_order()[i].name
         rgb_display = (rgb * 255).astype(np.uint8)
+        rgb_bgr = cv2.cvtColor(rgb_display, cv2.COLOR_RGB2BGR)
         depth_normalized = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-        cv2.imshow(f"{window_prefix} - {camera_name} - RGB", rgb_display)
+        cv2.imshow(f"{window_prefix} - {camera_name} - RGB", rgb_bgr)
         cv2.imshow(f"{window_prefix} - {camera_name} - Depth", depth_colored)
 
     return bool(cv2.waitKey(1) & 0xFF == ord("q"))
@@ -248,6 +254,10 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
             logger.info("Connected to %s robot: %s", label, conn)
 
         streams = start_streams(connections, specs)
+
+        if args.debug_ccm:
+            for stream in streams.values():
+                stream.request_ccm_debug_frame()
 
         try:
             start_time = time.perf_counter()
