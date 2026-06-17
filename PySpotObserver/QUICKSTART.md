@@ -8,7 +8,14 @@
    pip install -r requirements.txt
    ```
 
-2. **Install package in development mode:**
+2. **Optional vision pipeline support:**
+   ```bash
+   pip install -e ".[vision]"
+   ```
+
+The dependency source of truth is `setup.py`; `requirements.txt` installs the development extra without duplicating package lists.
+
+3. **Minimal install without dev tools (alternative to step 1):**
    ```bash
    pip install -e .
    ```
@@ -214,5 +221,7 @@ logging.basicConfig(
 **Authentication failed**: Check username and password in configuration
 
 **Import errors**: Make sure all dependencies are installed: `pip install -r requirements.txt`
+
+**Vision pipeline errors**: Install `pip install -e ".[vision]"` and set `vision_model_path` in config, pass `--vision-model-path`, or set `PYSPOTOBSERVER_VISION_MODEL`
 
 **No images received**: Check that cameras are not already in use by another client

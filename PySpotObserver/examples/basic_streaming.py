@@ -14,8 +14,10 @@ import asyncio
 from contextlib import AsyncExitStack, ExitStack
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import time
 from typing import Sequence
+
 
 import cv2
 import numpy as np
@@ -122,6 +124,22 @@ def parse_args() -> argparse.Namespace:
         "--print-timing",
         action="store_true",
         help="Print per-stream timing summary at the end of the run.",
+    )
+    parser.add_argument(
+        "--vision-pipeline",
+        action="store_true",
+        help="Run the vision pipeline on the Spot outputs"
+    )
+    parser.add_argument(
+        "--vision-model-path",
+        type=Path,
+        help="ONNX model path for --vision-pipeline. Overrides config and environment.",
+    )
+    parser.add_argument(
+        "--vision-provider",
+        action="append",
+        dest="vision_providers",
+        help="ONNX Runtime provider to request. Repeat to set provider preference order.",
     )
     return parser.parse_args()
 
@@ -259,7 +277,10 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
                     stream = streams[spec.label]
 
                     fetch_start = time.perf_counter()
-                    rgb_images, depth_images = stream.get_current_images(timeout=args.timeout)
+                    rgb_images, depth_images = stream.get_current_images(
+                        timeout=args.timeout,
+                        run_pipeline=args.vision_pipeline,
+                    )
                     fetch_elapsed = time.perf_counter() - fetch_start
 
                     display_elapsed = 0.0
@@ -282,9 +303,10 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
     return 0
 
 
-async def fetch_stream_async(stream, timeout: float) -> FetchResult:
+async def fetch_stream_async(stream, timeout: float, vision_pipeline: bool) -> FetchResult:
     fetch_start = time.perf_counter()
-    rgb_images, depth_images = await stream.async_get_current_images(timeout=timeout)
+    rgb_images, depth_images = await stream.async_get_current_images(timeout=timeout, run_pipeline=vision_pipeline)
+        
     return FetchResult(
         rgb_images=rgb_images,
         depth_images=depth_images,
@@ -310,7 +332,7 @@ async def run_async(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
             start_time = time.perf_counter()
             while time.perf_counter() - start_time < args.duration:
                 results = await asyncio.gather(
-                    *(fetch_stream_async(streams[spec.label], args.timeout) for spec in specs)
+                    *(fetch_stream_async(streams[spec.label], args.timeout, args.vision_pipeline) for spec in specs)
                 )
 
                 should_quit = False

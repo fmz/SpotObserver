@@ -10,8 +10,9 @@ Install the package and dependencies first:
 
 ```bash
 pip install -r requirements.txt
-pip install -e .
 ```
+
+For `--vision-pipeline`, also install `pip install -e ".[vision]"` and provide a model path with `--vision-model-path`, config, or `PYSPOTOBSERVER_VISION_MODEL`.
 
 ## Configuration
 
@@ -37,6 +38,7 @@ python examples/basic_streaming.py --robot-ip 192.168.80.3 --username <user> --p
 - asynchronous streaming with `--async-mode`
 - one or two stream configurations, mirrored across one or two robots
 - optional OpenCV display
+- optional ONNX vision pipeline with `--vision-pipeline`
 - optional timing summaries with `--print-timing`
 
 Show the full CLI:

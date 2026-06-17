@@ -11,6 +11,7 @@ A clean, Pythonic interface for streaming camera data from Boston Dynamics Spot 
 - **YAML Configuration**: Load settings from config files or pass as parameters
 - **Multi-stream**: Support for multiple concurrent camera streams
 - **Thread-safe**: Background streaming with thread-safe image buffering
+- **Optional Vision Pipeline**: ONNX Runtime inference can be enabled explicitly without making it a base dependency
 
 ## Installation
 
@@ -26,6 +27,14 @@ pip install -e .
 ```bash
 pip install -e ".[dev]"
 ```
+
+### With optional vision pipeline support
+
+```bash
+pip install -e ".[vision]"
+```
+
+`requirements.txt` delegates to `setup.py` for a development install, so dependency declarations stay in one place.
 
 ## Quick Start
 
@@ -97,6 +106,7 @@ username: ""
 password: ""
 image_buffer_size: 5
 image_quality_percent: 100.0
+request_timeout_seconds: 10.0
 ```
 
 ## Architecture
@@ -165,7 +175,7 @@ The Python implementation differs in these ways:
 - **No CUDA**: Uses CPU-only NumPy arrays instead of GPU memory
 - **FIFO Queue**: Simpler queue.Queue instead of custom circular buffer
 - **Threading**: Python threading instead of C++ jthread
-- **No ML Pipeline**: Focuses on camera streaming only (no inference)
+- **Optional ML Pipeline**: Inference is available through an optional ONNX Runtime extra
 - **Simplified**: Removes Unity plugin and DLL export complexity
 
 ## Requirements
@@ -175,6 +185,7 @@ The Python implementation differs in these ways:
 - NumPy
 - OpenCV (opencv-python)
 - PyYAML
+- ONNX Runtime GPU (`onnxruntime-gpu`) only when installing the `vision` extra
 
 ## Contributing
 

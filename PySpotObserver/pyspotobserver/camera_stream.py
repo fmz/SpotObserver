@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Queue, Empty
-from typing import Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple
 
 import cv2
 import numpy as np
@@ -17,6 +17,7 @@ from bosdyn.client.image import ImageClient, build_image_request
 
 from .config import SpotConfig, CameraType
 from .color_correction import _ROBOT_CCMS
+
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,13 @@ class SpotCamStream:
         # Preallocated frame pool (initialized once we know image shapes)
         self._frame_pool: List[ImageFrame] = []
         self._frame_pool_index: int = 0
+        self._image_requests: List[image_pb2.ImageRequest] = []
+
+        # Optional per-stream vision pipeline, imported lazily.
+        self._vision_pipeline = None
+
+        # Scratch buffers for color correction by image shape.
+        self._ccm_scratch_by_shape: Dict[Tuple[int, ...], np.ndarray] = {}
 
         # Color correction matrices (None if robot IP is not recognized)
         self._ccms: Optional[dict] = _ROBOT_CCMS.get(config.robot_ip)
@@ -154,6 +162,7 @@ class SpotCamStream:
         # Parse camera mask to get ordered list of cameras
         self._camera_mask = camera_mask
         self._camera_order = self._parse_camera_mask(camera_mask)
+        self._image_requests = self._build_image_requests()
 
         logger.info(
             f"Stream '{self._stream_id}': Starting with cameras: "
@@ -164,6 +173,7 @@ class SpotCamStream:
         self._clear_queue()
         self._frame_pool = []
         self._frame_pool_index = 0
+        self._ccm_scratch_by_shape = {}
         self._frame_count = 0
         self._error_count = 0
 
@@ -217,6 +227,7 @@ class SpotCamStream:
         self,
         timeout: Optional[float] = None,
         copy: bool = False,
+        run_pipeline: bool = False,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Get the most recent frame of images.
@@ -249,12 +260,16 @@ class SpotCamStream:
 
             frame = self._peek_latest_frame()
             if frame is not None:
-                if not copy:
-                    return frame.rgb_images, frame.depth_images
-                return (
-                    [img.copy() for img in frame.rgb_images],
-                    [img.copy() for img in frame.depth_images],
-                )
+                rgb, depth = frame.rgb_images, frame.depth_images
+
+                if copy:
+                    rgb = [img.copy() for img in rgb]
+                    depth = [img.copy() for img in depth]
+
+                if run_pipeline:
+                    return self._run_vision_pipeline(rgb, depth)
+
+                return rgb, depth
 
             wait_timeout = poll_interval
             if deadline is not None:
@@ -270,17 +285,22 @@ class SpotCamStream:
             except Empty:
                 continue
 
-            if not copy:
-                return frame.rgb_images, frame.depth_images
-            return (
-                [img.copy() for img in frame.rgb_images],
-                [img.copy() for img in frame.depth_images],
-            )
+            rgb, depth = frame.rgb_images, frame.depth_images
+
+            if copy:
+                rgb = [img.copy() for img in rgb]
+                depth = [img.copy() for img in depth]
+
+            if run_pipeline:
+                return self._run_vision_pipeline(rgb, depth)
+
+            return rgb, depth
 
     async def async_get_current_images(
         self,
         timeout: Optional[float] = None,
         copy: bool = False,
+        run_pipeline: bool = False,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Async version of get_current_images().
@@ -300,9 +320,42 @@ class SpotCamStream:
             SpotCamStreamError: If not streaming or timeout occurs
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self.get_current_images, timeout, copy
-        )
+
+        if not run_pipeline:
+            return await loop.run_in_executor(
+                None, self.get_current_images, timeout, copy, False
+            )
+
+        # Run full pipeline in executor
+        def _get_and_process():
+            rgb, depth = self.get_current_images(timeout, copy, False)
+            return self._run_vision_pipeline(rgb, depth)
+
+        return await loop.run_in_executor(None, _get_and_process)
+
+    def _run_vision_pipeline(
+        self,
+        rgb_images: List[np.ndarray],
+        depth_images: List[np.ndarray],
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        try:
+            from .vision_pipeline import VisionPipeline, VisionPipelineError
+        except ImportError as exc:
+            raise SpotCamStreamError(
+                "Vision pipeline support is unavailable. "
+                'Install PySpotObserver with: pip install -e ".[vision]"'
+            ) from exc
+
+        if self._vision_pipeline is None:
+            try:
+                self._vision_pipeline = VisionPipeline.from_config(self._config)
+            except VisionPipelineError as exc:
+                raise SpotCamStreamError(str(exc)) from exc
+
+        try:
+            return self._vision_pipeline.run(rgb_images, depth_images)
+        except VisionPipelineError as exc:
+            raise SpotCamStreamError(str(exc)) from exc
 
     def get_camera_order(self) -> List[CameraType]:
         """
@@ -342,13 +395,10 @@ class SpotCamStream:
 
         while not self._stop_event.is_set() and self._streaming:
             try:
-                # Build image requests for all cameras (RGB + depth)
-                image_requests = self._build_image_requests()
-
                 # Request images from robot
                 start_time = time.monotonic()
                 image_responses = self._image_client.get_image(
-                    image_requests,
+                    self._image_requests,
                     timeout=self._config.request_timeout_seconds,
                 )
                 request_time = time.monotonic() - start_time
@@ -532,7 +582,7 @@ class SpotCamStream:
 
             ccm = None
             if self._ccms is not None:
-                 ccm = self._ccms[self._camera_order[i]]
+                ccm = self._ccms[self._camera_order[i]]
             self._convert_image_response_inplace(
                 responses[rgb_idx],
                 is_depth=False,
@@ -702,8 +752,11 @@ class SpotCamStream:
                 )
             np.multiply(img, 1.0 / 255.0, out=out_array, casting="unsafe")
             if ccm is not None:
-                img = img @ ccm.T
-                np.clip(img, 0.0, 1.0, out=img)
+                self._apply_ccm_inplace(
+                    out_array,
+                    ccm,
+                    scratch=self._get_ccm_scratch(out_array.shape),
+                )
             return
 
         elif image_proto.format == image_pb2.Image.FORMAT_RAW:
@@ -743,6 +796,12 @@ class SpotCamStream:
                             f"Output array shape mismatch: {out_array.shape} vs {img.shape}"
                         )
                     np.multiply(img, 1.0 / 255.0, out=out_array, casting="unsafe")
+                    if ccm is not None:
+                        self._apply_ccm_inplace(
+                            out_array,
+                            ccm,
+                            scratch=self._get_ccm_scratch(out_array.shape),
+                        )
                     return
 
                 elif pixel_format == image_pb2.Image.PIXEL_FORMAT_RGBA_U8:
@@ -755,6 +814,12 @@ class SpotCamStream:
                             f"Output array shape mismatch: {out_array.shape} vs {img.shape}"
                         )
                     np.multiply(img, 1.0 / 255.0, out=out_array, casting="unsafe")
+                    if ccm is not None:
+                        self._apply_ccm_inplace(
+                            out_array,
+                            ccm,
+                            scratch=self._get_ccm_scratch(out_array.shape),
+                        )
                     return
 
                 elif pixel_format == image_pb2.Image.PIXEL_FORMAT_GREYSCALE_U8:
@@ -768,6 +833,12 @@ class SpotCamStream:
                     np.multiply(img, 1.0 / 255.0, out=channel, casting="unsafe")
                     out_array[:, :, 1] = channel
                     out_array[:, :, 2] = channel
+                    if ccm is not None:
+                        self._apply_ccm_inplace(
+                            out_array,
+                            ccm,
+                            scratch=self._get_ccm_scratch(out_array.shape),
+                        )
                     return
 
                 else:
@@ -780,15 +851,30 @@ class SpotCamStream:
                 f"Unsupported image format: {image_proto.format}"
             )
 
+    def _get_ccm_scratch(self, shape: Tuple[int, ...]) -> np.ndarray:
+        scratch = self._ccm_scratch_by_shape.get(shape)
+        if scratch is None:
+            scratch = np.empty(shape, dtype=np.float32)
+            self._ccm_scratch_by_shape[shape] = scratch
+        return scratch
+
     @staticmethod
-    def _apply_ccm_inplace(img: np.ndarray, matrix: np.ndarray) -> None:
+    def _apply_ccm_inplace(
+        img: np.ndarray,
+        matrix: np.ndarray,
+        scratch: Optional[np.ndarray] = None,
+    ) -> None:
         """
         Apply a 3x3 color correction matrix to an (H, W, 3) float32 image in-place.
 
         Computes corrected = matrix @ pixel for each pixel (column-vector form),
         equivalent to img @ matrix.T in numpy row-vector form, then clips to [0, 1].
         """
-        img[:] = img @ matrix.T
+        if scratch is None:
+            img[:] = img @ matrix.T
+        else:
+            np.einsum("...c,dc->...d", img, matrix, out=scratch)
+            np.copyto(img, scratch)
         np.clip(img, 0.0, 1.0, out=img)
 
     @staticmethod

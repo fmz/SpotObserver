@@ -5,7 +5,7 @@ Configuration dataclasses and enums for PySpotObserver.
 from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional, Union
 import yaml
 
 
@@ -67,8 +67,14 @@ class SpotConfig:
     image_quality_percent: float = 100.0
     """JPEG quality for RGB images (0-100)"""
 
-    request_timeout_seconds: float = 500.0
+    request_timeout_seconds: float = 10.0
     """Timeout for image requests"""
+
+    vision_model_path: Optional[str] = None
+    """Optional ONNX model path for run_pipeline=True"""
+
+    vision_providers: Optional[List[str]] = None
+    """Optional ONNX Runtime provider preference order"""
 
     # Advanced settings
     sdk_name: str = "PySpotObserver"
@@ -83,8 +89,12 @@ class SpotConfig:
     extra_params: Dict[str, Any] = field(default_factory=dict)
     """Additional user-defined parameters"""
 
+    def __post_init__(self) -> None:
+        if self.request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+
     @classmethod
-    def from_yaml(cls, yaml_path: Path | str) -> "SpotConfig":
+    def from_yaml(cls, yaml_path: Union[Path, str]) -> "SpotConfig":
         """
         Load configuration from a YAML file.
 
@@ -110,7 +120,7 @@ class SpotConfig:
 
         return cls(**data)
 
-    def to_yaml(self, yaml_path: Path | str) -> None:
+    def to_yaml(self, yaml_path: Union[Path, str]) -> None:
         """
         Save configuration to a YAML file.
 
@@ -128,10 +138,14 @@ class SpotConfig:
             'image_buffer_size': self.image_buffer_size,
             'image_quality_percent': self.image_quality_percent,
             'request_timeout_seconds': self.request_timeout_seconds,
+            'vision_model_path': self.vision_model_path,
+            'vision_providers': self.vision_providers,
             'sdk_name': self.sdk_name,
             'connection_retry_attempts': self.connection_retry_attempts,
             'connection_retry_delay_ms': self.connection_retry_delay_ms,
         }
+
+        data = {key: value for key, value in data.items() if value is not None}
 
         if self.extra_params:
             data['extra_params'] = self.extra_params

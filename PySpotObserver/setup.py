@@ -5,6 +5,24 @@ Setup script for PySpotObserver package.
 from setuptools import setup, find_packages
 from pathlib import Path
 
+INSTALL_REQUIRES = [
+    "bosdyn-client>=5.0.0",
+    "numpy>=2.0.0,<2.4.0",
+    "opencv-python>=4.12.0",
+    "pyyaml>=6.0.0",
+]
+
+DEV_REQUIRES = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "mypy>=1.5.0",
+]
+
+VISION_REQUIRES = [
+    "onnxruntime-gpu>=1.25.0",
+]
+
 # Read README for long description
 readme_file = Path(__file__).parent / "README.md"
 long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists() else ""
@@ -32,19 +50,11 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
     python_requires=">=3.9",
-    install_requires=[
-        "bosdyn-client>=5.0.0",
-        "numpy>=2.0.0,<2.4.0",
-        "opencv-python>=4.12.0",
-        "pyyaml>=6.0.0",
-    ],
+    install_requires=INSTALL_REQUIRES,
     extras_require={
-        "dev": [
-            "pytest>=7.4.0",
-            "pytest-asyncio>=0.21.0",
-            "black>=23.0.0",
-            "mypy>=1.5.0",
-        ],
+        "dev": DEV_REQUIRES,
+        "vision": VISION_REQUIRES,
+        "all": DEV_REQUIRES + VISION_REQUIRES,
     },
     entry_points={
         "console_scripts": [
