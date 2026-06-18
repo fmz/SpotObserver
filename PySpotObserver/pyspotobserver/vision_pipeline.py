@@ -265,14 +265,17 @@ def _complete_sparse_using_nearest(sparse_depth: np.ndarray):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
     for i in range(batch_size):
-        depth_frame = sparse_depth[i].astype(np.float32)
+        frame = sparse_depth[i]
+        original_shape = frame.shape
+        depth_frame = frame.squeeze().astype(np.float32)
         mask = (depth_frame == 0)
 
         if mask.any():
-            # Dilate non-zero depth values to fill holes with nearest neighbor
-            completed[i] = cv2.dilate(depth_frame, kernel, iterations=3)
+            dilated = cv2.dilate(depth_frame, kernel, iterations=3)
+            depth_frame[mask] = dilated[mask]  
+            completed[i] = depth_frame.reshape(original_shape)
         else:
-            completed[i] = depth_frame
+            completed[i] = frame
 
     return completed
 
