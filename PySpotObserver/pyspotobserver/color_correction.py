@@ -5,12 +5,9 @@ from .config import CameraType
 _GOUGER_IP = "128.148.138.21"
 _TUSKER_IP = "128.148.138.22"
 
-_IDENTITY_3x3 = np.eye(3, dtype=np.float32)
-
 # Color correction matrices per robot, keyed by CameraType.
 # Convention: corrected_pixel = raw_pixel @ M  (row-vector form),
 # applied in numpy as: img @ M  for (H, W, 3) images.
-# BACK and HAND cameras use identity until calibration data is available.
 _GOUGER_CCMS: dict = {
     CameraType.LEFT: np.array([
         [ 1.4980662, -0.0707718, -0.0458571],
@@ -32,8 +29,16 @@ _GOUGER_CCMS: dict = {
         [-0.5915730,  1.7521565, -0.7878229],
         [ 0.6022132,  0.1194339,  1.6545299],
     ], dtype=np.float32),
-    CameraType.BACK: _IDENTITY_3x3,
-    CameraType.HAND: _IDENTITY_3x3,
+    CameraType.BACK: np.array([
+        [ 1.9841450, -0.3369173, -0.2812417],
+        [ 0.0458503,  2.0369307, -0.5472642],
+        [-0.1788291, -0.3260584,  1.9366791],
+    ], dtype=np.float32),
+    CameraType.HAND: np.array([
+        [ 1.1079912,  0.1713922,  0.0659761],
+        [ 0.3693360,  0.8800426,  0.0744824],
+        [ 0.0590054,  0.0759306,  0.5835285],
+    ], dtype=np.float32),
 }
 
 _TUSKER_CCMS: dict = {
@@ -57,8 +62,16 @@ _TUSKER_CCMS: dict = {
         [-0.8215924,  2.0136070, -0.9268775],
         [ 0.4902452, -0.0647052,  2.0256366],
     ], dtype=np.float32),
-    CameraType.BACK: _IDENTITY_3x3,
-    CameraType.HAND: _IDENTITY_3x3,
+    CameraType.BACK: np.array([
+        [ 1.4324871, -0.1230974, -0.1201269],
+        [-0.6696954,  0.7845523, -0.4282919],
+        [ 0.6980419,  0.5317950,  1.5868878],
+    ], dtype=np.float32),
+    CameraType.HAND: np.array([
+        [ 1.0591727,  0.1546625,  0.0633971],
+        [ 0.3795602,  0.8702585,  0.0805920],
+        [ 0.0184532,  0.0273186,  0.4979610],
+    ], dtype=np.float32),
 }
 
 _ROBOT_CCMS: dict = {
