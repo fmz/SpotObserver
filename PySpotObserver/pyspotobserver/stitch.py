@@ -162,11 +162,19 @@ def _stitch_cylindrical(
     warped_r = cv2.remap(r_rgb, map_xr, map_yr, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
 
+    # Hard seam cut: left half of canvas from r (FRONTRIGHT), right half from l (FRONTLEFT).
+    # Spot names cameras from the perspective of someone facing the robot, so FRONTLEFT sits
+    # on the robot's right side (body -Y) and FRONTRIGHT on the robot's left (body +Y).
+    # valid_r therefore covers the canvas left half and valid_l covers the canvas right half.
+    # Fall back to the other camera where the preferred one has no valid coverage.
+    left_half = np.zeros((out_h, out_w), dtype=bool)
+    left_half[:, : out_w // 2] = True
+
     out_rgb[:] = 0.0
-    out_rgb[valid_l & ~valid_r] = warped_l[valid_l & ~valid_r]
-    out_rgb[valid_r & ~valid_l] = warped_r[valid_r & ~valid_l]
-    both = valid_l & valid_r
-    out_rgb[both] = 0.5 * (warped_l[both] + warped_r[both])
+    out_rgb[valid_r & left_half] = warped_r[valid_r & left_half]
+    out_rgb[valid_l & ~left_half] = warped_l[valid_l & ~left_half]
+    out_rgb[~valid_r & valid_l & left_half] = warped_l[~valid_r & valid_l & left_half]
+    out_rgb[~valid_l & valid_r & ~left_half] = warped_r[~valid_l & valid_r & ~left_half]
 
     # Warp depth with the same maps (nearest-neighbour avoids blending across discontinuities)
     warped_dl = cv2.remap(l_dep, map_xl, map_yl, cv2.INTER_NEAREST,
@@ -177,10 +185,10 @@ def _stitch_cylindrical(
     dep_valid_l = valid_l & (warped_dl > 0)
     dep_valid_r = valid_r & (warped_dr > 0)
     out_dep[:] = 0.0
-    out_dep[dep_valid_l & ~dep_valid_r] = warped_dl[dep_valid_l & ~dep_valid_r]
-    out_dep[dep_valid_r & ~dep_valid_l] = warped_dr[dep_valid_r & ~dep_valid_l]
-    dep_both = dep_valid_l & dep_valid_r
-    out_dep[dep_both] = 0.5 * (warped_dl[dep_both] + warped_dr[dep_both])
+    out_dep[dep_valid_r & left_half] = warped_dr[dep_valid_r & left_half]
+    out_dep[dep_valid_l & ~left_half] = warped_dl[dep_valid_l & ~left_half]
+    out_dep[~dep_valid_r & dep_valid_l & left_half] = warped_dl[~dep_valid_r & dep_valid_l & left_half]
+    out_dep[~dep_valid_l & dep_valid_r & ~left_half] = warped_dr[~dep_valid_l & dep_valid_r & ~left_half]
 
 
 def compute_stitch(
