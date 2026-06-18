@@ -14,6 +14,7 @@ class CameraType(IntFlag):
     Camera types available on Spot robot.
     Uses IntFlag to support bitwise operations for camera masks.
     """
+
     BACK = 0x1
     FRONTLEFT = 0x2
     FRONTRIGHT = 0x4
@@ -56,6 +57,7 @@ class SpotConfig:
 
     Can be loaded from YAML file or instantiated directly.
     """
+
     # Connection settings
     robot_ip: str
     username: str = ""
@@ -113,7 +115,7 @@ class SpotConfig:
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
 
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             data = yaml.safe_load(f)
 
         if data is None:
@@ -133,25 +135,25 @@ class SpotConfig:
 
         # Convert to dict, excluding extra_params if empty
         data = {
-            'robot_ip': self.robot_ip,
-            'username': self.username,
-            'password': self.password,
-            'image_buffer_size': self.image_buffer_size,
-            'image_quality_percent': self.image_quality_percent,
-            'request_timeout_seconds': self.request_timeout_seconds,
-            'vision_model_path': self.vision_model_path,
-            'vision_providers': self.vision_providers,
-            'sdk_name': self.sdk_name,
-            'connection_retry_attempts': self.connection_retry_attempts,
-            'connection_retry_delay_ms': self.connection_retry_delay_ms,
+            "robot_ip": self.robot_ip,
+            "username": self.username,
+            "password": self.password,
+            "image_buffer_size": self.image_buffer_size,
+            "image_quality_percent": self.image_quality_percent,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "vision_model_path": self.vision_model_path,
+            "vision_providers": self.vision_providers,
+            "sdk_name": self.sdk_name,
+            "connection_retry_attempts": self.connection_retry_attempts,
+            "connection_retry_delay_ms": self.connection_retry_delay_ms,
         }
 
         data = {key: value for key, value in data.items() if value is not None}
 
         if self.extra_params:
-            data['extra_params'] = self.extra_params
+            data["extra_params"] = self.extra_params
 
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     def __repr__(self) -> str:

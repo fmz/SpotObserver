@@ -211,10 +211,7 @@ class VisionPipeline:
             self._depth_buffer = np.empty(depth_shape, dtype=self._depth_dtype)
 
         if self._depth_dtype == np.dtype(np.float16):
-            if (
-                self._depth_resize_buffer is None
-                or self._depth_resize_buffer.shape != depth_shape
-            ):
+            if self._depth_resize_buffer is None or self._depth_resize_buffer.shape != depth_shape:
                 self._depth_resize_buffer = np.empty(depth_shape, dtype=np.float32)
         else:
             self._depth_resize_buffer = None
@@ -279,8 +276,7 @@ def run_vision_pipeline(
     resolved_model_path = model_path or os.environ.get(DEFAULT_MODEL_ENV_VAR)
     if not resolved_model_path:
         raise VisionPipelineError(
-            "Vision model path is required. Pass model_path or set "
-            f"{DEFAULT_MODEL_ENV_VAR}."
+            f"Vision model path is required. Pass model_path or set {DEFAULT_MODEL_ENV_VAR}."
         )
 
     provider_tuple = _normalize_providers(providers)

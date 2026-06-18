@@ -28,12 +28,18 @@ class TestCameraType:
 
     def test_get_source_name_depth(self):
         """Test depth camera source name generation."""
-        assert CameraType.get_source_name(CameraType.FRONTLEFT, depth=True) == \
-               "frontleft_depth_in_visual_frame"
-        assert CameraType.get_source_name(CameraType.RIGHT, depth=True) == \
-               "right_depth_in_visual_frame"
-        assert CameraType.get_source_name(CameraType.HAND, depth=True) == \
-               "hand_depth_in_hand_color_frame"
+        assert (
+            CameraType.get_source_name(CameraType.FRONTLEFT, depth=True)
+            == "frontleft_depth_in_visual_frame"
+        )
+        assert (
+            CameraType.get_source_name(CameraType.RIGHT, depth=True)
+            == "right_depth_in_visual_frame"
+        )
+        assert (
+            CameraType.get_source_name(CameraType.HAND, depth=True)
+            == "hand_depth_in_hand_color_frame"
+        )
 
 
 class TestSpotConfig:
@@ -115,8 +121,7 @@ class TestSpotConfig:
     def test_extra_params(self):
         """Test extra_params field."""
         config = SpotConfig(
-            robot_ip="192.168.80.3",
-            extra_params={"location": "lab", "experiment": "test1"}
+            robot_ip="192.168.80.3", extra_params={"location": "lab", "experiment": "test1"}
         )
         assert config.extra_params["location"] == "lab"
         assert config.extra_params["experiment"] == "test1"

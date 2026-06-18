@@ -20,11 +20,13 @@ logger = logging.getLogger(__name__)
 
 class SpotConnectionError(Exception):
     """Base exception for SpotConnection errors."""
+
     pass
 
 
 class SpotAuthenticationError(SpotConnectionError):
     """Raised when authentication fails."""
+
     pass
 
 
@@ -294,9 +296,7 @@ class SpotConnection:
         logger.info(f"Created camera stream: {stream_id}")
 
         if auto_start_mask is not None:
-            logger.info(
-                f"Auto-starting stream '{stream_id}' with mask: {auto_start_mask}"
-            )
+            logger.info(f"Auto-starting stream '{stream_id}' with mask: {auto_start_mask}")
             try:
                 stream.start_streaming(auto_start_mask)
             except Exception:

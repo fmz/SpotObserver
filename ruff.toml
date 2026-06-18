@@ -4,30 +4,10 @@
 # Ruff is an extremely fast Python linter and formatter, written in Rust.
 # Docs: https://docs.astral.sh/ruff/configuration/
 #
-#
-# =============================================================================
-# DECISIONS & RATIONALE
-# =============================================================================
-#
-# Target Version: py39
-#   - Matches common ML/DL setups (PyTorch 2.x, CUDA 12.x ecosystems)
-#   - Python 3.9 has significant performance improvements for pure Python code
-#
-# Line Length: 88
-#   - Reduces line breaks in long function signatures common in PyTorch
-#   - Still readable on most modern displays
-#   - Trade-off: Some terminals may wrap, but readability > terminal compat
-#
-# Config File: ruff.toml (not pyproject.toml)
-#   - Dedicated config file keeps project config separate
-#   - Easier to review ruff-specific changes in git history
-#   - Can be shared across projects with similar needs
-#
 # =============================================================================
 
-target-version = "py39"
-# Line length of 88 matches Black standard
-line-length = 88
+target-version = "py312"
+line-length = 100
 
 # =============================================================================
 # EXCLUSIONS
