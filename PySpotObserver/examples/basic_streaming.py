@@ -111,6 +111,14 @@ def parse_args() -> argparse.Namespace:
         help="Stream identifier for the optional second stream.",
     )
     parser.add_argument(
+        "--stitch",
+        action="store_true",
+        help=(
+            "Display the stitched front view alongside individual cameras. "
+            "Automatically adds FRONTLEFT and FRONTRIGHT to the primary stream if not already present."
+        ),
+    )
+    parser.add_argument(
         "--async-mode",
         action="store_true",
         help="Use async connection management and async frame retrieval.",
@@ -146,6 +154,12 @@ def parse_args() -> argparse.Namespace:
 
 def build_stream_specs(args: argparse.Namespace) -> list[StreamSpec]:
     primary_cameras = parse_camera_list(args.cameras)
+    if args.stitch:
+        for cam in (CameraType.FRONTLEFT, CameraType.FRONTRIGHT):
+            if cam not in primary_cameras:
+                primary_cameras.append(cam)
+        if CameraType.FRONTSTITCHED not in primary_cameras:
+            primary_cameras.append(CameraType.FRONTSTITCHED)
     stream_templates = [
         ("primary", args.stream_id, primary_cameras),
     ]
@@ -177,10 +191,10 @@ def display_images(window_prefix: str, stream, rgb_images: Sequence[np.ndarray],
     for i, (rgb, depth) in enumerate(zip(rgb_images, depth_images)):
         camera_name = stream.get_camera_order()[i].name
         rgb_display = (rgb * 255).astype(np.uint8)
-        rgb_display = cv2.cvtColor(rgb_display, cv2.COLOR_RGB2BGR)
+        rgb_bgr = cv2.cvtColor(rgb_display, cv2.COLOR_RGB2BGR)
         depth_normalized = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-        cv2.imshow(f"{window_prefix} - {camera_name} - RGB", rgb_display)
+        cv2.imshow(f"{window_prefix} - {camera_name} - RGB", rgb_bgr)
         cv2.imshow(f"{window_prefix} - {camera_name} - Depth", depth_colored)
 
     return bool(cv2.waitKey(1) & 0xFF == ord("q"))

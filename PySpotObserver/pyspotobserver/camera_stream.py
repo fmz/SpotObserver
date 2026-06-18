@@ -17,6 +17,12 @@ from bosdyn.client.image import ImageClient, build_image_request
 
 from .config import SpotConfig, CameraType
 from .color_correction import _ROBOT_CCMS
+from .stitch import (
+    CamStitchParams, compute_stitch, extract_stitch_params,
+    STITCH_OUT_W, STITCH_OUT_H,
+)
+
+_VIRTUAL_CAMERAS = frozenset({CameraType.FRONTSTITCHED})
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +95,16 @@ class SpotCamStream:
         # Current camera configuration
         self._camera_mask: int = 0
         self._camera_order: List[CameraType] = []
+        self._sdk_camera_order: List[CameraType] = []  # _camera_order minus virtual cameras
+        self._sdk_to_frame_idx: dict = {}  # sdk camera index -> frame slot index
+
+        # Stitch state (active when FRONTSTITCHED is in camera mask)
+        self._stitch_enabled: bool = False
+        self._stitch_params_l: Optional[CamStitchParams] = None
+        self._stitch_params_r: Optional[CamStitchParams] = None
+        self._stitch_fl_idx: int = 0
+        self._stitch_fr_idx: int = 0
+        self._stitch_out_idx: int = 0
 
         # Preallocated frame pool (initialized once we know image shapes)
         self._frame_pool: List[ImageFrame] = []
@@ -162,6 +178,18 @@ class SpotCamStream:
         # Parse camera mask to get ordered list of cameras
         self._camera_mask = camera_mask
         self._camera_order = self._parse_camera_mask(camera_mask)
+        self._sdk_camera_order = [c for c in self._camera_order if c not in _VIRTUAL_CAMERAS]
+        self._sdk_to_frame_idx = {
+            i: self._camera_order.index(cam)
+            for i, cam in enumerate(self._sdk_camera_order)
+        }
+        self._stitch_enabled = CameraType.FRONTSTITCHED in self._camera_order
+        self._stitch_params_l = None
+        self._stitch_params_r = None
+        if self._stitch_enabled:
+            self._stitch_fl_idx = self._camera_order.index(CameraType.FRONTLEFT)
+            self._stitch_fr_idx = self._camera_order.index(CameraType.FRONTRIGHT)
+            self._stitch_out_idx = self._camera_order.index(CameraType.FRONTSTITCHED)
         self._image_requests = self._build_image_requests()
 
         logger.info(
@@ -383,6 +411,12 @@ class SpotCamStream:
             if mask & camera_type:
                 cameras.append(camera_type)
 
+        if CameraType.FRONTSTITCHED in cameras:
+            if CameraType.FRONTLEFT not in cameras or CameraType.FRONTRIGHT not in cameras:
+                raise SpotCamStreamError(
+                    "FRONTSTITCHED requires both FRONTLEFT and FRONTRIGHT in camera mask"
+                )
+
         return cameras
 
     def _stream_loop(self) -> None:
@@ -408,11 +442,15 @@ class SpotCamStream:
                 if not self._frame_pool:
                     initial_decoded = self._decode_initial_responses(image_responses)
                     self._initialize_frame_pool(initial_decoded)
+                    if self._stitch_enabled:
+                        self._cache_stitch_params(image_responses)
                     frame = self._next_frame_from_pool()
                     self._fill_frame_from_decoded(initial_decoded, frame)
                 else:
                     frame = self._next_frame_from_pool()
                     self._fill_frame_from_responses(image_responses, frame)
+                if self._stitch_enabled:
+                    self._apply_stitch(frame)
                 self._enqueue_frame(frame)
                 self._frame_count += 1
 
@@ -443,7 +481,7 @@ class SpotCamStream:
         """
         requests = []
 
-        for camera in self._camera_order:
+        for camera in self._sdk_camera_order:
             # RGB request
             rgb_source = CameraType.get_source_name(camera, depth=False)
             requests.append(
@@ -451,7 +489,7 @@ class SpotCamStream:
                     rgb_source,
                     quality_percent=self._config.image_quality_percent,
                     image_format=image_pb2.Image.FORMAT_JPEG,
-                    pixel_format=image_pb2.Image.PIXEL_FORMAT_RGB_U8
+                    pixel_format=image_pb2.Image.PIXEL_FORMAT_RGB_U8,
                 )
             )
 
@@ -480,7 +518,7 @@ class SpotCamStream:
         Raises:
             SpotCamStreamError: If responses are malformed
         """
-        n_cameras = len(self._camera_order)
+        n_cameras = len(self._sdk_camera_order)
         expected_count = n_cameras * 2  # RGB + depth per camera
 
         if len(decoded) != expected_count:
@@ -500,6 +538,12 @@ class SpotCamStream:
             depth_shape = decoded[depth_idx].shape
             rgb_shapes.append(rgb_shape)
             depth_shapes.append(depth_shape)
+
+        # Add output shape for the virtual FRONTSTITCHED slot.
+        # Height matches the front camera images so the full vertical FOV is captured.
+        if self._stitch_enabled:
+            rgb_shapes.insert(self._stitch_out_idx, (STITCH_OUT_H, STITCH_OUT_W, 3))
+            depth_shapes.insert(self._stitch_out_idx, (STITCH_OUT_H, STITCH_OUT_W))
 
         # Preallocate a static pool of frames (one per queue slot)
         pool_size = max(1, self._config.image_buffer_size)
@@ -568,7 +612,7 @@ class SpotCamStream:
         """
         Fill a preallocated frame with image data from responses.
         """
-        n_cameras = len(self._camera_order)
+        n_cameras = len(self._sdk_camera_order)
         expected_count = n_cameras * 2  # RGB + depth per camera
 
         if len(responses) != expected_count:
@@ -579,21 +623,21 @@ class SpotCamStream:
         for i in range(n_cameras):
             rgb_idx = i * 2
             depth_idx = i * 2 + 1
+            frame_i = self._sdk_to_frame_idx[i]
 
             ccm = None
             if self._ccms is not None:
-                ccm = self._ccms[self._camera_order[i]]
+                ccm = self._ccms[self._sdk_camera_order[i]]
             self._convert_image_response_inplace(
                 responses[rgb_idx],
                 is_depth=False,
-                out_array=frame.rgb_images[i],
-                ccm=ccm
+                out_array=frame.rgb_images[frame_i],
+                ccm=ccm,
             )
-           
             self._convert_image_response_inplace(
                 responses[depth_idx],
                 is_depth=True,
-                out_array=frame.depth_images[i],
+                out_array=frame.depth_images[frame_i],
             )
 
         # Update timestamps
@@ -614,7 +658,7 @@ class SpotCamStream:
         """
         Fill a preallocated frame with already-decoded arrays.
         """
-        n_cameras = len(self._camera_order)
+        n_cameras = len(self._sdk_camera_order)
         expected_count = n_cameras * 2  # RGB + depth per camera
 
         if len(decoded) != expected_count:
@@ -625,8 +669,9 @@ class SpotCamStream:
         for i in range(n_cameras):
             rgb_idx = i * 2
             depth_idx = i * 2 + 1
-            np.copyto(frame.rgb_images[i], decoded[rgb_idx])
-            np.copyto(frame.depth_images[i], decoded[depth_idx])
+            frame_i = self._sdk_to_frame_idx[i]
+            np.copyto(frame.rgb_images[frame_i], decoded[rgb_idx])
+            np.copyto(frame.depth_images[frame_i], decoded[depth_idx])
 
         frame.timestamp = time.monotonic()
         frame.acquisition_time = None
@@ -638,7 +683,7 @@ class SpotCamStream:
         """
         Decode initial responses once for shape inference and first frame fill.
         """
-        n_cameras = len(self._camera_order)
+        n_cameras = len(self._sdk_camera_order)
         expected_count = n_cameras * 2  # RGB + depth per camera
 
         if len(responses) != expected_count:
@@ -652,10 +697,33 @@ class SpotCamStream:
             depth_idx = i * 2 + 1
             rgb = self._convert_image_response_alloc(responses[rgb_idx], is_depth=False)
             if self._ccms is not None:
-                self._apply_ccm_inplace(rgb, self._ccms[self._camera_order[i]])
+                self._apply_ccm_inplace(rgb, self._ccms[self._sdk_camera_order[i]])
             decoded.append(rgb)
             decoded.append(self._convert_image_response_alloc(responses[depth_idx], is_depth=True))
         return decoded
+
+    def _cache_stitch_params(self, responses: List[image_pb2.ImageResponse]) -> None:
+        """Extract and cache body-to-camera transforms and intrinsics for stitching."""
+        fl_sdk_i = self._sdk_camera_order.index(CameraType.FRONTLEFT)
+        fr_sdk_i = self._sdk_camera_order.index(CameraType.FRONTRIGHT)
+        self._stitch_params_l = extract_stitch_params(responses[fl_sdk_i * 2])
+        self._stitch_params_r = extract_stitch_params(responses[fr_sdk_i * 2])
+        logger.info(f"Stream '{self._stream_id}': Stitch params cached for front cameras")
+
+    def _apply_stitch(self, frame: "ImageFrame") -> None:
+        """Compute the stitched front view and write it into the FRONTSTITCHED frame slot."""
+        if self._stitch_params_l is None:
+            return
+        compute_stitch(
+            frame.rgb_images[self._stitch_fl_idx],
+            frame.depth_images[self._stitch_fl_idx],
+            self._stitch_params_l,
+            frame.rgb_images[self._stitch_fr_idx],
+            frame.depth_images[self._stitch_fr_idx],
+            self._stitch_params_r,
+            frame.rgb_images[self._stitch_out_idx],
+            frame.depth_images[self._stitch_out_idx],
+        )
 
     def _convert_image_response_alloc(
         self,
@@ -867,14 +935,23 @@ class SpotCamStream:
         """
         Apply a 3x3 color correction matrix to an (H, W, 3) float32 image in-place.
 
-        Computes corrected = matrix @ pixel for each pixel (column-vector form),
-        equivalent to img @ matrix.T in numpy row-vector form, then clips to [0, 1].
+        Matrices use row-vector convention: corrected = pixel @ matrix.
+        The CCM was calibrated in linear light, so we gamma-decode before
+        applying and gamma-encode after (matching the extract_matrices.py pipeline).
         """
-        if scratch is None:
-            img[:] = img @ matrix.T
-        else:
-            np.einsum("...c,dc->...d", img, matrix, out=scratch)
-            np.copyto(img, scratch)
+        linear = scratch if scratch is not None else np.empty_like(img)
+        np.copyto(linear, img)
+
+        low = linear <= 0.04045
+        linear[low] /= 12.92
+        linear[~low] = ((linear[~low] + 0.055) / 1.055) ** 2.4
+
+        np.matmul(linear, matrix, out=img)
+        np.clip(img, 0.0, 1.0, out=img)
+
+        low = img <= 0.0031308
+        img[low] *= 12.92
+        img[~low] = 1.055 * img[~low] ** (1.0 / 2.4) - 0.055
         np.clip(img, 0.0, 1.0, out=img)
 
     @staticmethod

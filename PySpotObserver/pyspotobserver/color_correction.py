@@ -2,14 +2,14 @@ import numpy as np
 from .config import CameraType
 
 # Known robot IPs
-_GOUGER_IP = "128.148.138.22"
-_TUSKER_IP = "128.148.138.21"
+_GOUGER_IP = "128.148.138.21"
+_TUSKER_IP = "128.148.138.22"
 
 _IDENTITY_3x3 = np.eye(3, dtype=np.float32)
 
 # Color correction matrices per robot, keyed by CameraType.
-# Convention: corrected_pixel = M @ raw_pixel  (column-vector form),
-# applied in numpy as: img @ M.T  for (H, W, 3) images.
+# Convention: corrected_pixel = raw_pixel @ M  (row-vector form),
+# applied in numpy as: img @ M  for (H, W, 3) images.
 # BACK and HAND cameras use identity until calibration data is available.
 _GOUGER_CCMS: dict = {
     CameraType.LEFT: np.array([
