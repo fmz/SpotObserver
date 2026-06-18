@@ -60,7 +60,6 @@ def _depth_list_from_output(output: np.ndarray, batch_size: int) -> List[np.ndar
 
     return [np.asarray(output[i]) for i in range(batch_size)]
 
-
 class VisionPipeline:
     """
     Per-stream ONNX vision pipeline with reusable input buffers.
@@ -145,6 +144,7 @@ class VisionPipeline:
                 },
             )[0]
 
+        completed_depth = _complete_sparse_using_nearest(output)
         return rgb_images, _depth_list_from_output(output, len(rgb_images))
 
     def _init_session(self) -> None:
@@ -259,6 +259,22 @@ class VisionPipeline:
             if resize_dst is not depth_dst:
                 depth_dst[...] = resize_dst
 
+def _complete_sparse_using_nearest(sparse_depth: np.ndarray):
+    batch_size = sparse_depth.shape[0]
+    completed = np.empty_like(sparse_depth)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+    for i in range(batch_size):
+        depth_frame = sparse_depth[i].astype(np.float32)
+        mask = (depth_frame == 0)
+
+        if mask.any():
+            # Dilate non-zero depth values to fill holes with nearest neighbor
+            completed[i] = cv2.dilate(depth_frame, kernel, iterations=3)
+        else:
+            completed[i] = depth_frame
+
+    return completed
 
 _default_pipeline: Optional[VisionPipeline] = None
 _default_pipeline_key: Optional[Tuple[str, Tuple[str, ...], Tuple[int, int]]] = None
