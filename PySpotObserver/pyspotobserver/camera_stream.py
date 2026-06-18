@@ -24,7 +24,6 @@ from .stitch import (
 
 _VIRTUAL_CAMERAS = frozenset({CameraType.FRONTSTITCHED})
 
-
 logger = logging.getLogger(__name__)
 
 
