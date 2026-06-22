@@ -11,10 +11,83 @@
 #include <opencv2/opencv.hpp>
 
 #include <cuda_runtime.h>
+#include <bosdyn/math/frame_helpers.h>
 
+#include <array>
+#include <cctype>
+#include <cmath>
 #include <thread>
 
 namespace SOb {
+
+static std::string get_dump_name_for_camera(SpotCamera camera);
+
+static std::string sanitize_dump_name(const std::string& name) {
+    std::string sanitized;
+    sanitized.reserve(name.size());
+    for (unsigned char ch : name) {
+        if (std::isalnum(ch)) {
+            sanitized.push_back(static_cast<char>(std::tolower(ch)));
+        } else if (ch == '.' || ch == '-' || ch == '_') {
+            sanitized.push_back('_');
+        }
+    }
+    return sanitized.empty() ? "unknown_robot" : sanitized;
+}
+
+static std::string make_robot_dump_name(
+    const std::string& nickname,
+    const std::string& serial_number,
+    const std::string& robot_ip
+) {
+    if (!nickname.empty() && !serial_number.empty()) {
+        return sanitize_dump_name(nickname + "_" + serial_number);
+    }
+    return sanitize_dump_name(robot_ip);
+}
+
+static std::array<float, 16> se3_pose_to_row_major_matrix(const bosdyn::api::SE3Pose& pose) {
+    // Uses unit quaternion to rotation matrix formula to get final rotation matrix.
+    const double qw = pose.rotation().w();
+    const double qx = pose.rotation().x();
+    const double qy = pose.rotation().y();
+    const double qz = pose.rotation().z();
+    // must normalize first for formula to be valid.
+    const double q_norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+
+    double w = 1.0;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    if (q_norm > 0.0) {
+        w = qw / q_norm;
+        x = qx / q_norm;
+        y = qy / q_norm;
+        z = qz / q_norm;
+    }
+
+    return {
+        static_cast<float>(1.0 - 2.0 * (y * y + z * z)),
+        static_cast<float>(2.0 * (x * y - z * w)),
+        static_cast<float>(2.0 * (x * z + y * w)),
+        static_cast<float>(pose.position().x()),
+
+        static_cast<float>(2.0 * (x * y + z * w)),
+        static_cast<float>(1.0 - 2.0 * (x * x + z * z)),
+        static_cast<float>(2.0 * (y * z - x * w)),
+        static_cast<float>(pose.position().y()),
+
+        static_cast<float>(2.0 * (x * z - y * w)),
+        static_cast<float>(2.0 * (y * z + x * w)),
+        static_cast<float>(1.0 - 2.0 * (x * x + y * y)),
+        static_cast<float>(pose.position().z()),
+
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+    };
+}
 
 static cv::Mat convert_image_to_cv_mat(const bosdyn::api::Image& img, double depth_scale = 1.0) {
     if (img.format() == bosdyn::api::Image::FORMAT_JPEG) {
@@ -93,12 +166,20 @@ ReaderWriterCBuf::~ReaderWriterCBuf() {
 bool ReaderWriterCBuf::initialize(
     size_t n_elems_per_rgb,
     size_t n_elems_per_depth,
-    const std::vector<SpotCamera>& cameras
+    const std::vector<SpotCamera>& cameras,
+    const std::vector<std::string>& camera_dump_subdirs
 ) {
     n_elems_per_rgb_ = n_elems_per_rgb;
     n_elems_per_depth_ = n_elems_per_depth;
     cameras_ = cameras;
+    camera_dump_subdirs_ = camera_dump_subdirs;
     n_images_per_response_ = cameras.size();
+
+    if (camera_dump_subdirs_.size() != cameras_.size()) {
+        LogMessage("ReaderWriterCBuf::initialize: Expected {} camera dump subdirs, got {}",
+                   cameras_.size(), camera_dump_subdirs_.size());
+        return false;
+    }
 
     if (rgb_data_ != nullptr || depth_data_ != nullptr) {
         if (!rgb_data_)   checkCudaError(cudaFree(rgb_data_), "cudaFree for RGB data");
@@ -111,6 +192,8 @@ bool ReaderWriterCBuf::initialize(
     size_t total_size_rgb   = max_size_ * n_elems_per_rgb * n_images_per_response_ * sizeof(uint8_t);
     size_t size_depth_per_response = n_elems_per_depth * n_images_per_response_ * sizeof(float);
     size_t total_size_depth = max_size_ * size_depth_per_response;
+
+    world_T_body_buffer_.resize(max_size_ * n_images_per_response_);
 
     checkCudaError(cudaMalloc(&rgb_data_, total_size_rgb), "cudaMalloc for RGB data");
     checkCudaError(cudaMalloc(&depth_data_, total_size_depth), "cudaMalloc for Depth data");
@@ -149,6 +232,11 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     if (n_elems_per_rgb_ == 0 || n_elems_per_depth_ == 0) {
         throw std::runtime_error("ReaderWriterCBuf::push: n_elems_per_rgb_ == 0");
     }
+    if (responses.size() != static_cast<size_t>(n_images_per_response_ * 2)) {
+        LogMessage("ReaderWriterCBuf::push: Expected {} image responses, got {}",
+                   n_images_per_response_ * 2, responses.size());
+        throw std::runtime_error("ReaderWriterCBuf::push: Unexpected image response count");
+    }
 
     // static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
     // time_point<high_resolution_clock> end_time = high_resolution_clock::now();
@@ -164,9 +252,11 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
     uint8_t* rgb_write_ptr = rgb_data_   + write_idx * n_elems_per_rgb_   * n_images_per_response_;
     float* depth_write_ptr = depth_data_ + write_idx * n_elems_per_depth_ * n_images_per_response_;
     float* depth_cache_ptr = cached_depth_;
+    const int32_t dump_frame_id = num_frames_++;
 
     int32_t n_rgbs_written = 0;
     int32_t n_depths_written = 0;
+    int32_t n_world_T_body_written = 0;
 
     for (const auto& response : responses) {
         const auto& img = response.shot().image();
@@ -176,6 +266,9 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         case bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8:
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U8:
         {
+            if (n_rgbs_written >= n_images_per_response_) {
+                throw std::runtime_error("ReaderWriterCBuf::push: Too many RGB responses");
+            }
             cv::Mat cv_img = convert_image_to_cv_mat(img);
 
             size_t image_size = cv_img.cols * cv_img.rows * 4;//(img.pixel_format() == bosdyn::api::Image::PIXEL_FORMAT_RGBA_U8 ? 4 : 3);
@@ -185,12 +278,30 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             }
 
             // See if we need to do any cam-specific preprocessing:
+            const SpotCamera camera = cameras_[n_rgbs_written];
             switch (cameras_[n_rgbs_written]) {
             case SpotCamera::FRONTLEFT:
             case SpotCamera::FRONTRIGHT:
                 // Mirror image
                 //cv::flip(cv_img, cv_img, 0); // Flip vertically
                 break;
+            }
+
+            bosdyn::api::SE3Pose world_T_body;
+            if (bosdyn::api::GetWorldTformBody(response.shot().transforms_snapshot(), &world_T_body)) {
+                world_T_body_buffer_[write_idx * n_images_per_response_ + n_rgbs_written] = world_T_body;
+                n_world_T_body_written++;
+
+                const std::array<float, 16> world_T_body_matrix = se3_pose_to_row_major_matrix(world_T_body);
+                DumpCameraTransform(
+                    "world_T_body",
+                    camera_dump_subdirs_[n_rgbs_written] + "/camera_transforms",
+                    world_T_body_matrix.data(),
+                    dump_frame_id
+                );
+            } else {
+                LogMessage("ReaderWriterCBuf::push: Failed to get world_T_body for camera {}",
+                           get_dump_name_for_camera(camera));
             }
 
             LogMessage("Copying RGB image of size {} bytes to write pointer at index {}, {:#x} rgb_write_ptr",
@@ -212,8 +323,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 cv_img.cols,
                 cv_img.rows,
                 cv_img.channels(),
-                "rgb",
-                n_rgbs_written + write_idx * n_images_per_response_
+                camera_dump_subdirs_[n_rgbs_written] + "/rgb",
+                dump_frame_id
             );
 
             rgb_write_ptr += n_elems_per_rgb_;
@@ -224,6 +335,9 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         case bosdyn::api::Image::PIXEL_FORMAT_DEPTH_U16:
         case bosdyn::api::Image::PIXEL_FORMAT_GREYSCALE_U16:
         {
+            if (n_depths_written >= n_images_per_response_) {
+                throw std::runtime_error("ReaderWriterCBuf::push: Too many depth responses");
+            }
             cv::Mat cv_img = convert_image_to_cv_mat(img, response.source().depth_scale());
             int depth_width = cv_img.cols;
             int depth_height = cv_img.rows;
@@ -252,8 +366,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 depth_write_ptr,
                 cv_img.cols,
                 cv_img.rows,
-                "depth",
-                n_depths_written + write_idx * n_images_per_response_
+                camera_dump_subdirs_[n_depths_written] + "/input-depth",
+                dump_frame_id
             );
 
             depth_write_ptr += n_elems_per_depth_;
@@ -266,6 +380,13 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             LogMessage("Unsupported pixel format: {img.pixel_format()}");
             throw std::runtime_error("ReaderWriterCBuf::push: Got an unsupported pixel format");
         }
+    }
+
+    if (n_world_T_body_written != n_rgbs_written) {
+        throw std::runtime_error("ReaderWriterCBuf::push: Failed to get world_T_body for all RGB responses");
+    }
+    if (n_rgbs_written != n_images_per_response_ || n_depths_written != n_images_per_response_) {
+        throw std::runtime_error("ReaderWriterCBuf::push: Did not receive one RGB and one depth image per camera");
     }
 
     // Make this batch visible only after the stream's async work completes.
@@ -287,11 +408,11 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
  * Consume image and depth data
  * Using more of a LIFO approach here, so that we can pop the most recent data first (see push function)
  */
-std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) const {
+std::tuple<uint8_t*, float*, const bosdyn::api::SE3Pose*> ReaderWriterCBuf::pop(int32_t count) const {
     bool expected_new_data = true;
     bool desired_new_data = false;
     if (!new_data_.compare_exchange_weak(expected_new_data, desired_new_data)) {
-        return std::make_pair(nullptr, nullptr);
+        return {nullptr, nullptr, nullptr};
     }
     new_data_.store(false, std::memory_order_release);
 
@@ -300,6 +421,9 @@ std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) const {
     uint8_t* rgb_data_out = rgb_data_   + read_idx * n_elems_per_rgb_   * n_images_per_response_;
     float* depth_data_out = depth_data_ + read_idx * n_elems_per_depth_ * n_images_per_response_;
 
+    const bosdyn::api::SE3Pose* world_T_body = world_T_body_buffer_.data()
+        + read_idx * n_images_per_response_;
+
     // read_idx += 1;
     // read_idx = read_idx % max_size_;
 
@@ -307,7 +431,7 @@ std::pair<uint8_t*, float*> ReaderWriterCBuf::pop(int32_t count) const {
                count, read_idx);
     //read_idx_.store(read_idx, std::memory_order_release);
 
-    return std::make_pair(rgb_data_out, depth_data_out);
+    return {rgb_data_out, depth_data_out, world_T_body};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -353,6 +477,33 @@ static std::vector<SpotCamera> convert_bitmask_to_spot_cam_vector(uint32_t bitma
     if (bitmask & SpotCamera::HAND)       cams.emplace_back(SpotCamera::HAND);
 
     return cams;
+}
+
+static std::string get_dump_name_for_camera(SpotCamera camera) {
+    switch (camera) {
+        case SpotCamera::BACK:
+            return "back";
+        case SpotCamera::FRONTLEFT:
+            return "frontleft";
+        case SpotCamera::FRONTRIGHT:
+            return "frontright";
+        case SpotCamera::LEFT:
+            return "left";
+        case SpotCamera::RIGHT:
+            return "right";
+        case SpotCamera::HAND:
+            return "hand";
+        default:
+            return "unknown";
+    }
+}
+
+std::string SpotCamStream::getDumpSubdirForCamera(SpotCamera camera) const {
+    return robot_.getRobotDumpName() + "/" + get_dump_name_for_camera(camera);
+}
+
+const std::string& SpotCamStream::getRobotDumpName() const {
+    return robot_.getRobotDumpName();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -440,6 +591,12 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
             }
             accumTimingInterval(timing_info_, "readerThread", {"thread", int32_t(current_cam_mask_)});
 
+            const auto& image_responses = response.response.image_responses();
+            if (image_responses.empty()) {
+                LogMessage("SpotCamStream::_spotCamReaderThread: No images received");
+                continue;
+            }
+
             // Update statistics atomically
             num_samples_.fetch_add(1);
 
@@ -524,6 +681,56 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                 LogMessage("SpotCamStream::streamCameras: No images received in response");
                 return false;
             }
+            // Assumption is that each response contains one image per camera -- if this is violated, fail loudly.
+            if (image_responses.size() != static_cast<size_t>(num_cams_requested * 2)) {
+                LogMessage("SpotCamStream::streamCameras: Expected {} image responses, got {}",
+                           num_cams_requested * 2, image_responses.size());
+                return false;
+            }
+
+            // Cache camera-to-body transforms once at stream initialization.
+            // body_T_camera maps camera points into body frame
+            body_T_cameras_.clear();
+            body_T_cameras_.reserve(num_cams_requested);
+
+            for (int32_t j = 0; j < num_cams_requested; j++) {
+                const auto& shot = image_responses[j].shot();
+                const std::string& camera_frame = shot.frame_name_image_sensor();
+
+                bosdyn::api::SE3Pose body_T_camera;
+                bool ok = bosdyn::api::get_a_tform_b(
+                    shot.transforms_snapshot(),
+                    bosdyn::api::kBodyFrame,
+                    camera_frame,
+                    &body_T_camera
+                );
+
+                if (!ok) {
+                    LogMessage("SpotCamStream::streamCameras: Failed to get body_T_camera for frame {}",
+                            camera_frame);
+                    return false;
+                }
+
+                body_T_cameras_.push_back(body_T_camera);
+                const std::array<float, 16> body_T_camera_matrix = se3_pose_to_row_major_matrix(body_T_camera);
+                DumpCameraTransform(
+                    "body_T_camera",
+                    getDumpSubdirForCamera(camera_order_[j]) + "/camera_transforms",
+                    body_T_camera_matrix.data(),
+                    -1
+                );
+
+                LogMessage("Cached body_T_camera for frame {}: pos=({}, {}, {}), quat=({}, {}, {}, {})",
+                        camera_frame,
+                        body_T_camera.position().x(),
+                        body_T_camera.position().y(),
+                        body_T_camera.position().z(),
+                        body_T_camera.rotation().w(),
+                        body_T_camera.rotation().x(),
+                        body_T_camera.rotation().y(),
+                        body_T_camera.rotation().z());
+            } 
+
             // Read image sizes
             current_rgb_shape_ = TensorShape{
                 size_t(num_cams_requested),
@@ -565,11 +772,20 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
             }
 
             // (Re)initialize circular buffer
-            image_lifo_.initialize(
+            std::vector<std::string> camera_dump_subdirs;
+            camera_dump_subdirs.reserve(camera_order_.size());
+            for (SpotCamera camera : camera_order_) {
+                camera_dump_subdirs.push_back(getDumpSubdirForCamera(camera));
+            }
+            if (!image_lifo_.initialize(
                 rgb_ref_size,
                 depth_ref_size,
-                camera_order_
-            );
+                camera_order_,
+                camera_dump_subdirs
+            )) {
+                LogMessage("SpotCamStream::streamCameras: Failed to initialize image buffer");
+                return false;
+            }
 
             break;
         }
@@ -591,9 +807,10 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
 bool SpotCamStream::getCurrentImages(
     int32_t n_images_requested,
     uint8_t** images,
-    float** depths
+    float** depths,
+    bosdyn::api::SE3Pose* world_T_bodies
 ) const {
-    auto [ret_images, ret_depths] = image_lifo_.pop(n_images_requested);
+    auto [ret_images, ret_depths, ret_world_T_body] = image_lifo_.pop(n_images_requested);
     if (ret_images == nullptr || ret_depths == nullptr) {
         return false;
     }
@@ -601,6 +818,12 @@ bool SpotCamStream::getCurrentImages(
     for (int32_t i = 0; i < n_images_requested; i++) {
         images[i] = ret_images + i * image_lifo_.n_elems_per_rgb_;
         depths[i] = ret_depths + i * image_lifo_.n_elems_per_depth_;
+    }
+
+    if (world_T_bodies != nullptr) {
+        for (int32_t i = 0; i < n_images_requested; i++) {
+            world_T_bodies[i] = ret_world_T_body[i];
+        }
     }
 
     return true;
@@ -617,6 +840,7 @@ SpotConnection::SpotConnection(
     , image_client_(nullptr)
     , image_lifo_max_size_(5)
     , connected_(false)
+    , robot_dump_name_(sanitize_dump_name(robot_ip))
 {
     // Create SDK instance
     sdk_ = bosdyn::client::CreateStandardSDK("SpotObserverConnection");
@@ -634,6 +858,21 @@ SpotConnection::SpotConnection(
         }
 
         robot_ = std::move(robot_result.response);
+
+        auto robot_id_result = robot_->GetId();
+        if (robot_id_result.status) {
+            const auto& robot_id = robot_id_result.response.robot_id();
+            robot_dump_name_ = make_robot_dump_name(
+                robot_id.nickname(),
+                robot_id.serial_number(),
+                robot_ip
+            );
+            LogMessage("SpotConnection::connect: Using robot dump name {}", robot_dump_name_);
+        } else {
+            robot_dump_name_ = sanitize_dump_name(robot_ip);
+            LogMessage("SpotConnection::connect: Failed to get robot id for dump naming: {}. Using IP.",
+                       robot_id_result.status.message());
+        }
 
         // Authenticate
         bosdyn::common::Status auth_status = robot_->Authenticate(username, password);

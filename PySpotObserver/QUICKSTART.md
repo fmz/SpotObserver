@@ -68,7 +68,8 @@ stream.start_streaming(cameras)
 
 ```python
 # Get current frame
-rgb_images, depth_images = stream.get_current_images(timeout=2.0)
+rgb_images, depth_images, body_T_worlds = stream.get_current_images(timeout=2.0)
+# body_T_worlds follows SDK camera order; virtual cameras are omitted.
 
 # Process images
 for i, (rgb, depth) in enumerate(zip(rgb_images, depth_images)):
@@ -116,7 +117,8 @@ with SpotConnection(config) as conn:
 
     try:
         while True:
-            rgb, depth = stream.get_current_images(timeout=1.0)
+            rgb, depth, body_T_worlds = stream.get_current_images(timeout=1.0)
+            # body_T_worlds follows SDK camera order; virtual cameras are omitted.
 
             # Display
             rgb_display = (rgb[0] * 255).astype(np.uint8)
@@ -143,7 +145,8 @@ async def main():
         stream.start_streaming(CameraType.FRONTLEFT)
 
         # Async image retrieval
-        rgb, depth = await stream.async_get_current_images()
+        rgb, depth, body_T_worlds = await stream.async_get_current_images()
+        # body_T_worlds follows SDK camera order; virtual cameras are omitted.
         print(f"Got {len(rgb)} images")
 
         stream.stop_streaming()

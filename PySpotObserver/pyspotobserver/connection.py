@@ -5,15 +5,16 @@ SpotConnection - Manages connection to Boston Dynamics Spot robot.
 import asyncio
 import logging
 import time
-from typing import Dict, Optional
 from types import TracebackType
+from typing import Dict, Optional
 
-import bosdyn.client
-from bosdyn.client import Robot, create_standard_sdk
-from bosdyn.client.image import ImageClient
+import bosdyn.client  # type: ignore[import-untyped]
+from bosdyn.client import Robot, create_standard_sdk  # type: ignore[import-untyped]
+from bosdyn.client.image import ImageClient  # type: ignore[import-untyped]
+from bosdyn.client.robot_id import RobotIdClient  # type: ignore[import-untyped]
 
+from .camera_stream import SpotCamStream, _sanitize_dump_name
 from .config import SpotConfig
-from .camera_stream import SpotCamStream
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class SpotConnection:
         self._sdk: Optional[bosdyn.client.Sdk] = None
         self._robot: Optional[Robot] = None
         self._image_client: Optional[ImageClient] = None
+        self._robot_dump_name = _sanitize_dump_name(config.robot_ip)
         self._connected: bool = False
         self._cam_streams: Dict[str, SpotCamStream] = {}
 
@@ -176,6 +178,20 @@ class SpotConnection:
                 logger.debug("Obtained ImageClient service")
             except Exception as e:
                 raise SpotConnectionError(f"Failed to get ImageClient: {e}") from e
+
+            try:
+                robot_id_client = self._robot.ensure_client(RobotIdClient.default_service_name)
+                robot_id = robot_id_client.get_id()
+                if robot_id.nickname and robot_id.serial_number:
+                    self._robot_dump_name = _sanitize_dump_name(
+                        f"{robot_id.nickname}_{robot_id.serial_number}"
+                    )
+                else:
+                    self._robot_dump_name = _sanitize_dump_name(self.config.robot_ip)
+                logger.info(f"Using robot dump name: {self._robot_dump_name}")
+            except Exception as e:
+                self._robot_dump_name = _sanitize_dump_name(self.config.robot_ip)
+                logger.warning(f"Failed to get robot id for dump naming; using IP: {e}")
 
             self._connected = True
             self._last_connect_time_s = time.monotonic()
@@ -287,6 +303,7 @@ class SpotConnection:
                 image_client=self._image_client,
                 config=self.config,
                 stream_id=stream_id,
+                robot_dump_name=self._robot_dump_name,
             )
         except Exception:
             logger.error(f"Failed to create camera stream: {stream_id}", exc_info=True)

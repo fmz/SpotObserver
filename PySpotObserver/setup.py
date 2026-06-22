@@ -2,14 +2,20 @@
 Setup script for PySpotObserver package.
 """
 
-from setuptools import setup, find_packages
 from pathlib import Path
+
+from setuptools import find_packages, setup  # type: ignore[import-untyped]
 
 INSTALL_REQUIRES = [
     "bosdyn-client>=5.0.0",
     "numpy>=2.0.0,<2.4.0",
     "opencv-python>=4.12.0",
     "pyyaml>=6.0.0",
+    "torch==2.8.0+cu129",
+]
+
+BUILD_REQUIRES = [
+    "setuptools>=81.0.0",
 ]
 
 DEV_REQUIRES = [
@@ -50,6 +56,7 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
     python_requires=">=3.9",
+    setup_requires=BUILD_REQUIRES,
     install_requires=INSTALL_REQUIRES,
     extras_require={
         "dev": DEV_REQUIRES,

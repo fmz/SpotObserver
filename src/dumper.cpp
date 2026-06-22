@@ -1,8 +1,13 @@
 #include "dumper.h"
 #include "logger.h"
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <fstream>
 #include <filesystem>
 #include <cuda_runtime.h>
+#include <torch/torch.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -38,11 +43,10 @@ static std::string get_file_path(
     const std::string& path,
     const std::string& subdir,
     const std::string& base_name,
-    int32_t dump_id_major,
-    int32_t dump_id_minor,
+    int32_t dump_id,
     const std::string& extension
 ) {
-    return path + "/" + subdir + "/" + base_name + std::to_string(dump_id_major) + "_" + std::to_string(dump_id_minor) + extension;
+    return path + "/" + subdir + "/" + base_name + std::to_string(dump_id) + extension;
 }
 
 bool ToggleDumping(const std::string& dump_path) {
@@ -56,13 +60,7 @@ bool ToggleDumping(const std::string& dump_path) {
     m_dumps_enabled = true;
     m_dump_path = dump_path;
 
-    // Create necessary directories
     bool dirs_created = create_directory_if_not_exists(m_dump_path);
-
-    // FIXME: REWORK THIS
-    dirs_created &= create_directory_if_not_exists(m_dump_path + "/rgb");
-    dirs_created &= create_directory_if_not_exists(m_dump_path + "/depth");
-    dirs_created &= create_directory_if_not_exists(m_dump_path + "/output_depth");
 
     if (!dirs_created) {
         LogMessage("Failed to create debug dump directories at: {}", m_dump_path);
@@ -81,8 +79,7 @@ static void _dump_RGB_image(
     int32_t height,
     int32_t channels,
     const std::string& subdir,
-    int32_t dump_id_major,
-    int32_t dump_id_minor
+    int32_t dump_id
 ) {
     // Generate filename
     std::string subdir_path = m_dump_path + "/" + subdir;
@@ -93,9 +90,8 @@ static void _dump_RGB_image(
     std::string file_path = get_file_path(
         m_dump_path,
         subdir,
-        "rgb_",
-        dump_id_major,
-        dump_id_minor,
+        "",
+        dump_id,
         ".png"
     );
 
@@ -107,7 +103,7 @@ static void _dump_RGB_image(
 }
 
 
-void DumpRGBImageFromCudaHWC(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id_major, int32_t dump_id_minor) {
+void DumpRGBImageFromCudaHWC(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
     if (!m_dumps_enabled) {
         return;
     }
@@ -134,10 +130,10 @@ void DumpRGBImageFromCudaHWC(const float* image, int32_t width, int32_t height, 
         h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i * 3 + 2])) * 255.0f);
     }
 
-   return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id_major, dump_id_minor);
+   return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id);
 }
 
-void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id_major, int32_t dump_id_minor) {
+void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
     if (!m_dumps_enabled) {
         return;
     }
@@ -164,8 +160,8 @@ void DumpRGBImageFromCudaCHW(const float* image, int32_t width, int32_t height, 
         h_image_u8[i * 3 + 2] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, h_image[i + 2 * num_pixels])) * 255.0f);
     }
 
-    LogMessage("Dumping float RGB image of size {}x{} to {}/rgb_{}_{}.png", width, height, subdir, dump_id_major, dump_id_minor);
-    return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id_major, dump_id_minor);
+    LogMessage("Dumping float RGB image of size {}x{} to {}/{}.png", width, height, subdir, dump_id);
+    return _dump_RGB_image(h_image_u8, width, height, 3, subdir, dump_id);
 }
 
 void DumpRGBImageFromCuda(
@@ -174,8 +170,7 @@ void DumpRGBImageFromCuda(
     int32_t height,
     int32_t num_channels,
     const std::string& subdir,
-    int32_t dump_id_major,
-    int32_t dump_id_minor
+    int32_t dump_id
 ) {
     if (!m_dumps_enabled) {
         return;
@@ -194,9 +189,9 @@ void DumpRGBImageFromCuda(
         LogMessage("Failed to copy RGB image from device to host: {}", cudaGetErrorString(err));
         return;
     }
-    LogMessage("Dumping uint8 RGB image of size {}x{} to {}/rgb_{}_{}.png", width, height, subdir, dump_id_major, dump_id_minor);
+    LogMessage("Dumping uint8 RGB image of size {}x{} to {}/{}.png", width, height, subdir, dump_id);
 
-    return _dump_RGB_image(h_image, width, height, num_channels, subdir, dump_id_major, dump_id_minor);
+    return _dump_RGB_image(h_image, width, height, num_channels, subdir, dump_id);
 }
 
 void DumpDepthImageFromCuda(
@@ -204,8 +199,7 @@ void DumpDepthImageFromCuda(
     int32_t width,
     int32_t height,
     const std::string& subdir,
-    int32_t dump_id_major,
-    int32_t dump_id_minor
+    int32_t dump_id
 ) {
     if (!m_dumps_enabled) {
         return;
@@ -224,28 +218,6 @@ void DumpDepthImageFromCuda(
         return;
     }
 
-    // Find min and max depth values for normalization
-    float min_val = h_depth[0];
-    float max_val = h_depth[0];
-    for (size_t i = 1; i < num_pixels; ++i) {
-        if (h_depth[i] < min_val) min_val = h_depth[i];
-        if (h_depth[i] > max_val) max_val = h_depth[i];
-    }
-
-    // Allocate host memory for 8-bit grayscale image
-    std::vector<uint8_t> h_depth_u8(num_pixels);
-    float range = max_val - min_val;
-
-    // Normalize and convert to uint8
-    if (range > 0) {
-        for (size_t i = 0; i < num_pixels; ++i) {
-            h_depth_u8[i] = static_cast<uint8_t>(((h_depth[i] - min_val) / range) * 255.0f);
-        }
-    } else {
-        // If range is zero, the image is constant. Set to mid-gray.
-        std::fill(h_depth_u8.begin(), h_depth_u8.end(), 128);
-    }
-
     // Generate filename
     std::string subdir_path = m_dump_path + "/" + subdir;
     if (!create_directory_if_not_exists(subdir_path)) {
@@ -256,17 +228,66 @@ void DumpDepthImageFromCuda(
     std::string file_path = get_file_path(
         m_dump_path,
         subdir,
-        "depth_",
-        dump_id_major,
-        dump_id_minor,
-        ".png"
+        "",
+        dump_id,
+        ""
     );
 
-    // Write image to file
-    const int channels = 1; // Grayscale
-    const int stride_in_bytes = width * channels;
-    if (!stbi_write_png(file_path.c_str(), width, height, channels, h_depth_u8.data(), stride_in_bytes)) {
+    std::ofstream file(file_path, std::ios::binary);
+    if (!file) {
         LogMessage("Failed to write depth image to: {}", file_path);
+        return;
+    }
+
+    const uint32_t count = static_cast<uint32_t>(h_depth.size());
+    file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    file.write(reinterpret_cast<const char*>(h_depth.data()), static_cast<std::streamsize>(h_depth.size() * sizeof(float)));
+
+    if (!file) {
+        LogMessage("Failed while writing depth image to: {}", file_path);
+    }
+}
+
+void DumpCameraTransform(
+    const std::string& name,
+    const std::string& subdir,
+    const float* transform,
+    int32_t dump_id
+) {
+    if (!m_dumps_enabled) {
+        return;
+    }
+    if (transform == nullptr) {
+        LogMessage("DumpCameraTransform: Cannot dump null transform {}", name);
+        return;
+    }
+
+    std::string subdir_path = m_dump_path + "/" + subdir;
+    if (!create_directory_if_not_exists(subdir_path)) {
+        LogMessage("DumpCameraTransforms: Failed to create directory: {}", subdir_path);
+        return;
+    }
+
+    // File name includes frame_idx only if id > 0; if passing in -1, (body_T_cam), write file without idx.
+    const std::string file_name = dump_id >= 0
+        ? name + "_" + std::to_string(dump_id) + ".pt"
+        : name + ".pt";
+    std::string file_path = m_dump_path + "/" + subdir + "/" + file_name;
+
+    std::array<float, 16> transform_copy;
+    std::copy(transform, transform + transform_copy.size(), transform_copy.begin());
+
+    torch::Tensor transform_tensor = torch::from_blob(
+        transform_copy.data(),
+        {4, 4},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU)
+    ).clone();
+
+    try {
+        torch::save(transform_tensor, file_path);
+    } catch (const std::exception& e) {
+        LogMessage("DumpCameraTransform: Failed to write transform to {}: {}", file_path, e.what());
+        return;
     }
 }
 

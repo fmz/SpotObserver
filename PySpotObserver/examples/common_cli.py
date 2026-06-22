@@ -5,11 +5,10 @@ Shared command-line helpers for example scripts.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from pyspotobserver import CameraType, SpotConfig
-
 
 CAMERA_NAME_MAP: dict[str, CameraType] = {
     "back": CameraType.BACK,
@@ -110,6 +109,12 @@ def build_config_from_args(args: argparse.Namespace) -> SpotConfig:
         config.vision_model_path = str(args.vision_model_path)
     if hasattr(args, "vision_providers") and args.vision_providers:
         config.vision_providers = args.vision_providers
+    if args.dumps_enabled and not args.save_dir:
+        raise ValueError("dumps_enabled specified without save_dir")
+    elif args.dumps_enabled:
+        config.dumps_enabled = True
+    if args.save_dir:
+        config.save_dir = args.save_dir
 
     if not config.robot_ip:
         raise ValueError("Robot IP must be set in --config or with --robot-ip.")

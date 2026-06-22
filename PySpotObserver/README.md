@@ -15,26 +15,24 @@ A clean, Pythonic interface for streaming camera data from Boston Dynamics Spot 
 
 ## Installation
 
-### From source
+> **Important:** `torch==2.8.0+cu129` is a CUDA wheel not hosted on PyPI. Running
+> `pip install -e .` directly will fail. Use `requirements.txt` instead, it pins
+> the correct PyTorch index URL automatically.
+
+### From source (recommended)
 
 ```bash
 cd PySpotObserver
-pip install -e .
+pip install -r requirements.txt
 ```
 
-### With development tools
-
-```bash
-pip install -e ".[dev]"
-```
+This installs the package in editable mode with all development dependencies and fetches the correct PyTorch CUDA wheel.
 
 ### With optional vision pipeline support
 
 ```bash
-pip install -e ".[vision]"
+pip install -e ".[vision]" --extra-index-url https://download.pytorch.org/whl/cu129
 ```
-
-`requirements.txt` delegates to `setup.py` for a development install, so dependency declarations stay in one place.
 
 ## Quick Start
 
@@ -58,7 +56,8 @@ with SpotConnection(config) as conn:
     stream.start_streaming(CameraType.FRONTLEFT | CameraType.FRONTRIGHT)
 
     # Get images
-    rgb_images, depth_images = stream.get_current_images()
+    rgb_images, depth_images, body_T_worlds = stream.get_current_images()
+    # body_T_worlds follows SDK camera order; virtual cameras are omitted.
 
     # Process images...
 
@@ -79,7 +78,8 @@ async def main():
         stream.start_streaming(CameraType.FRONTLEFT)
 
         # Async image retrieval
-        rgb_images, depth_images = await stream.async_get_current_images()
+        rgb_images, depth_images, body_T_worlds = await stream.async_get_current_images()
+        # body_T_worlds follows SDK camera order; virtual cameras are omitted.
 
         stream.stop_streaming()
 
@@ -126,7 +126,7 @@ Handles camera streaming in a background thread:
 
 - **start_streaming(camera_mask)**: Begin streaming from specified cameras
 - **stop_streaming()**: Stop the stream
-- **get_current_images()** / **async_get_current_images()**: Retrieve latest frame
+- **get_current_images()** / **async_get_current_images()**: Retrieve latest frame; RGB/depth are in camera order, while body-to-world transforms are in SDK camera order with virtual cameras omitted
 - **get_camera_order()**: Get list of cameras being streamed
 
 ### CameraType

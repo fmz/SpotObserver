@@ -1,12 +1,15 @@
 """Front camera stitching via point-cloud projection."""
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
-from dataclasses import dataclass
-from typing import Tuple
-
-from bosdyn.api import image_pb2
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME, get_a_tform_b
+from bosdyn.api import image_pb2  # type: ignore[import-untyped]
+from bosdyn.client.frame_helpers import (  # type: ignore[import-untyped]
+    BODY_FRAME_NAME,
+    VISION_FRAME_NAME,
+    get_a_tform_b,
+)
 
 STITCH_OUT_W = 1800
 STITCH_OUT_H = 1000
@@ -14,7 +17,7 @@ STITCH_OUT_H = 1000
 
 @dataclass
 class CamStitchParams:
-    rot: np.ndarray    # (3, 3) body_R_cam rotation matrix
+    rot: np.ndarray  # (3, 3) body_R_cam rotation matrix
     trans: np.ndarray  # (3,) body_t_cam translation vector
     fx: float
     fy: float
@@ -52,9 +55,96 @@ def extract_stitch_params(response: image_pb2.ImageResponse) -> CamStitchParams:
     )
 
 
+def extract_btw_params(response: image_pb2.ImageResponse) -> np.ndarray:
+    """
+    Extract the body pose in the vision/world frame for this image capture.
+
+    This changes frame-to-frame. By contrast, body_T_camera is static for a
+    mounted body camera and can usually be cached once.
+
+    Spot docs describe the vision frame as:
+        "An inertial frame that estimates the fixed location in the world
+        (relative to where the robot is booted up), and is calculated using
+        visual analysis of the world and the robot's odometry."
+    """
+    snapshot = response.shot.transforms_snapshot
+    vision_T_body = get_a_tform_b(snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
+
+    if vision_T_body is None:
+        raise ValueError(
+            "No transform from body to vision/world in image transform snapshot. "
+            "If this occurs frequently, consider using the previous frame instead of throwing exception."
+        )
+    b2w = vision_T_body.to_matrix()
+
+    return b2w.copy()
+
+
+def extract_btw_params(response: image_pb2.ImageResponse) -> np.ndarray:
+    """
+    Extract the body pose in the vision/world frame for this image capture.
+
+    This changes frame-to-frame. By contrast, body_T_camera is static for a
+    mounted body camera and can usually be cached once.
+
+    Spot docs describe the vision frame as:
+        "An inertial frame that estimates the fixed location in the world
+        (relative to where the robot is booted up), and is calculated using
+        visual analysis of the world and the robot's odometry."
+    """
+    snapshot = response.shot.transforms_snapshot
+    vision_T_body = get_a_tform_b(snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
+
+    if vision_T_body is None:
+        raise ValueError(
+            "No transform from body to vision/world in image transform snapshot. "
+            "If this occurs frequently, consider using the previous frame instead of throwing exception."
+        )
+    b2w = vision_T_body.to_matrix()
+
+    return b2w.copy()
+
+
+def extract_btw_params(response: image_pb2.ImageResponse) -> np.ndarray:
+    """
+    Extract the body pose in the vision/world frame for this image capture.
+
+    This changes frame-to-frame. By contrast, body_T_camera is static for a
+    mounted body camera and can usually be cached once.
+
+    Spot docs describe the vision frame as:
+        "An inertial frame that estimates the fixed location in the world
+        (relative to where the robot is booted up), and is calculated using
+        visual analysis of the world and the robot's odometry."
+    """
+    snapshot = response.shot.transforms_snapshot
+    vision_T_body = get_a_tform_b(snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
+
+    if vision_T_body is None:
+        raise ValueError(
+            "No transform from body to vision/world in image transform snapshot. "
+            "If this occurs frequently, consider using the previous frame instead of throwing exception."
+        )
+    b2w = vision_T_body.to_matrix()
+
+    return b2w.copy()
+
+
+def extract_ctb_params(response: image_pb2.ImageResponse) -> np.ndarray:
+    """Extract the camera pose in the body frame for this image capture."""
+    snapshot = response.shot.transforms_snapshot
+    frame_name = response.shot.frame_name_image_sensor
+    body_T_camera = get_a_tform_b(snapshot, BODY_FRAME_NAME, frame_name)
+
+    if body_T_camera is None:
+        raise ValueError(f"No transform from body to {frame_name!r}")
+
+    return body_T_camera.to_matrix().copy()
+
+
 def _backproject(
     rgb: np.ndarray, dep: np.ndarray, params: CamStitchParams
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Back-project valid pixels to body-frame 3D points."""
     v_idx, u_idx = np.indices(dep.shape)
     valid = (dep > 0) & np.isfinite(dep)
@@ -69,9 +159,14 @@ def _backproject(
 
 
 def _stitch_pointcloud(
-    l_rgb: np.ndarray, l_dep: np.ndarray, l_params: CamStitchParams,
-    r_rgb: np.ndarray, r_dep: np.ndarray, r_params: CamStitchParams,
-    out_rgb: np.ndarray, out_dep: np.ndarray,
+    l_rgb: np.ndarray,
+    l_dep: np.ndarray,
+    l_params: CamStitchParams,
+    r_rgb: np.ndarray,
+    r_dep: np.ndarray,
+    r_params: CamStitchParams,
+    out_rgb: np.ndarray,
+    out_dep: np.ndarray,
 ) -> None:
     """Depth-based stitcher: back-projects pixels to body-frame point cloud, then re-projects."""
     out_h, out_w = out_rgb.shape[:2]
@@ -114,9 +209,14 @@ def _stitch_pointcloud(
 
 
 def _stitch_cylindrical(
-    l_rgb: np.ndarray, l_dep: np.ndarray, l_params: CamStitchParams,
-    r_rgb: np.ndarray, r_dep: np.ndarray, r_params: CamStitchParams,
-    out_rgb: np.ndarray, out_dep: np.ndarray,
+    l_rgb: np.ndarray,
+    l_dep: np.ndarray,
+    l_params: CamStitchParams,
+    r_rgb: np.ndarray,
+    r_dep: np.ndarray,
+    r_params: CamStitchParams,
+    out_rgb: np.ndarray,
+    out_dep: np.ndarray,
 ) -> None:
     """
     Depth-free stitcher: for each virtual canvas pixel, back-computes the body-frame
@@ -135,11 +235,14 @@ def _stitch_cylindrical(
         np.arange(out_w, dtype=np.float32),
         np.arange(out_h, dtype=np.float32),
     )
-    d_body = np.stack([
-        np.ones((out_h, out_w), dtype=np.float32),
-        -(ug - cx_v) / f_virt,
-        -(vg - cy_v) / f_virt,
-    ], axis=-1)  # (out_h, out_w, 3)
+    d_body = np.stack(
+        [
+            np.ones((out_h, out_w), dtype=np.float32),
+            -(ug - cx_v) / f_virt,
+            -(vg - cy_v) / f_virt,
+        ],
+        axis=-1,
+    )  # (out_h, out_w, 3)
 
     def _make_warp(params: CamStitchParams, img_h: int, img_w: int):
         # Rotate body ray into camera frame (row-vector form: d_cam = d_body @ rot,
@@ -147,8 +250,12 @@ def _stitch_cylindrical(
         d_cam = d_body @ params.rot  # (out_h, out_w, 3)
         dz = d_cam[..., 2]
         safe_dz = np.where(dz > 0, dz, 1.0)  # avoid div-by-zero for behind-camera rays
-        map_x = np.where(dz > 0, params.fx * d_cam[..., 0] / safe_dz + params.cx, -1.0).astype(np.float32)
-        map_y = np.where(dz > 0, params.fy * d_cam[..., 1] / safe_dz + params.cy, -1.0).astype(np.float32)
+        map_x = np.where(dz > 0, params.fx * d_cam[..., 0] / safe_dz + params.cx, -1.0).astype(
+            np.float32
+        )
+        map_y = np.where(dz > 0, params.fy * d_cam[..., 1] / safe_dz + params.cy, -1.0).astype(
+            np.float32
+        )
         valid = (dz > 0) & (map_x >= 0) & (map_x < img_w) & (map_y >= 0) & (map_y < img_h)
         return map_x, map_y, valid
 
@@ -157,10 +264,12 @@ def _stitch_cylindrical(
     map_xl, map_yl, valid_l = _make_warp(l_params, l_h, l_w)
     map_xr, map_yr, valid_r = _make_warp(r_params, r_h, r_w)
 
-    warped_l = cv2.remap(l_rgb, map_xl, map_yl, cv2.INTER_LINEAR,
-                         borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
-    warped_r = cv2.remap(r_rgb, map_xr, map_yr, cv2.INTER_LINEAR,
-                         borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+    warped_l = cv2.remap(
+        l_rgb, map_xl, map_yl, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+    )
+    warped_r = cv2.remap(
+        r_rgb, map_xr, map_yr, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+    )
 
     out_rgb[:] = 0.0
     out_rgb[valid_l & ~valid_r] = warped_l[valid_l & ~valid_r]
@@ -169,10 +278,12 @@ def _stitch_cylindrical(
     out_rgb[both] = 0.5 * (warped_l[both] + warped_r[both])
 
     # Warp depth with the same maps (nearest-neighbour avoids blending across discontinuities)
-    warped_dl = cv2.remap(l_dep, map_xl, map_yl, cv2.INTER_NEAREST,
-                          borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
-    warped_dr = cv2.remap(r_dep, map_xr, map_yr, cv2.INTER_NEAREST,
-                          borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+    warped_dl = cv2.remap(
+        l_dep, map_xl, map_yl, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+    )
+    warped_dr = cv2.remap(
+        r_dep, map_xr, map_yr, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+    )
 
     dep_valid_l = valid_l & (warped_dl > 0)
     dep_valid_r = valid_r & (warped_dr > 0)
@@ -184,9 +295,14 @@ def _stitch_cylindrical(
 
 
 def compute_stitch(
-    l_rgb: np.ndarray, l_dep: np.ndarray, l_params: CamStitchParams,
-    r_rgb: np.ndarray, r_dep: np.ndarray, r_params: CamStitchParams,
-    out_rgb: np.ndarray, out_dep: np.ndarray,
+    l_rgb: np.ndarray,
+    l_dep: np.ndarray,
+    l_params: CamStitchParams,
+    r_rgb: np.ndarray,
+    r_dep: np.ndarray,
+    r_params: CamStitchParams,
+    out_rgb: np.ndarray,
+    out_dep: np.ndarray,
     use_depth: bool = True,
 ) -> None:
     """
