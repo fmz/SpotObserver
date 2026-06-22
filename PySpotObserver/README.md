@@ -191,7 +191,7 @@ The Python implementation differs in these ways:
 
 When contributing, please follow these guidelines:
 
-1. Use `black` for code formatting
+1. Use `ruff` for code formatting
 2. Use `mypy` for type checking
 3. Add tests for new features
 4. Update documentation

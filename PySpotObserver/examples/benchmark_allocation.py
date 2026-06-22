@@ -73,7 +73,9 @@ def _resolve_camera_pairs(
     for cam in cameras:
         rgb = CameraType.get_source_name(cam, depth=False)
         depth = CameraType.get_source_name(cam, depth=True)
-        if available_sources is not None and (rgb not in available_sources or depth not in available_sources):
+        if available_sources is not None and (
+            rgb not in available_sources or depth not in available_sources
+        ):
             skipped.append((cam, rgb, depth))
             continue
         pairs.append((cam, rgb, depth))
@@ -135,7 +137,9 @@ def main() -> int:
             source_protos = conn.image_client.list_image_sources()
             available_sources = {src.name for src in source_protos}
         except Exception as exc:
-            print(f"Warning: failed to list image sources ({exc}). Proceeding without pre-validation.")
+            print(
+                f"Warning: failed to list image sources ({exc}). Proceeding without pre-validation."
+            )
 
         pairs = _resolve_camera_pairs(requested_cameras, available_sources)
         requests = _build_requests(pairs)
@@ -161,8 +165,13 @@ def main() -> int:
             decoded_first_pass.append(_convert_alloc(responses[i * 2], is_depth=False))
             decoded_first_pass.append(_convert_alloc(responses[i * 2 + 1], is_depth=True))
 
-        rgb_buffers = [np.zeros(decoded_first_pass[i * 2].shape, dtype=np.float32) for i in range(len(pairs))]
-        depth_buffers = [np.zeros(decoded_first_pass[i * 2 + 1].shape, dtype=np.float32) for i in range(len(pairs))]
+        rgb_buffers = [
+            np.zeros(decoded_first_pass[i * 2].shape, dtype=np.float32) for i in range(len(pairs))
+        ]
+        depth_buffers = [
+            np.zeros(decoded_first_pass[i * 2 + 1].shape, dtype=np.float32)
+            for i in range(len(pairs))
+        ]
 
         def inplace_once() -> None:
             for i in range(len(pairs)):
@@ -190,7 +199,9 @@ def main() -> int:
 
         per_iter_inplace_ms = (t_inplace / args.iters) * 1000.0
         per_iter_alloc_ms = (t_alloc / args.iters) * 1000.0
-        speedup = (per_iter_alloc_ms / per_iter_inplace_ms) if per_iter_inplace_ms > 0 else float("inf")
+        speedup = (
+            (per_iter_alloc_ms / per_iter_inplace_ms) if per_iter_inplace_ms > 0 else float("inf")
+        )
 
         print("Benchmark results (single captured response set):")
         print("Cameras used:", ", ".join(cam.name for cam, _, _ in pairs))

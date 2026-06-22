@@ -11,18 +11,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import time
+from collections.abc import Sequence
 from contextlib import AsyncExitStack, ExitStack
 from dataclasses import dataclass
-import logging
 from pathlib import Path
-import time
-from typing import Sequence
-
 
 import cv2
 import numpy as np
-
-from pyspotobserver import CameraType, SpotConfig, SpotConnection
 from common_cli import (
     add_common_connection_arguments,
     build_camera_mask,
@@ -30,6 +27,7 @@ from common_cli import (
     parse_camera_list,
 )
 
+from pyspotobserver import CameraType, SpotConfig, SpotConnection
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,9 +132,7 @@ def parse_args() -> argparse.Namespace:
         help="Print per-stream timing summary at the end of the run.",
     )
     parser.add_argument(
-        "--vision-pipeline",
-        action="store_true",
-        help="Run the vision pipeline on the Spot outputs"
+        "--vision-pipeline", action="store_true", help="Run the vision pipeline on the Spot outputs"
     )
     parser.add_argument(
         "--vision-model-path",
@@ -187,7 +183,9 @@ def build_stream_specs(args: argparse.Namespace) -> list[StreamSpec]:
     return specs
 
 
-def display_images(window_prefix: str, stream, rgb_images: Sequence[np.ndarray], depth_images: Sequence[np.ndarray]) -> bool:
+def display_images(
+    window_prefix: str, stream, rgb_images: Sequence[np.ndarray], depth_images: Sequence[np.ndarray]
+) -> bool:
     for i, (rgb, depth) in enumerate(zip(rgb_images, depth_images)):
         camera_name = stream.get_camera_order()[i].name
         rgb_display = (rgb * 255).astype(np.uint8)
@@ -230,7 +228,9 @@ def print_timing_summary(
         print("Per-robot aggregate throughput:")
         for robot_label, stats in timing_by_robot.items():
             avg_fetch_ms = (stats.fetch_seconds / stats.frames) * 1000.0 if stats.frames else 0.0
-            avg_display_ms = (stats.display_seconds / stats.frames) * 1000.0 if stats.frames else 0.0
+            avg_display_ms = (
+                (stats.display_seconds / stats.frames) * 1000.0 if stats.frames else 0.0
+            )
             avg_loop_ms = (stats.loop_seconds / stats.frames) * 1000.0 if stats.frames else 0.0
             fps = stats.frames / elapsed_seconds if elapsed_seconds > 0 else 0.0
             print(
@@ -250,7 +250,9 @@ def build_connection_configs(args: argparse.Namespace) -> dict[str, SpotConfig]:
     return configs
 
 
-def start_streams(connections: dict[str, SpotConnection], specs: list[StreamSpec]) -> dict[str, object]:
+def start_streams(
+    connections: dict[str, SpotConnection], specs: list[StreamSpec]
+) -> dict[str, object]:
     streams = {}
     for spec in specs:
         conn = connections[spec.robot_label]
@@ -300,7 +302,9 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
                     display_elapsed = 0.0
                     if not args.no_display:
                         display_start = time.perf_counter()
-                        should_quit = display_images(spec.display_label, stream, rgb_images, depth_images)
+                        should_quit = display_images(
+                            spec.display_label, stream, rgb_images, depth_images
+                        )
                         display_elapsed = time.perf_counter() - display_start
 
                     timing_by_label[spec.label].add(
@@ -313,14 +317,18 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
                         logger.info("User requested quit")
                         break
         finally:
-            finalize_sync(connections, streams, specs, timing_by_label, args.print_timing, overall_start)
+            finalize_sync(
+                connections, streams, specs, timing_by_label, args.print_timing, overall_start
+            )
     return 0
 
 
 async def fetch_stream_async(stream, timeout: float, vision_pipeline: bool) -> FetchResult:
     fetch_start = time.perf_counter()
-    rgb_images, depth_images = await stream.async_get_current_images(timeout=timeout, run_pipeline=vision_pipeline)
-        
+    rgb_images, depth_images = await stream.async_get_current_images(
+        timeout=timeout, run_pipeline=vision_pipeline
+    )
+
     return FetchResult(
         rgb_images=rgb_images,
         depth_images=depth_images,
@@ -346,7 +354,10 @@ async def run_async(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
             start_time = time.perf_counter()
             while time.perf_counter() - start_time < args.duration:
                 results = await asyncio.gather(
-                    *(fetch_stream_async(streams[spec.label], args.timeout, args.vision_pipeline) for spec in specs)
+                    *(
+                        fetch_stream_async(streams[spec.label], args.timeout, args.vision_pipeline)
+                        for spec in specs
+                    )
                 )
 
                 should_quit = False
@@ -354,12 +365,15 @@ async def run_async(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
                     display_elapsed = 0.0
                     if not args.no_display:
                         display_start = time.perf_counter()
-                        should_quit = display_images(
-                            spec.display_label,
-                            streams[spec.label],
-                            result.rgb_images,
-                            result.depth_images,
-                        ) or should_quit
+                        should_quit = (
+                            display_images(
+                                spec.display_label,
+                                streams[spec.label],
+                                result.rgb_images,
+                                result.depth_images,
+                            )
+                            or should_quit
+                        )
                         display_elapsed = time.perf_counter() - display_start
 
                     timing_by_label[spec.label].add(
@@ -374,7 +388,9 @@ async def run_async(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
 
                 await asyncio.sleep(0.01)
         finally:
-            finalize_async(connections, streams, specs, timing_by_label, args.print_timing, overall_start)
+            finalize_async(
+                connections, streams, specs, timing_by_label, args.print_timing, overall_start
+            )
     return 0
 
 
@@ -399,7 +415,9 @@ def finalize_sync(
         logger.info("%s robot active streams: %s", label, conn.list_streams())
     logger.info("Disconnected from robot(s)")
     if print_timing:
-        print_timing_summary(timing_by_label, specs, connections, time.perf_counter() - overall_start)
+        print_timing_summary(
+            timing_by_label, specs, connections, time.perf_counter() - overall_start
+        )
     return 0
 
 
@@ -424,7 +442,9 @@ def finalize_async(
         logger.info("%s robot active streams: %s", label, conn.list_streams())
     logger.info("Disconnected from robot(s)")
     if print_timing:
-        print_timing_summary(timing_by_label, specs, connections, time.perf_counter() - overall_start)
+        print_timing_summary(
+            timing_by_label, specs, connections, time.perf_counter() - overall_start
+        )
     return 0
 
 

@@ -15,7 +15,7 @@ INSTALL_REQUIRES = [
 DEV_REQUIRES = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
-    "black>=23.0.0",
+    "ruff>=0.15.2",
     "mypy>=1.5.0",
 ]
 

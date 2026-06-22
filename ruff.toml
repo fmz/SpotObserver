@@ -1,0 +1,124 @@
+# =============================================================================
+# Ruff Configuration
+# =============================================================================
+# Ruff is an extremely fast Python linter and formatter, written in Rust.
+# Docs: https://docs.astral.sh/ruff/configuration/
+#
+# =============================================================================
+
+target-version = "py312"
+line-length = 100
+
+# =============================================================================
+# EXCLUSIONS
+# =============================================================================
+# Directories/files to exclude from linting and formatting.
+#
+# Standard exclusions:
+#   __pycache__  - Python bytecode cache
+#   .git         - Git internals
+#   .venv        - Virtual environment
+#   experiments  - Experiment outputs (logs, checkpoints, etc.)
+#
+# Project-specific:
+#   src/archive  - Archived/deprecated code (kept for reference)
+#
+# =============================================================================
+
+exclude = [
+    "__pycache__",
+    ".git",
+    ".venv",
+    "experiments",
+    "src/archive",
+]
+
+# =============================================================================
+# LINT RULES
+# =============================================================================
+# Rule selection philosophy: Start strict, add ignores as needed.
+# Better to have CI catch potential issues than miss them.
+#
+# Rule categories enabled:
+#   STARTER (safe defaults):
+#     F    - Pyflakes: undefined names, unused imports, shadowing
+#     E/W  - pycodestyle: PEP8 style violations (errors/warnings)
+#     I    - isort: import sorting and grouping
+#
+#   RECOMMENDED (quality):
+#     B    - flake8-bugbear: common bugs, anti-patterns, footguns
+#     UP   - pyupgrade: automatic Python version upgrades
+#     SIM  - flake8-simplify: simplifiable constructs
+#     RUF  - Ruff-specific: Ruff's own high-quality rules
+#
+#   RESEARCH/ML (domain-specific):
+#     NPY  - NumPy: NumPy-specific rules (deprecated APIs, etc.)
+#     PD   - pandas-vet: pandas-specific rules (chained assignment, etc.)
+#     ANN  - flake8-annotations: type annotation issues
+#            Note: This project uses typeguard, so should have good coverage.
+#            If too noisy, add specific ANN codes to per-file-ignores.
+#
+# =============================================================================
+
+[lint]
+select = [
+    # --- Starter (safe defaults) ---
+    "F",      # Pyflakes: undefined names, unused imports
+    "E", "W", # pycodestyle: PEP8 errors (E) and warnings (W)
+    "I",      # isort: import sorting
+
+    # --- Recommended (quality) ---
+    "B",      # flake8-bugbear: common bugs and anti-patterns
+    "UP",     # pyupgrade: use modern Python syntax
+    "SIM",    # flake8-simplify: simplifiable constructs
+    "RUF",    # Ruff-specific: high-quality Ruff rules
+
+    # --- Research/ML (domain-specific) ---
+    "NPY",    # NumPy-specific rules
+    "PD",     # pandas-vet
+    "ANN",    # flake8-annotations: type hints
+]
+
+ignore = [
+    "E501",   # Line too long: Formatter handles this; remaining cases are acceptable
+    "W292",   # No newline at end of file: Formatter handles this automatically
+    "RUF001", # Ambiguous Unicode: Greek letters (σ, α) and math symbols (×) are intentional in scientific code
+]
+
+# =============================================================================
+# PER-FILE IGNORES
+# =============================================================================
+# Add specific rule ignores for files that have legitimate reasons.
+# Format: "path/pattern" = ["CODE1", "CODE2"]
+# =============================================================================
+
+[lint.per-file-ignores]
+# Add file-specific ignores here as needed
+
+# =============================================================================
+# ISORT CONFIGURATION
+# =============================================================================
+# isort handles import sorting and grouping.
+# known-first-party: Packages that are part of this project (not third-party).
+# =============================================================================
+
+# =============================================================================
+# FLAKE8-ANNOTATIONS CONFIGURATION
+# =============================================================================
+# allow-star-arg-any: Suppress ANN401 for *args/**kwargs with Any type.
+# Rationale: Pass-through kwargs (e.g., to matplotlib) are impractical to type
+# precisely. Using Any is standard practice for wrapper functions.
+# =============================================================================
+
+[lint.flake8-annotations]
+allow-star-arg-any = true
+
+# =============================================================================
+# FORMAT CONFIGURATION
+# =============================================================================
+# Ruff format is a drop-in replacement for Black.
+# docstring-code-format: Format code examples in docstrings.
+# =============================================================================
+
+[format]
+docstring-code-format = true

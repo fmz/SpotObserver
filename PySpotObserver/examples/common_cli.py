@@ -64,10 +64,7 @@ def add_stream_arguments(
     parser.add_argument(
         "--cameras",
         default=default_cameras,
-        help=(
-            "Comma-separated camera list. "
-            f"Choices: {', '.join(sorted(CAMERA_NAME_MAP))}."
-        ),
+        help=(f"Comma-separated camera list. Choices: {', '.join(sorted(CAMERA_NAME_MAP))}."),
     )
     parser.add_argument(
         "--duration",
