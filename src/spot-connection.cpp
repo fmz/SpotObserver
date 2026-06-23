@@ -124,10 +124,10 @@ bool ReaderWriterCBuf::initialize(
     LogMessage("Min depth address = {:#x}, Max depth address = {:#x}",
                size_t(depth_data_), size_t(depth_data_) + total_size_depth);
 
-    // Memory overhead summary (printed regardless of logging state).
+    // Memory overhead summary (gated by LogLevel::PERF).
     size_t total_bytes = total_size_rgb + total_size_depth + size_depth_per_response;
-    std::cout << std::format(
-        "[mem] ReaderWriterCBuf: {:.2f} MB total (RGB ring {:.2f} MB, depth ring {:.2f} MB, cached depth {:.2f} MB)\n",
+    LogPerf(
+        "[mem] ReaderWriterCBuf: {:.2f} MB total (RGB ring {:.2f} MB, depth ring {:.2f} MB, cached depth {:.2f} MB)",
         total_bytes / (1024.0 * 1024.0),
         total_size_rgb / (1024.0 * 1024.0),
         total_size_depth / (1024.0 * 1024.0),

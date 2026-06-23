@@ -108,6 +108,9 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ToggleDepthAveragingWithOpticalFlow(bool enable);
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ToggleLogging(bool enable);
+// Logging verbosity levels (cumulative): 0 = NONE, 1 = PERF (timing + memory only), 2 = ALL.
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_SetLogLevel(int32_t level);
 
 // Terminal outputs aren't logged to Unity by default. We need to set up a callback
 UNITY_INTERFACE_EXPORT

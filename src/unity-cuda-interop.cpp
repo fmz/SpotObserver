@@ -126,11 +126,11 @@ static DX12InteropCacheEntry* _getOrCreateInteropEntry(ID3D12Resource* d3d12_res
         cache_entry.bufSize = buf_size_in_bytes;
         LogMessage("Mapped CUDA buffer: {} (size: {})", (void*)cache_entry.cudaPtr, buf_size_in_bytes);
 
-        // Memory overhead summary (printed regardless of logging state). This is a single
+        // Memory overhead summary (gated by LogLevel::PERF). This is a single
         // shared D3D12 buffer mapped into CUDA, so the bytes are counted once.
-        std::cout << std::format("[mem] CUDA-DX12 interop buffer (resource {}): {:.2f} MB\n",
-                                 (void*)d3d12_resource,
-                                 buf_size_in_bytes / (1024.0 * 1024.0));
+        LogPerf("[mem] CUDA-DX12 interop buffer (resource {}): {:.2f} MB",
+                (void*)d3d12_resource,
+                buf_size_in_bytes / (1024.0 * 1024.0));
     }
     return &cache_entry;
 }

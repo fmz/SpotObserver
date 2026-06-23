@@ -89,14 +89,14 @@ inline std::string __formatTimingId(const TimingId& id) {
     return s.empty() ? std::string{} : " [" + s + "]";
 }
 
-// Emit one canonical timing line and reset the accumulator. Printed via std::cout so it
-// survives logging being disabled. Single-threaded into the library, so no synchronization.
+// Emit one canonical timing line and reset the accumulator. Routed through LogPerf so it is
+// gated by LogLevel::PERF. Single-threaded into the library, so no synchronization.
 inline void __reportTiming(TimingInfo& t, const char* name, const TimingId& id) {
-    std::cout << std::format("[timing] {}{}: {} ms (over {} iters)\n",
-                             name,
-                             __formatTimingId(id),
-                             t.accum_diff_between_run_times / t.num_iterations,
-                             t.num_iterations);
+    LogPerf("[timing] {}{}: {} ms (over {} iters)",
+            name,
+            __formatTimingId(id),
+            t.accum_diff_between_run_times / t.num_iterations,
+            t.num_iterations);
 }
 
 // Accumulate the gap since the previous call (inter-iteration cadence). The first call only

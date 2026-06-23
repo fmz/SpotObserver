@@ -135,9 +135,9 @@ bool VisionPipeline::allocateCudaBuffers() {
                        + 3 * depth_size        // depth data, preprocessed, cached
                        + depth_workspace_size
                        + output_size;
-    std::cout << std::format(
+    LogPerf(
         "[mem] VisionPipeline (thread {}): {:.2f} MB total (RGB ring {:.2f} MB, RGB float {:.2f} MB, "
-        "depth x3 {:.2f} MB, depth workspace {:.2f} MB, output {:.2f} MB)\n",
+        "depth x3 {:.2f} MB, depth workspace {:.2f} MB, output {:.2f} MB)",
         thread_num,
         total_bytes / (1024.0 * 1024.0),
         rgb_buffer_size / (1024.0 * 1024.0),
@@ -428,7 +428,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("VisionPipeline postprocess time: {} ms", postprocess_duration.count());
 
             auto total_duration = preprocess_duration + inference_duration + postprocess_duration;
-            std::cout << std::format("VisionPipeline total duration: {} ms\n", total_duration.count());
+            LogPerf("VisionPipeline total duration: {} ms", total_duration.count());
 
             // Accumulate active-work time only (start of work -> end of GPU work for
             // this iteration). Excludes the idle poll/wait for new images.

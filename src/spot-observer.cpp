@@ -20,7 +20,7 @@ namespace SOb {
 
 // Function pointer for Unity logging callback
 LogCallback unityLogCallback = nullptr;
-bool logging_enabled = true;
+LogLevel    logging_level = LogLevel::ALL;
 
 // Map to hold robot connections by ID
 static int32_t __next_robot_id = 0; // Incremental ID for each robot connection
@@ -651,6 +651,15 @@ bool UNITY_INTERFACE_API SOb_ToggleDepthAveragingWithOpticalFlow(bool enable) {
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ToggleLogging(bool enable) {
     SOb::ToggleLogging(enable);
+    return true;
+}
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_SetLogLevel(int32_t level) {
+    if (level < int32_t(SOb::LogLevel::NONE) || level > int32_t(SOb::LogLevel::ALL)) {
+        return false;
+    }
+    SOb::SetLogLevel(SOb::LogLevel(level));
     return true;
 }
 
