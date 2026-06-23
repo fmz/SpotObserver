@@ -66,6 +66,7 @@ int main(int argc, char* argv[]) {
     std::string password  = argv[4];
 
     //SOb_ToggleDebugDumps("./spot_dump");
+    SOb_ToggleLogging(false);
 
     int32_t spot_ids[2] = {-1, -1};
 

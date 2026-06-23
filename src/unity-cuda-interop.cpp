@@ -125,6 +125,12 @@ static DX12InteropCacheEntry* _getOrCreateInteropEntry(ID3D12Resource* d3d12_res
 
         cache_entry.bufSize = buf_size_in_bytes;
         LogMessage("Mapped CUDA buffer: {} (size: {})", (void*)cache_entry.cudaPtr, buf_size_in_bytes);
+
+        // Memory overhead summary (printed regardless of logging state). This is a single
+        // shared D3D12 buffer mapped into CUDA, so the bytes are counted once.
+        std::cout << std::format("[mem] CUDA-DX12 interop buffer (resource {}): {:.2f} MB\n",
+                                 (void*)d3d12_resource,
+                                 buf_size_in_bytes / (1024.0 * 1024.0));
     }
     return &cache_entry;
 }
@@ -405,7 +411,13 @@ bool clearOutputTextures(int32_t robot_id) {
 }
 
 static std::unordered_map<int32_t, std::unordered_map<int32_t, TimingInfo>> timing_map;
-static int32_t NUM_ITERATIONS = 100;
+
+// Accumulators for the latency *inside* the interop copy (duration samples via
+// accumTimingSample). One map for the whole interop copy section (CUDA + D3D12 submit +
+// fence wait), one for just the blocking GPU fence wait. Keyed [robot][stream].
+// Single-threaded into the library, so no synchronization (matches timing_map).
+static std::unordered_map<int32_t, std::unordered_map<int32_t, TimingInfo>> interop_copy_timing_map;
+static std::unordered_map<int32_t, std::unordered_map<int32_t, TimingInfo>> fence_wait_timing_map;
 
 // Helper function type for getting images
 typedef bool (*GetImageSetFunc)(int32_t robot_id, int32_t cam_stream_id, int32_t n_images_requested, uint8_t** images, float** depths);
@@ -417,23 +429,8 @@ static bool uploadImageSetToUnityCommon(
     GetImageSetFunc getImageSetFunc,
     const char* operation_name
 ) {
-    {
-        auto curr_time = std::chrono::high_resolution_clock::now();
-        if (timing_map.count(robot_id) > 0 && timing_map[robot_id].count(cam_stream_id) > 0) {
-            double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_map[robot_id][cam_stream_id].last_run_time).count();
-            timing_map[robot_id][cam_stream_id] = {curr_time, timing_map[robot_id][cam_stream_id].accum_diff_between_run_times+time_since_last, timing_map[robot_id][cam_stream_id].num_iterations+1};
-            if (timing_map[robot_id][cam_stream_id].num_iterations == NUM_ITERATIONS) {
-                std::cout << std::format("uploadImageSetToUnityCommon: Average time between function iterations over {} iterations, robot {}, stream {}: {} ms\n",
-                                            timing_map[robot_id][cam_stream_id].num_iterations,
-                                            robot_id,
-                                            cam_stream_id,
-                                            timing_map[robot_id][cam_stream_id].accum_diff_between_run_times/NUM_ITERATIONS);
-                timing_map[robot_id][cam_stream_id] = {curr_time, 0.0, 0};
-            }
-        } else {
-            timing_map[robot_id][cam_stream_id] = {curr_time, 0.0, 0};
-        }
-    }
+    accumTimingInterval(timing_map[robot_id][cam_stream_id], "uploadImageSetToUnityCommon",
+                        {"robot", robot_id, "stream", cam_stream_id});
 
     // Sanity checks
     if (robot_id < 0) {
@@ -507,6 +504,9 @@ static bool uploadImageSetToUnityCommon(
         LogMessage("No new images ready for {}: robot {}, cam stream {}", operation_name, robot_id, cam_stream_id);
         return false;
     }
+
+    // Start timing the interop copy (CUDA -> shared buffers, D3D12 copy to Unity, fence wait).
+    auto interop_copy_start = std::chrono::high_resolution_clock::now();
 
     // Copy data to the shared buffers
     for (int32_t i = 0; i < rgb_textures.size(); i++) {
@@ -683,18 +683,29 @@ static bool uploadImageSetToUnityCommon(
     s_CmdQueue->Signal(s_Fence, ++s_FenceValue);
 
     // Wait for the GPU to finish
+    auto fence_wait_start = std::chrono::high_resolution_clock::now();
     if (s_Fence->GetCompletedValue() < s_FenceValue) {
         s_Fence->SetEventOnCompletion(s_FenceValue, s_FenceEvent);
         WaitForSingleObject(s_FenceEvent, INFINITE);
     }
     s_FenceValue++;
+    auto interop_copy_end = std::chrono::high_resolution_clock::now();
 
     LogMessage("Copied images to d3d12 resources for {} robot: {}", operation_name, robot_id);
 
+    // Accumulate and report interop copy / fence-wait latency. The copy span covers CUDA ->
+    // shared buffers + D3D12 submit + fence wait; the fence-wait span isolates the blocking
+    // GPU stall. Reported as two separate named lines on the TIMING_NUM_ITERATIONS cadence.
+    {
+        double copy_ms  = std::chrono::duration<double, std::milli>(interop_copy_end - interop_copy_start).count();
+        double fence_ms = std::chrono::duration<double, std::milli>(interop_copy_end - fence_wait_start).count();
+        const TimingId id{"robot", robot_id, "stream", cam_stream_id};
+        accumTimingSample(interop_copy_timing_map[robot_id][cam_stream_id], copy_ms,  "interop copy",            id);
+        accumTimingSample(fence_wait_timing_map[robot_id][cam_stream_id],  fence_ms, "interop copy fence-wait", id);
+    }
+
     return true;
 }
-
-
 
 bool uploadNextImageSetToUnity(int32_t robot_id, int32_t cam_stream_id) {
     return uploadImageSetToUnityCommon(robot_id, cam_stream_id, SOb_GetNextImageSet, "robot");

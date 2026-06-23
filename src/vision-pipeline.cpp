@@ -129,6 +129,23 @@ bool VisionPipeline::allocateCudaBuffers() {
         output_size
     );
 
+    // Memory overhead summary (printed regardless of logging state).
+    size_t total_bytes = rgb_buffer_size
+                       + rgb_image_size_batch * sizeof(float)
+                       + 3 * depth_size        // depth data, preprocessed, cached
+                       + depth_workspace_size
+                       + output_size;
+    std::cout << std::format(
+        "[mem] VisionPipeline (thread {}): {:.2f} MB total (RGB ring {:.2f} MB, RGB float {:.2f} MB, "
+        "depth x3 {:.2f} MB, depth workspace {:.2f} MB, output {:.2f} MB)\n",
+        thread_num,
+        total_bytes / (1024.0 * 1024.0),
+        rgb_buffer_size / (1024.0 * 1024.0),
+        (rgb_image_size_batch * sizeof(float)) / (1024.0 * 1024.0),
+        (3 * depth_size) / (1024.0 * 1024.0),
+        depth_workspace_size / (1024.0 * 1024.0),
+        output_size / (1024.0 * 1024.0));
+
     return true;
 }
 
@@ -163,26 +180,6 @@ void VisionPipeline::deallocateCudaBuffers() {
     }
 }
 
-static int32_t NUM_ITERATIONS_PIPELINE = 100;
-
-void VisionPipeline::updateTimingInfo(std::chrono::high_resolution_clock::time_point curr_time) {
-    if (timing_info_valid_) {
-        double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_info_.last_run_time).count();
-        timing_info_ = {curr_time, timing_info_.accum_diff_between_run_times+time_since_last, timing_info_.num_iterations+1};
-        if (timing_info_.num_iterations == NUM_ITERATIONS_PIPELINE) {
-            std::cout << std::format("pipelineWorker: Average time between function iterations over {} iterations, thread {}: {} ms\n",
-                                        timing_info_.num_iterations,
-                                        thread_num,
-                                        timing_info_.accum_diff_between_run_times/NUM_ITERATIONS_PIPELINE);
-            timing_info_ = {curr_time, 0.0, 0};
-        }
-    } else {
-        timing_info_ = {curr_time, 0.0, 0};
-        timing_info_valid_ = true;
-    }
-}
-
-
 void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
     size_t num_images_per_iter = output_shape_.N;
 
@@ -204,8 +201,10 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
+            // Marks the start of active work for this iteration (images are ready).
+            // Timing is accumulated at the end of the iteration so the idle poll
+            // above is excluded.
             auto start_time = std::chrono::high_resolution_clock::now();
-            updateTimingInfo(start_time);
 
             // Prepare device pointers
             uint8_t* d_rgb_ptr = d_rgb_data_ + write_idx_ * num_rgb_elemenets;
@@ -430,6 +429,12 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
             auto total_duration = preprocess_duration + inference_duration + postprocess_duration;
             std::cout << std::format("VisionPipeline total duration: {} ms\n", total_duration.count());
+
+            // Accumulate active-work time only (start of work -> end of GPU work for
+            // this iteration). Excludes the idle poll/wait for new images.
+            accumTimingSample(timing_info_,
+                              std::chrono::duration<double, std::milli>(postprocess_time - start_time).count(),
+                              "pipelineWorker", {"thread", thread_num});
 
             // Publish only after stream work completes
             read_idx_.store(write_idx_, std::memory_order_release);

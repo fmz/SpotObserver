@@ -124,6 +124,15 @@ bool ReaderWriterCBuf::initialize(
     LogMessage("Min depth address = {:#x}, Max depth address = {:#x}",
                size_t(depth_data_), size_t(depth_data_) + total_size_depth);
 
+    // Memory overhead summary (printed regardless of logging state).
+    size_t total_bytes = total_size_rgb + total_size_depth + size_depth_per_response;
+    std::cout << std::format(
+        "[mem] ReaderWriterCBuf: {:.2f} MB total (RGB ring {:.2f} MB, depth ring {:.2f} MB, cached depth {:.2f} MB)\n",
+        total_bytes / (1024.0 * 1024.0),
+        total_size_rgb / (1024.0 * 1024.0),
+        total_size_depth / (1024.0 * 1024.0),
+        size_depth_per_response / (1024.0 * 1024.0));
+
     write_idx_ = 0;
     read_idx_ = 0;
     new_data_ = false;
@@ -416,25 +425,6 @@ void SpotCamStream::_startStreamingThread() {
     });
 }
 
-static int32_t NUM_ITERATIONS = 100;
-
-void SpotCamStream::updateTimingInfo(std::chrono::high_resolution_clock::time_point curr_time) {
-    if (timing_info_valid_) {
-        double time_since_last = std::chrono::duration<double, std::milli>(curr_time - timing_info_.last_run_time).count();
-        timing_info_ = {curr_time, timing_info_.accum_diff_between_run_times+time_since_last, timing_info_.num_iterations+1};
-        if (timing_info_.num_iterations == NUM_ITERATIONS) {
-            std::cout << std::format("readerThread: Average time between function iterations over {} iterations, thread {}: {} ms\n",
-                                        timing_info_.num_iterations,
-                                        current_cam_mask_,
-                                        timing_info_.accum_diff_between_run_times/NUM_ITERATIONS);
-            timing_info_ = {curr_time, 0.0, 0};
-        }
-    } else {
-        timing_info_ = {curr_time, 0.0, 0};
-        timing_info_valid_ = true;
-    }
-}
-
 // Image producer thread that requests images from the robot
 void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
     LogMessage("Producer thread started");
@@ -448,19 +438,13 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-            auto start = std::chrono::high_resolution_clock::now();
-            updateTimingInfo(start);
+            accumTimingInterval(timing_info_, "readerThread", {"thread", int32_t(current_cam_mask_)});
 
             // Update statistics atomically
             num_samples_.fetch_add(1);
 
             // Process and queue images
             image_lifo_.push(response.response.image_responses());
-            auto end = std::chrono::high_resolution_clock::now();
-            // LogMessage("Total time for GetImage and push: {:.4f} ms",
-            //            std::chrono::duration<double, std::milli>(end - start).count());
-            
-            
         } catch (const std::exception& e) {
             LogMessage("Error in producer thread: {}", e.what());
             std::this_thread::sleep_for(std::chrono::seconds(1));
