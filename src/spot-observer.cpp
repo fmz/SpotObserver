@@ -546,6 +546,35 @@ bool UNITY_INTERFACE_API SOb_ClearUnityReadbackBuffers(int32_t robot_id) {
 }
 
 UNITY_INTERFACE_EXPORT
+void* UNITY_INTERFACE_API SOb_GetRenderEventFunc() {
+    return SOb::getRenderEventFunc();
+}
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_EnqueueUnityUpload(int32_t robot_id, int32_t cam_stream_id, int32_t source_kind) {
+    try {
+        bool ret = SOb::enqueueUnityUpload(robot_id, cam_stream_id, source_kind);
+        if (!ret) {
+            SOb::LogMessage("SOb_EnqueueUnityUpload: Failed to enqueue upload for robot ID {} @ cam-stream ID {}",
+                robot_id, cam_stream_id);
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        SOb::LogMessage("SOb_EnqueueUnityUpload: Exception while enqueueing upload for robot ID {} @ cam-stream ID {}: {}",
+            robot_id, cam_stream_id, e.what());
+        return false;
+    }
+}
+
+#ifdef SOB_ENABLE_TEST_HOOKS
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_Test_SetUnityUploadImageProvider(SOb_TestImageProvider provider) {
+    return SOb::setTestUnityUploadImageProvider(provider);
+}
+#endif
+
+UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_GetNextImageSet(
     int32_t robot_id,
     int32_t cam_stream_id,
@@ -602,14 +631,15 @@ bool UNITY_INTERFACE_API SOb_GetNextVisionPipelineImageSet(
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id, int32_t cam_stream_id) {
     try {
+        SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers is deprecated; use SOb_EnqueueUnityUpload and GL.IssuePluginEvent.");
         bool ret = SOb::uploadNextImageSetToUnity(robot_id, cam_stream_id);
         if (!ret) {
-            SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers: Failed to upload next image set for robot ID {}", robot_id);
-            return false; // Failed to get images
+            SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers: Failed to enqueue next image set for robot ID {}", robot_id);
+            return false;
         }
         return ret;
     } catch (const std::exception& e) {
-        SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers: Exception while uploading next image set for robot ID {}: {}", robot_id, e.what());
+        SOb::LogMessage("SOb_PushNextImageSetToUnityBuffers: Exception while enqueueing next image set for robot ID {}: {}", robot_id, e.what());
         return false;
     }
 }
@@ -617,14 +647,15 @@ bool UNITY_INTERFACE_API SOb_PushNextImageSetToUnityBuffers(int32_t robot_id, in
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id, int32_t cam_stream_id) {
     try {
+        SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers is deprecated; use SOb_EnqueueUnityUpload and GL.IssuePluginEvent.");
         bool ret = SOb::uploadNextVisionPipelineImageSetToUnity(robot_id, cam_stream_id);
         if (!ret) {
-            SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers: Failed to upload next vision pipeline image set for robot ID {}", robot_id);
-            return false; // Failed to get images
+            SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers: Failed to enqueue next vision pipeline image set for robot ID {}", robot_id);
+            return false;
         }
         return ret;
     } catch (const std::exception& e) {
-        SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers: Exception while uploading next vision pipeline image set for robot ID {}: {}", robot_id, e.what());
+        SOb::LogMessage("SOb_PushNextVisionPipelineImageSetToUnityBuffers: Exception while enqueueing next vision pipeline image set for robot ID {}: {}", robot_id, e.what());
         return false;
     }
 }

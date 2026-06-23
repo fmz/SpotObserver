@@ -5,6 +5,10 @@ option(BUILD_TESTS "Build the test executable" ON)
 option(INSTALL_TESTS "Install test executables" ON)
 set(PLUGIN_NAME "SpotObserverLib")
 
+if(BUILD_TESTS)
+    enable_testing()
+endif()
+
 # Set default install directory to SpotObserver/install if not specified
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install" CACHE PATH "Default install directory" FORCE)
@@ -90,8 +94,26 @@ add_library(${PLUGIN_NAME} SHARED
     src/load_image_to_cuda.cu
 )
 
-# Unity Native-plugin API includes TODO: cleanup
-set(UnityPluginAPI_INCLUDE "C:/Program Files/Unity/Hub/Editor/6000.2.0f1/Editor/Data/PluginAPI")
+if(BUILD_TESTS)
+    target_compile_definitions(${PLUGIN_NAME} PRIVATE SOB_ENABLE_TEST_HOOKS)
+endif()
+
+# Unity Native-plugin API includes
+set(UnityPluginAPI_INCLUDE "" CACHE PATH "Path to Unity Editor/Data/PluginAPI")
+if(NOT UnityPluginAPI_INCLUDE)
+    file(GLOB UNITY_PLUGIN_API_CANDIDATES
+        "C:/Program Files/Unity/Hub/Editor/*/Editor/Data/PluginAPI"
+    )
+    if(UNITY_PLUGIN_API_CANDIDATES)
+        list(SORT UNITY_PLUGIN_API_CANDIDATES)
+        list(REVERSE UNITY_PLUGIN_API_CANDIDATES)
+        list(GET UNITY_PLUGIN_API_CANDIDATES 0 UnityPluginAPI_INCLUDE)
+    endif()
+endif()
+if(NOT UnityPluginAPI_INCLUDE OR NOT EXISTS "${UnityPluginAPI_INCLUDE}")
+    message(FATAL_ERROR "Unity PluginAPI directory not found. Set UnityPluginAPI_INCLUDE to Editor/Data/PluginAPI.")
+endif()
+message(STATUS "Using Unity PluginAPI include: ${UnityPluginAPI_INCLUDE}")
 
 # Include directories
 # TODO: Use target_include_directories instead of include_directories

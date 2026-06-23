@@ -7,6 +7,7 @@
 #include "utils.h"
 #include "dumper.h"
 #include "vision-pipeline.h"
+#include "unity-cuda-interop.h"
 
 #include <opencv2/opencv.hpp>
 
@@ -108,6 +109,10 @@ bool ReaderWriterCBuf::initialize(
     }
 
     // Allocate CUDA memory for circular buffer
+    if (!ensureCudaDeviceForD3D12Interop()) {
+        throw std::runtime_error("ReaderWriterCBuf::initialize: Failed to select D3D12 interop CUDA device");
+    }
+
     size_t total_size_rgb   = max_size_ * n_elems_per_rgb * n_images_per_response_ * sizeof(uint8_t);
     size_t size_depth_per_response = n_elems_per_depth * n_images_per_response_ * sizeof(float);
     size_t total_size_depth = max_size_ * size_depth_per_response;
@@ -359,6 +364,10 @@ SpotCamStream::SpotCamStream(
     , streaming_(false)
 {
     // Create one CUDA stream per SpotConnection and attach it to the buffer.
+    if (!ensureCudaDeviceForD3D12Interop()) {
+        throw std::runtime_error("SpotCamStream::SpotCamStream: Failed to select D3D12 interop CUDA device");
+    }
+
     checkCudaError(
         cudaStreamCreate(&cuda_stream_),
         "cudaStreamCreate for SpotConnection"
