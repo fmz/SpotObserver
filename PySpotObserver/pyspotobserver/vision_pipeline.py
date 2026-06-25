@@ -260,20 +260,26 @@ class VisionPipeline:
                 depth_dst[...] = resize_dst
 
 def _complete_sparse_using_nearest(sparse_depth: np.ndarray):
+    
     batch_size = sparse_depth.shape[0]
     completed = np.empty_like(sparse_depth)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    dilation_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
+    # iterating over other dimension
     for i in range(batch_size):
+
         frame = sparse_depth[i]
         original_shape = frame.shape
         depth_frame = frame.squeeze().astype(np.float32)
         mask = (depth_frame == 0)
 
         if mask.any():
-            dilated = cv2.dilate(depth_frame, kernel, iterations=3)
-            depth_frame[mask] = dilated[mask]  
+
+            # applying kernel w/ dilation then replacing original vals w/ dilated vals
+            dilated_version = cv2.dilate(depth_frame, dilation_kernel, iterations = 3)
+            depth_frame[mask] = dilated_version[mask]  
             completed[i] = depth_frame.reshape(original_shape)
+
         else:
             completed[i] = frame
 
