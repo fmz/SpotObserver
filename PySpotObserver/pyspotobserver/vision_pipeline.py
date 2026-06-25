@@ -145,7 +145,7 @@ class VisionPipeline:
             )[0]
 
         completed_depth = _complete_sparse_using_nearest(output)
-        return rgb_images, _depth_list_from_output(output, len(rgb_images))
+        return rgb_images, _depth_list_from_output(completed_depth, len(rgb_images))
 
     def _init_session(self) -> None:
         if self._session is not None:
