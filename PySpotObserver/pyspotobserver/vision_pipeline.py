@@ -145,6 +145,15 @@ class VisionPipeline:
             )[0]
 
         completed_depth = _complete_sparse_using_nearest(output)
+
+        raw_list = _depth_list_from_output(output, len(rgb_images))
+        completed_list = _depth_list_from_output(completed_depth, len(rgb_images))
+        for i, raw in enumerate(raw_list):
+            
+            print(f"dtype = {raw.dtype}")
+            print(f" nan count = {np.sum(np.isnan(raw))}")
+            print(f"percentiles: {np.nanpercentile(raw, [0, 1, 5, 25, 50, 75, 99, 100])}")
+
         return rgb_images, _depth_list_from_output(completed_depth, len(rgb_images))
 
     def _init_session(self) -> None:
@@ -271,7 +280,7 @@ def _complete_sparse_using_nearest(sparse_depth: np.ndarray):
         frame = sparse_depth[i]
         original_shape = frame.shape
         depth_frame = frame.squeeze().astype(np.float32)
-        mask = (depth_frame == 0)
+        mask = (depth_frame < 0.01)
 
         if mask.any():
 
