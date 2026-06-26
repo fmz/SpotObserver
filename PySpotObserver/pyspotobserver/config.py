@@ -5,7 +5,8 @@ Configuration dataclasses and enums for PySpotObserver.
 from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
+
 import yaml
 
 
@@ -73,11 +74,15 @@ class SpotConfig:
     request_timeout_seconds: float = 10.0
     """Timeout for image requests"""
 
-    vision_model_path: Optional[str] = None
+    vision_model_path: str | None = None
     """Optional ONNX model path for run_pipeline=True"""
 
-    vision_providers: Optional[List[str]] = None
+    vision_providers: list[str] | None = None
     """Optional ONNX Runtime provider preference order"""
+
+    ema_beta: float | None = None
+    """Optional decay factor beta in (0, 1) for EMA smoothing over output depth maps.
+    EMA_t = beta * EMA_{t-1} + (1 - beta) * x_t. Higher beta retains more history."""
 
     # Advanced settings
     sdk_name: str = "PySpotObserver"
@@ -89,7 +94,7 @@ class SpotConfig:
     connection_retry_delay_ms: int = 100
     """Delay between connection retry attempts (milliseconds)"""
 
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    extra_params: dict[str, Any] = field(default_factory=dict)
     """Additional user-defined parameters"""
 
     def __post_init__(self) -> None:
@@ -97,7 +102,7 @@ class SpotConfig:
             raise ValueError("request_timeout_seconds must be positive")
 
     @classmethod
-    def from_yaml(cls, yaml_path: Union[Path, str]) -> "SpotConfig":
+    def from_yaml(cls, yaml_path: Path | str) -> "SpotConfig":
         """
         Load configuration from a YAML file.
 
@@ -115,7 +120,7 @@ class SpotConfig:
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
 
-        with open(path, "r") as f:
+        with open(path) as f:
             data = yaml.safe_load(f)
 
         if data is None:
@@ -123,7 +128,7 @@ class SpotConfig:
 
         return cls(**data)
 
-    def to_yaml(self, yaml_path: Union[Path, str]) -> None:
+    def to_yaml(self, yaml_path: Path | str) -> None:
         """
         Save configuration to a YAML file.
 
