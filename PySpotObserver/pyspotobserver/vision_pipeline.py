@@ -11,6 +11,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 from .config import SpotConfig
 
@@ -268,31 +269,89 @@ class VisionPipeline:
             if resize_dst is not depth_dst:
                 depth_dst[...] = resize_dst
 
-def _complete_sparse_using_nearest(sparse_depth: np.ndarray):
-    
-    batch_size = sparse_depth.shape[0]
-    completed = np.empty_like(sparse_depth)
-    dilation_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+def _complete_sparse_using_nearest(
+    sparse_depth: np.ndarray,
+    valid_threshold: float = 0.1,
+):
+    """Fill empty/sparse depth pixels with their nearest valid depth value.
 
-    # iterating over other dimension
-    for i in range(batch_size):
+    Empty pixels (NaN or below ``valid_threshold``) are each assigned the depth
+    of the closest valid pixel. This is an exact Euclidean nearest-neighbor
+    (Voronoi) fill: ``scipy.ndimage.distance_transform_edt`` returns, for every
+    pixel, the index of its nearest valid seed, and we copy that seed's depth in.
+    Every hole is filled regardless of distance, so the output is fully dense.
+    """
+
+    completed = np.empty_like(sparse_depth)
+
+    for i in range(sparse_depth.shape[0]):
 
         frame = sparse_depth[i]
         original_shape = frame.shape
         depth_frame = frame.squeeze().astype(np.float32)
-        mask = (depth_frame < 0.01)
 
-        if mask.any():
-
-            # applying kernel w/ dilation then replacing original vals w/ dilated vals
-            dilated_version = cv2.dilate(depth_frame, dilation_kernel, iterations = 3)
-            depth_frame[mask] = dilated_version[mask]  
-            completed[i] = depth_frame.reshape(original_shape)
-
-        else:
+        mask = np.isnan(depth_frame) | (depth_frame < valid_threshold)
+        if not mask.any() or mask.all():
             completed[i] = frame
+            continue
+
+        # For every hole pixel, get the (row, col) index of its nearest valid
+        # pixel. distance_transform_edt computes distance to the nearest zero in
+        # `mask`, so valid pixels (mask == False -> 0) are the seeds; with
+        # return_indices it hands back that nearest-seed coordinate per pixel.
+        nearest_idx = distance_transform_edt(
+            mask, return_distances = False, return_indices = True
+        )
+
+        depth_frame[mask] = depth_frame[tuple(nearest_idx)][mask]
+        completed[i] = depth_frame.reshape(original_shape)
+
+    for i in range(completed.shape[0]):
+
+        frame = completed[i]
+        original_shape = frame.shape
+        depth_frame = frame.squeeze().astype(np.float32)
+
+        mask = np.isnan(depth_frame) | (depth_frame < valid_threshold)
+        if not mask.any() or mask.all():
+            completed[i] = frame
+            continue
+
+        # For every hole pixel, get the (row, col) index of its nearest valid
+        # pixel. distance_transform_edt computes distance to the nearest zero in
+        # `mask`, so valid pixels (mask == False -> 0) are the seeds; with
+        # return_indices it hands back that nearest-seed coordinate per pixel.
+
+        depth_frame[mask] = 10
+        completed[i] = depth_frame.reshape(original_shape)
 
     return completed
+
+    
+
+def colorize_depth(
+    depth: np.ndarray,
+    lo: Optional[float] = None,
+    hi: Optional[float] = None,
+    colormap: int = cv2.COLORMAP_JET,
+) -> np.ndarray:
+    """Colorize a depth frame for inspection with robust normalization.
+
+    Defaults to the 5th/95th percentiles so a near-field-dominated frame still
+    shows contrast instead of collapsing into one color. Pass explicit ``lo``/
+    ``hi`` (e.g. 0.1, 4.0) to keep a fixed scale across frames.
+    """
+
+    d = depth.squeeze().astype(np.float32)
+    finite = np.isfinite(d)
+    if lo is None or hi is None:
+        valid = d[finite]
+        lo = float(np.percentile(valid, 5)) if lo is None else lo
+        hi = float(np.percentile(valid, 95)) if hi is None else hi
+
+    norm = np.clip((d - lo) / (hi - lo + 1e-6), 0.0, 1.0)
+    norm[~finite] = 0.0
+    return cv2.applyColorMap((norm * 255).astype(np.uint8), colormap)
 
 _default_pipeline: Optional[VisionPipeline] = None
 _default_pipeline_key: Optional[Tuple[str, Tuple[str, ...], Tuple[int, int]]] = None
