@@ -53,7 +53,7 @@ def extract_stitch_params(response: image_pb2.ImageResponse) -> CamStitchParams:
     )
 
 
-def _complete_depth(dep: np.ndarray, valid_threshold: float = 0.01) -> np.ndarray:
+def _complete_depth(dep: np.ndarray, valid_threshold: float = 0) -> np.ndarray:
     
     mask = (dep <= valid_threshold) | ~np.isfinite(dep)
 
@@ -88,17 +88,19 @@ def _backproject(
 def _stitch_pointcloud(
     l_rgb: np.ndarray, l_dep: np.ndarray, l_params: CamStitchParams,
     r_rgb: np.ndarray, r_dep: np.ndarray, r_params: CamStitchParams,
-    out_rgb: np.ndarray, out_dep: np.ndarray,
+    out_rgb: np.ndarray, out_dep: np.ndarray, use_nearest: bool = True
 ) -> None:
     """Depth-based stitcher: back-projects pixels to body-frame point cloud, then re-projects."""
     out_h, out_w = out_rgb.shape[:2]
     out_rgb[:] = 0.0
     out_dep[:] = 0.0
 
-    # pts_l, cols_l = _backproject(l_rgb, l_dep, l_params)
-    # pts_r, cols_r = _backproject(r_rgb, r_dep, r_params)
-    pts_l, cols_l = _backproject(l_rgb, _complete_depth(l_dep), l_params)
-    pts_r, cols_r = _backproject(r_rgb, _complete_depth(r_dep), r_params)
+    if use_nearest:
+        l_dep = _complete_depth(l_dep)
+        r_dep = _complete_depth(r_dep)
+
+    pts_l, cols_l = _backproject(l_rgb, l_dep, l_params)
+    pts_r, cols_r = _backproject(r_rgb, r_dep, r_params)
 
     pts = np.vstack((pts_l, pts_r))
     cols = np.vstack((cols_l, cols_r))
