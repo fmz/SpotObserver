@@ -53,18 +53,18 @@ def extract_stitch_params(response: image_pb2.ImageResponse) -> CamStitchParams:
     )
 
 
-def _complete_depth(dep: np.ndarray, valid_threshold: float = 0) -> np.ndarray:
-    
+def _complete_depth(dep: np.ndarray, valid_threshold: float = 0, max_dist: float = None) -> np.ndarray:
     mask = (dep <= valid_threshold) | ~np.isfinite(dep)
 
     if not mask.any() or mask.all():
         return dep
 
-    nearest_idx = distance_transform_edt(
-        mask, return_distances = False, return_indices = True)
+    distances, nearest_idx = distance_transform_edt(
+        mask, return_distances=True, return_indices=True)
 
+    fill = mask if max_dist is None else mask & (distances <= max_dist)
     out = dep.copy()
-    out[mask] = dep[tuple(nearest_idx)][mask]
+    out[fill] = dep[tuple(nearest_idx)][fill]
 
     return out
 
@@ -126,12 +126,8 @@ def _stitch_pointcloud(
     out_rgb[v[order], u[order]] = cols[order]
     out_dep[v[order], u[order]] = fwd[order]
 
-    # Fill single-pixel gaps via dilation
-    # kernel = np.ones((3, 3), np.uint8)
-    # rgb_u8 = (np.clip(out_rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
-    # out_rgb[:] = cv2.dilate(rgb_u8, kernel, iterations=1).astype(np.float32) / 255.0
-    # dep_dilated = cv2.dilate(out_dep, kernel, iterations=1)
-    # out_dep[:] = np.where(out_dep > 0, out_dep, dep_dilated)
+    # Fill canvas holes left by the discrete point-cloud scatter
+    out_dep[:] = _complete_depth(out_dep, max_dist = 10)
 
 
 def _stitch_cylindrical(
