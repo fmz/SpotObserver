@@ -56,17 +56,67 @@ def extract_stitch_params(response: image_pb2.ImageResponse) -> CamStitchParams:
 def _complete_depth(dep: np.ndarray, valid_threshold: float = 0, max_dist: float = None) -> np.ndarray:
     mask = (dep <= valid_threshold) | ~np.isfinite(dep)
 
+    total = dep.size
+    n_holes = int(mask.sum())
+    print(f"[_complete_depth] shape={dep.shape} total={total} "
+          f"holes={n_holes} ({100.0 * n_holes / total:.1f}%) "
+          f"valid_threshold={valid_threshold} max_dist={max_dist}")
+
     if not mask.any() or mask.all():
+        print(f"[_complete_depth] early return: mask.any()={mask.any()} "
+              f"mask.all()={mask.all()} -> NOT filling any holes")
         return dep
 
     distances, nearest_idx = distance_transform_edt(
         mask, return_distances=True, return_indices=True)
 
     fill = mask if max_dist is None else mask & (distances <= max_dist)
+    n_fill = int(fill.sum())
+    n_skipped = n_holes - n_fill
+    if n_skipped:
+        print(f"[_complete_depth] {n_skipped} holes beyond max_dist={max_dist} "
+              f"(max hole distance={distances[mask].max():.1f}px) left UNFILLED")
+
     out = dep.copy()
     out[fill] = dep[tuple(nearest_idx)][fill]
 
+    # Verify no holes remain after completion
+    remaining_mask = (out <= valid_threshold) | ~np.isfinite(out)
+    n_remaining = int(remaining_mask.sum())
+    print(f"[_complete_depth] filled={n_fill} remaining_holes={n_remaining} "
+          f"all_finite={np.isfinite(out).all()} all_positive={(out > valid_threshold).all()}")
+    if n_remaining:
+        # A remaining hole means the nearest source pixel was itself invalid,
+        # or the hole was skipped by max_dist.
+        print(f"[_complete_depth] WARNING: {n_remaining} holes NOT filled "
+              f"(nearest-source-invalid or max_dist skip)")
+
     return out
+
+
+def _densify_output(out_rgb: np.ndarray, out_dep: np.ndarray, max_dist: float = 2.0) -> None:
+    """Close sparse forward-splat gaps in the reprojected canvas, in place.
+
+    Reprojection scatters ~2x(HxW) points into a much larger canvas, so painted
+    pixels are separated by 1-2px gaps. Fill each empty pixel from its nearest
+    painted neighbour (both depth and colour, using the same indices so they stay
+    consistent), bounded by max_dist so genuinely empty background stays black.
+    """
+    empty = out_dep <= 0
+    if not empty.any() or empty.all():
+        return
+
+    distances, (ii, jj) = distance_transform_edt(
+        empty, return_distances=True, return_indices=True)
+    fill = empty & (distances <= max_dist)
+
+    out_dep[fill] = out_dep[ii[fill], jj[fill]]
+    out_rgb[fill] = out_rgb[ii[fill], jj[fill]]
+
+    n_before = int(empty.sum())
+    n_after = int((out_dep <= 0).sum())
+    print(f"[_densify_output] max_dist={max_dist} holes {n_before} -> {n_after} "
+          f"(filled {n_before - n_after})")
 
 
 def _backproject(
@@ -96,7 +146,9 @@ def _stitch_pointcloud(
     out_dep[:] = 0.0
 
     if use_nearest:
+        print("[_stitch_pointcloud] completing LEFT depth")
         l_dep = _complete_depth(l_dep)
+        print("[_stitch_pointcloud] completing RIGHT depth")
         r_dep = _complete_depth(r_dep)
 
     pts_l, cols_l = _backproject(l_rgb, l_dep, l_params)
@@ -126,8 +178,17 @@ def _stitch_pointcloud(
     out_rgb[v[order], u[order]] = cols[order]
     out_dep[v[order], u[order]] = fwd[order]
 
-    # Fill canvas holes left by the discrete point-cloud scatter
-    out_dep[:] = _complete_depth(out_dep, max_dist = 10)
+    # Even with fully-completed input depth, the output canvas can have holes:
+    # reprojection scatters sparse points, so neighbouring output pixels may be
+    # skipped entirely. This is distinct from input-depth holes.
+    out_total = out_dep.size
+    out_holes = int((out_dep <= 0).sum())
+    print(f"[_stitch_pointcloud] painted {len(order)} pts -> out_dep "
+          f"holes={out_holes}/{out_total} ({100.0 * out_holes / out_total:.1f}%) "
+          f"unique_pixels_painted={len(np.unique(v * out_w + u))}")
+
+    # if use_nearest:
+    #     _densify_output(out_rgb, out_dep)
 
 
 def _stitch_cylindrical(
