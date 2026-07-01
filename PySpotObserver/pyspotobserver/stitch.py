@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from typing import Tuple
+from scipy.ndimage import distance_transform_edt
 
 from bosdyn.api import image_pb2
 from bosdyn.client.frame_helpers import BODY_FRAME_NAME, get_a_tform_b
@@ -52,6 +53,22 @@ def extract_stitch_params(response: image_pb2.ImageResponse) -> CamStitchParams:
     )
 
 
+def _complete_depth(dep: np.ndarray, valid_threshold: float = 0.01) -> np.ndarray:
+    
+    mask = (dep <= valid_threshold) | ~np.isfinite(dep)
+
+    if not mask.any() or mask.all():
+        return dep
+
+    nearest_idx = distance_transform_edt(
+        mask, return_distances = False, return_indices = True)
+
+    out = dep.copy()
+    out[mask] = dep[tuple(nearest_idx)][mask]
+
+    return out
+
+
 def _backproject(
     rgb: np.ndarray, dep: np.ndarray, params: CamStitchParams
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -78,8 +95,10 @@ def _stitch_pointcloud(
     out_rgb[:] = 0.0
     out_dep[:] = 0.0
 
-    pts_l, cols_l = _backproject(l_rgb, l_dep, l_params)
-    pts_r, cols_r = _backproject(r_rgb, r_dep, r_params)
+    # pts_l, cols_l = _backproject(l_rgb, l_dep, l_params)
+    # pts_r, cols_r = _backproject(r_rgb, r_dep, r_params)
+    pts_l, cols_l = _backproject(l_rgb, _complete_depth(l_dep), l_params)
+    pts_r, cols_r = _backproject(r_rgb, _complete_depth(r_dep), r_params)
 
     pts = np.vstack((pts_l, pts_r))
     cols = np.vstack((cols_l, cols_r))
