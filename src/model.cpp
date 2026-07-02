@@ -412,11 +412,11 @@ ONNXModel::ONNXModel(const std::string& model_path, const std::string& device_ty
 
         LogMessage("ONNX model loaded successfully from: " + model_path);
 
-        // Memory overhead summary (printed regardless of logging state). The on-disk
+        // Memory overhead summary (gated by LogLevel::PERF). The on-disk
         // size of the serialized weights is a close proxy for the model's GPU footprint.
-        std::cout << std::format("[mem] ONNXModel weights ({}): {:.2f} MB\n",
-                                 model_path,
-                                 fs::file_size(model_path) / (1024.0 * 1024.0));
+        LogPerf("[mem] ONNXModel weights ({}): {:.2f} MB",
+                model_path,
+                fs::file_size(model_path) / (1024.0 * 1024.0));
 
         m_allocator = std::make_unique<Ort::Allocator>(*m_session, m_memory_info);
 
