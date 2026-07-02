@@ -11,7 +11,6 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
-from scipy.ndimage import distance_transform_edt
 
 from .config import SpotConfig
 
@@ -145,17 +144,7 @@ class VisionPipeline:
                 },
             )[0]
 
-        completed_depth = _complete_sparse_using_nearest(output)
-
-        raw_list = _depth_list_from_output(output, len(rgb_images))
-        completed_list = _depth_list_from_output(completed_depth, len(rgb_images))
-        for i, raw in enumerate(raw_list):
-            
-            print(f"dtype = {raw.dtype}")
-            print(f" nan count = {np.sum(np.isnan(raw))}")
-            print(f"percentiles: {np.nanpercentile(raw, [0, 1, 5, 25, 50, 75, 99, 100])}")
-
-        return rgb_images, _depth_list_from_output(completed_depth, len(rgb_images))
+        return rgb_images, _depth_list_from_output(output, len(rgb_images))
 
     def _init_session(self) -> None:
         if self._session is not None:
@@ -268,66 +257,6 @@ class VisionPipeline:
             )
             if resize_dst is not depth_dst:
                 depth_dst[...] = resize_dst
-
-def _complete_sparse_using_nearest(
-    sparse_depth: np.ndarray,
-    valid_threshold: float = 0.1,
-):
-    """Fill empty/sparse depth pixels with their nearest valid depth value.
-
-    Empty pixels (NaN or below ``valid_threshold``) are each assigned the depth
-    of the closest valid pixel. This is an exact Euclidean nearest-neighbor
-    (Voronoi) fill: ``scipy.ndimage.distance_transform_edt`` returns, for every
-    pixel, the index of its nearest valid seed, and we copy that seed's depth in.
-    Every hole is filled regardless of distance, so the output is fully dense.
-    """
-
-    completed = np.empty_like(sparse_depth)
-
-    for i in range(sparse_depth.shape[0]):
-
-        frame = sparse_depth[i]
-        original_shape = frame.shape
-        depth_frame = frame.squeeze().astype(np.float32)
-
-        mask = np.isnan(depth_frame) | (depth_frame < valid_threshold)
-        if not mask.any() or mask.all():
-            completed[i] = frame
-            continue
-
-        # For every hole pixel, get the (row, col) index of its nearest valid
-        # pixel. distance_transform_edt computes distance to the nearest zero in
-        # `mask`, so valid pixels (mask == False -> 0) are the seeds; with
-        # return_indices it hands back that nearest-seed coordinate per pixel.
-        nearest_idx = distance_transform_edt(
-            mask, return_distances = False, return_indices = True
-        )
-
-        depth_frame[mask] = depth_frame[tuple(nearest_idx)][mask]
-        completed[i] = depth_frame.reshape(original_shape)
-
-    for i in range(completed.shape[0]):
-
-        frame = completed[i]
-        original_shape = frame.shape
-        depth_frame = frame.squeeze().astype(np.float32)
-
-        mask = np.isnan(depth_frame) | (depth_frame < valid_threshold)
-        if not mask.any() or mask.all():
-            completed[i] = frame
-            continue
-
-        # For every hole pixel, get the (row, col) index of its nearest valid
-        # pixel. distance_transform_edt computes distance to the nearest zero in
-        # `mask`, so valid pixels (mask == False -> 0) are the seeds; with
-        # return_indices it hands back that nearest-seed coordinate per pixel.
-
-        depth_frame[mask] = 10
-        completed[i] = depth_frame.reshape(original_shape)
-
-    return completed
-
-    
 
 def colorize_depth(
     depth: np.ndarray,
