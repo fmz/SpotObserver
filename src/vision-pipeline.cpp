@@ -129,7 +129,7 @@ bool VisionPipeline::allocateCudaBuffers() {
         output_size
     );
 
-    // Memory overhead summary (printed regardless of logging state).
+    // Memory overhead summary (gated by LogLevel::PERF).
     size_t total_bytes = rgb_buffer_size
                        + rgb_image_size_batch * sizeof(float)
                        + 3 * depth_size        // depth data, preprocessed, cached
