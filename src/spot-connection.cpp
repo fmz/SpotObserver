@@ -124,6 +124,15 @@ bool ReaderWriterCBuf::initialize(
     LogMessage("Min depth address = {:#x}, Max depth address = {:#x}",
                size_t(depth_data_), size_t(depth_data_) + total_size_depth);
 
+    // Memory overhead summary (gated by LogLevel::PERF).
+    size_t total_bytes = total_size_rgb + total_size_depth + size_depth_per_response;
+    LogPerf(
+        "[mem] ReaderWriterCBuf: {:.2f} MB total (RGB ring {:.2f} MB, depth ring {:.2f} MB, cached depth {:.2f} MB)",
+        total_bytes / (1024.0 * 1024.0),
+        total_size_rgb / (1024.0 * 1024.0),
+        total_size_depth / (1024.0 * 1024.0),
+        size_depth_per_response / (1024.0 * 1024.0));
+
     write_idx_ = 0;
     read_idx_ = 0;
     new_data_ = false;
@@ -422,8 +431,6 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
 
     while (!stop_token.stop_requested() && !quit_requested_.load()) {
         try {
-            auto start = std::chrono::high_resolution_clock::now();
-
             // Request images from all cameras
             bosdyn::client::GetImageResultType response = image_client_->GetImage(current_request_);
             if (!response.status) {
@@ -431,15 +438,13 @@ void SpotCamStream::_spotCamReaderThread(std::stop_token stop_token) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
+            accumTimingInterval(timing_info_, "readerThread", {"thread", int32_t(current_cam_mask_)});
 
             // Update statistics atomically
             num_samples_.fetch_add(1);
 
             // Process and queue images
             image_lifo_.push(response.response.image_responses());
-            auto end = std::chrono::high_resolution_clock::now();
-            LogMessage("Total time for GetImage and push: {:.4f} ms",
-                       std::chrono::duration<double, std::milli>(end - start).count());
         } catch (const std::exception& e) {
             LogMessage("Error in producer thread: {}", e.what());
             std::this_thread::sleep_for(std::chrono::seconds(1));

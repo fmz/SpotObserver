@@ -57,10 +57,12 @@ private:
     int32_t dump_id = 0;
     int32_t thread_num;
 
+    TimingInfo timing_info_;
+
     void pipelineWorker(std::stop_token stop_token);
     bool allocateCudaBuffers();
     void deallocateCudaBuffers();
-    
+
 public:
     VisionPipeline(
         MLModel& model,

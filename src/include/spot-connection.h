@@ -109,6 +109,8 @@ class SpotCamStream {
         const std::vector<std::string>& depth_sources
     );
 
+    TimingInfo timing_info_;
+
     // Producer thread that requests images from the robot
     void _spotCamReaderThread(std::stop_token stop_token);
     // Launches the streaming thread

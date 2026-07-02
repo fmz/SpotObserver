@@ -66,12 +66,13 @@ int main(int argc, char* argv[]) {
     std::string password  = argv[4];
 
     //SOb_ToggleDebugDumps("./spot_dump");
+    SOb_ToggleLogging(false);
 
     int32_t spot_ids[2] = {-1, -1};
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND };
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT};//, HAND };
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
