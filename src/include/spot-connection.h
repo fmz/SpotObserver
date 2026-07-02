@@ -59,8 +59,8 @@ public:
     bool initialize(
         size_t n_bytes_per_rgb,
         size_t n_bytes_per_depth,
-        const std::vector<SpotCamera>& cameras,
-        const std::vector<std::string>& camera_dump_subdirs
+        std::vector<SpotCamera> cameras,
+        std::vector<std::string> camera_dump_subdirs
     );
 
     /**
@@ -117,8 +117,6 @@ class SpotCamStream {
         const std::vector<std::string>& rgb_sources,
         const std::vector<std::string>& depth_sources
     );
-
-    TimingInfo timing_info_;
 
     // Producer thread that requests images from the robot
     void _spotCamReaderThread(std::stop_token stop_token);

@@ -80,56 +80,6 @@ def extract_btw_params(response: image_pb2.ImageResponse) -> np.ndarray:
     return b2w.copy()
 
 
-def extract_btw_params(response: image_pb2.ImageResponse) -> np.ndarray:
-    """
-    Extract the body pose in the vision/world frame for this image capture.
-
-    This changes frame-to-frame. By contrast, body_T_camera is static for a
-    mounted body camera and can usually be cached once.
-
-    Spot docs describe the vision frame as:
-        "An inertial frame that estimates the fixed location in the world
-        (relative to where the robot is booted up), and is calculated using
-        visual analysis of the world and the robot's odometry."
-    """
-    snapshot = response.shot.transforms_snapshot
-    vision_T_body = get_a_tform_b(snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
-
-    if vision_T_body is None:
-        raise ValueError(
-            "No transform from body to vision/world in image transform snapshot. "
-            "If this occurs frequently, consider using the previous frame instead of throwing exception."
-        )
-    b2w = vision_T_body.to_matrix()
-
-    return b2w.copy()
-
-
-def extract_btw_params(response: image_pb2.ImageResponse) -> np.ndarray:
-    """
-    Extract the body pose in the vision/world frame for this image capture.
-
-    This changes frame-to-frame. By contrast, body_T_camera is static for a
-    mounted body camera and can usually be cached once.
-
-    Spot docs describe the vision frame as:
-        "An inertial frame that estimates the fixed location in the world
-        (relative to where the robot is booted up), and is calculated using
-        visual analysis of the world and the robot's odometry."
-    """
-    snapshot = response.shot.transforms_snapshot
-    vision_T_body = get_a_tform_b(snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
-
-    if vision_T_body is None:
-        raise ValueError(
-            "No transform from body to vision/world in image transform snapshot. "
-            "If this occurs frequently, consider using the previous frame instead of throwing exception."
-        )
-    b2w = vision_T_body.to_matrix()
-
-    return b2w.copy()
-
-
 def extract_ctb_params(response: image_pb2.ImageResponse) -> np.ndarray:
     """Extract the camera pose in the body frame for this image capture."""
     snapshot = response.shot.transforms_snapshot

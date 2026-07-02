@@ -199,7 +199,8 @@ void DumpDepthImageFromCuda(
     int32_t width,
     int32_t height,
     const std::string& subdir,
-    int32_t dump_id
+    int32_t dump_id,
+    bool png_mode
 ) {
     if (!m_dumps_enabled) {
         return;
@@ -218,13 +219,48 @@ void DumpDepthImageFromCuda(
         return;
     }
 
-    // Generate filename
+    // Ensure the output subdir exists (shared by both modes).
     std::string subdir_path = m_dump_path + "/" + subdir;
     if (!create_directory_if_not_exists(subdir_path)) {
         LogMessage("Failed to create directory: {}", subdir_path);
         return;
     }
 
+    if (png_mode) {
+        // PNG mode: min/max-normalize to 8-bit grayscale for visualization.
+        // This is lossy and must not be used when the depth needs to be reloaded.
+        float min_val = h_depth[0];
+        float max_val = h_depth[0];
+        for (size_t i = 1; i < num_pixels; ++i) {
+            if (h_depth[i] < min_val) min_val = h_depth[i];
+            if (h_depth[i] > max_val) max_val = h_depth[i];
+        }
+
+        // Allocate host memory for 8-bit grayscale image
+        std::vector<uint8_t> h_depth_u8(num_pixels);
+        const float range = max_val - min_val;
+
+        // Normalize and conveert to uint8
+        if (range > 0.0f) {
+            for (size_t i = 0; i < num_pixels; ++i) {
+                h_depth_u8[i] = static_cast<uint8_t>(((h_depth[i] - min_val) / range) * 255.0f);
+            }
+        } else {
+            // If range is zero, the image is constant. Set to mid-gray.
+            std::fill(h_depth_u8.begin(), h_depth_u8.end(), 128);
+        }
+
+        std::string file_path = get_file_path(m_dump_path, subdir, "", dump_id, ".png");
+        const int channels = 1; // Grayscale
+        const int stride_in_bytes = width * channels;
+        if (!stbi_write_png(file_path.c_str(), width, height, channels, h_depth_u8.data(), stride_in_bytes)) {
+            LogMessage("Failed to write depth image to: {}", file_path);
+        }
+        return;
+    }
+
+    // Raw mode (default): write the full-precision float32 buffer, prefixed with
+    // the element count, so it can be reloaded losslessly.
     std::string file_path = get_file_path(
         m_dump_path,
         subdir,

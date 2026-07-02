@@ -166,14 +166,14 @@ ReaderWriterCBuf::~ReaderWriterCBuf() {
 bool ReaderWriterCBuf::initialize(
     size_t n_elems_per_rgb,
     size_t n_elems_per_depth,
-    const std::vector<SpotCamera>& cameras,
-    const std::vector<std::string>& camera_dump_subdirs
+    std::vector<SpotCamera> cameras,
+    std::vector<std::string> camera_dump_subdirs
 ) {
     n_elems_per_rgb_ = n_elems_per_rgb;
     n_elems_per_depth_ = n_elems_per_depth;
-    cameras_ = cameras;
-    camera_dump_subdirs_ = camera_dump_subdirs;
     n_images_per_response_ = cameras.size();
+    cameras_ = std::move(cameras);
+    camera_dump_subdirs_ = std::move(camera_dump_subdirs);
 
     if (camera_dump_subdirs_.size() != cameras_.size()) {
         LogMessage("ReaderWriterCBuf::initialize: Expected {} camera dump subdirs, got {}",
@@ -781,7 +781,7 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                 rgb_ref_size,
                 depth_ref_size,
                 camera_order_,
-                camera_dump_subdirs
+                std::move(camera_dump_subdirs)
             )) {
                 LogMessage("SpotCamStream::streamCameras: Failed to initialize image buffer");
                 return false;

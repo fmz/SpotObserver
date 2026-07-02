@@ -58,6 +58,9 @@ class ImageFrame:
         timestamp: Time when frame was captured (monotonic clock)
         acquisition_time: Robot's acquisition time from image response
         body_to_world: Body poses in the vision/world frame aligned with _sdk_camera_order
+        frame_id: Monotonic frame index assigned by the producer thread. Used to
+            key dumped files so producer-side (RGB/depth/pose) and consumer-side
+            (pipeline output) dumps for the same capture share a filename.
     """
 
     rgb_images: list[np.ndarray]
@@ -66,6 +69,7 @@ class ImageFrame:
     timestamp: float
     acquisition_time: float | None = None
     body_to_world: list[np.ndarray] | None = None
+    frame_id: int = 0
 
 
 class SpotCamStreamError(Exception):
@@ -293,8 +297,16 @@ class SpotCamStream:
         b2w: list[np.ndarray] | None = None,
         c2b_responses: list[image_pb2.ImageResponse] | None = None,
         depth_dir_name: str = "output_depth",
+        frame_id: int | None = None,
     ) -> None:
-        """Dump streaming data as individual files."""
+        """Dump streaming data as individual files.
+
+        Args:
+            frame_id: Frame index used to name the output files. When None, falls
+                back to the current producer frame count. Callers on the producer
+                thread pass the frame's own id so files stay aligned across the
+                producer (RGB/depth/pose) and consumer (pipeline output) dumps.
+        """
         # Keep this guard here so future dump call sites cannot bypass config.
         if not self.dumps_enabled:
             return
@@ -305,14 +317,14 @@ class SpotCamStream:
             )
             return
 
-        frame_id = str(self._frame_count)
+        frame_id_str = str(self._frame_count if frame_id is None else frame_id)
 
         if rgb is not None:
             for camera, image in zip(self._camera_order, rgb):
                 camera_name = (camera.name or f"camera_{camera.value}").lower()
                 rgb_dir = os.path.join(self.save_dir, camera_name, "rgb")
                 os.makedirs(rgb_dir, exist_ok=True)
-                file_name = f"{frame_id}.png"
+                file_name = f"{frame_id_str}.png"
                 image_u8 = np.clip(image, 0.0, 1.0)
                 image_u8 = (image_u8 * 255.0).astype(np.uint8)
                 image_bgr = cv2.cvtColor(image_u8, cv2.COLOR_RGB2BGR)
@@ -325,7 +337,7 @@ class SpotCamStream:
                 camera_name = (camera.name or f"camera_{camera.value}").lower()
                 depth_dir = os.path.join(self.save_dir, camera_name, depth_dir_name)
                 os.makedirs(depth_dir, exist_ok=True)
-                file_name = frame_id
+                file_name = frame_id_str
                 depth_f32 = np.ascontiguousarray(image, dtype=np.float32)
                 with open(os.path.join(depth_dir, file_name), "wb") as f:
                     f.write(struct.pack("<I", depth_f32.size))
@@ -338,7 +350,7 @@ class SpotCamStream:
                 os.makedirs(transform_dir, exist_ok=True)
                 torch.save(
                     torch.from_numpy(np.ascontiguousarray(b2w_camera, dtype=np.float32)),
-                    os.path.join(transform_dir, f"world_T_body_{frame_id}.pt"),
+                    os.path.join(transform_dir, f"world_T_body_{frame_id_str}.pt"),
                 )
 
         if c2b_responses is not None:
@@ -418,15 +430,15 @@ class SpotCamStream:
 
                 if run_pipeline:
                     rgb, depth = self._run_vision_pipeline(rgb, depth)
-
-                if dump and self.dumps_enabled:
-                    depth_dir_name = "output_depth" if run_pipeline else "input-depth"
-                    self._dump_data(
-                        rgb=rgb,
-                        depth=depth,
-                        b2w=b2w,
-                        depth_dir_name=depth_dir_name,
-                    )
+                    # Raw RGB/depth/pose are dumped by the producer thread every
+                    # frame; here we only persist the pipeline output, keyed to the
+                    # same frame id so it lines up with the producer's dumps.
+                    if dump and self.dumps_enabled:
+                        self._dump_data(
+                            depth=depth,
+                            depth_dir_name="output_depth",
+                            frame_id=frame.frame_id,
+                        )
 
                 # Should be consistent, but will log all to be sure
                 b2w_shapes = set([e.shape for e in b2w])
@@ -463,15 +475,15 @@ class SpotCamStream:
 
             if run_pipeline:
                 rgb, depth = self._run_vision_pipeline(rgb, depth)
-
-            if dump and self.dumps_enabled:
-                depth_dir_name = "output_depth" if run_pipeline else "input-depth"
-                self._dump_data(
-                    rgb=rgb,
-                    depth=depth,
-                    b2w=b2w,
-                    depth_dir_name=depth_dir_name,
-                )
+                # Raw RGB/depth/pose are dumped by the producer thread every
+                # frame; here we only persist the pipeline output, keyed to the
+                # same frame id so it lines up with the producer's dumps.
+                if dump and self.dumps_enabled:
+                    self._dump_data(
+                        depth=depth,
+                        depth_dir_name="output_depth",
+                        frame_id=frame.frame_id,
+                    )
 
             # Should be consistent, but will log all to be sure
             b2w_shapes = set([e.shape for e in b2w])
@@ -509,25 +521,12 @@ class SpotCamStream:
         """
         loop = asyncio.get_event_loop()
 
-        if not run_pipeline:
-            return await loop.run_in_executor(None, self.get_current_images, timeout, copy, False)
-
-        # Run full pipeline in executor
-        def _get_and_process() -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
-            rgb, depth, b2w = self.get_current_images(timeout, copy, False, False)
-            rgb, depth = self._run_vision_pipeline(rgb, depth)
-
-            if self.dumps_enabled:
-                self._dump_data(
-                    rgb=rgb,
-                    depth=depth,
-                    b2w=b2w,
-                    depth_dir_name="output_depth",
-                )
-
-            return rgb, depth, b2w
-
-        return await loop.run_in_executor(None, _get_and_process)
+        # get_current_images already runs the vision pipeline and the pipeline-output
+        # dump when requested; running the whole call in the executor keeps the event
+        # loop unblocked without duplicating that logic here.
+        return await loop.run_in_executor(
+            None, self.get_current_images, timeout, copy, run_pipeline
+        )
 
     def _run_vision_pipeline(
         self,
@@ -624,7 +623,24 @@ class SpotCamStream:
                     self._fill_frame_from_responses(image_responses, frame)
                 if self._stitch_enabled:
                     self._apply_stitch(frame)
+
+                frame.frame_id = self._frame_count
                 self._enqueue_frame(frame)
+
+                # Dump raw capture data (RGB, input depth, body-to-world pose) from
+                # the producer thread so every streamed frame is saved as soon as it
+                # arrives, instead of only when a consumer happens to call
+                # get_current_images(). This mirrors the C++ producer
+                # (ReaderWriterCBuf::push).
+                if self.dumps_enabled:
+                    self._dump_data(
+                        rgb=frame.rgb_images,
+                        depth=frame.depth_images,
+                        b2w=frame.body_to_world,
+                        depth_dir_name="input-depth",
+                        frame_id=frame.frame_id,
+                    )
+
                 self._frame_count += 1
 
                 if self._frame_count % 100 == 0:
@@ -783,6 +799,7 @@ class SpotCamStream:
             timestamp=frame.timestamp,
             acquisition_time=frame.acquisition_time,
             body_to_world=body_to_world,
+            frame_id=frame.frame_id,
         )
 
     def _fill_frame_from_responses(
