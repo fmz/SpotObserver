@@ -10,10 +10,6 @@
 #include <memory>
 #include <thread>
 #include <atomic>
-#include <mutex>
-#include <condition_variable>
-#include <queue>
-#include <vector>
 #include <stop_token>
 #include <cuda_runtime.h>
 

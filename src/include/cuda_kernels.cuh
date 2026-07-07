@@ -8,6 +8,29 @@ namespace SOb {
 
 cudaError_t setOutputToOnes_launcher(float* d_input, float* d_output, int size);
 
+// Parameters for reprojecting a raw depth image into an RGB camera's image plane
+// (client-side equivalent of Spot's *_depth_in_visual_frame sources).
+// Folded projection, built on the CPU from intrinsics + extrinsics:
+//   p = z * M * [u, v, 1]^T + t,  with M = K_rgb * R * K_depth^-1 and t = K_rgb * translation
+// where (u, v, z) is a depth pixel and (p.x/p.z, p.y/p.z, p.z) is its RGB-frame pixel + depth.
+struct DepthRegistrationParams {
+    float M[9]; // Row-major 3x3
+    float t[3];
+    int src_width{0};
+    int src_height{0};
+    int dst_width{0};
+    int dst_height{0};
+};
+
+// Reprojects d_depth_in (src-sized, meters) into d_depth_out (dst-sized, meters,
+// fully overwritten; pixels with no depth sample are 0).
+cudaError_t register_depth_to_rgb(
+    const float* d_depth_in,
+    float* d_depth_out,
+    const DepthRegistrationParams& params,
+    cudaStream_t stream = 0
+);
+
 // size_t depth_preprocessor_get_workspace_size(int width, int height);
 // cudaError_t preprocess_depth_image(
 //     float* depth_image,

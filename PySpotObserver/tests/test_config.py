@@ -27,19 +27,10 @@ class TestCameraType:
         assert CameraType.get_source_name(CameraType.HAND) == "hand_color_image"
 
     def test_get_source_name_depth(self):
-        """Test depth camera source name generation."""
-        assert (
-            CameraType.get_source_name(CameraType.FRONTLEFT, depth=True)
-            == "frontleft_depth_in_visual_frame"
-        )
-        assert (
-            CameraType.get_source_name(CameraType.RIGHT, depth=True)
-            == "right_depth_in_visual_frame"
-        )
-        assert (
-            CameraType.get_source_name(CameraType.HAND, depth=True)
-            == "hand_depth_in_hand_color_frame"
-        )
+        """Test depth camera source name generation (raw depth-sensor sources)."""
+        assert CameraType.get_source_name(CameraType.FRONTLEFT, depth=True) == "frontleft_depth"
+        assert CameraType.get_source_name(CameraType.RIGHT, depth=True) == "right_depth"
+        assert CameraType.get_source_name(CameraType.HAND, depth=True) == "hand_depth"
 
 
 class TestSpotConfig:

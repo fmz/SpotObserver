@@ -2,6 +2,7 @@
 #include "cuda_kernels.cuh"
 
 #include <vector>
+#include <cfloat>
 #include <cmath>
 #include <limits>
 #include <torch/torch.h>
@@ -921,6 +922,90 @@ cudaError_t preprocess_depth_image2(
     }
 
     return err;
+}
+
+// ---- Depth-to-RGB registration ---------------------------------------------
+// Reprojects a raw depth image (depth sensor frame) into the RGB camera's image
+// plane, producing the same layout as Spot's *_depth_in_visual_frame sources.
+
+__global__ void fill_float_kernel(float* __restrict__ buf, int n, float value) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) buf[i] = value;
+}
+
+__global__ void register_depth_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    DepthRegistrationParams p
+) {
+    int u = blockIdx.x * blockDim.x + threadIdx.x;
+    int v = blockIdx.y * blockDim.y + threadIdx.y;
+    if (u >= p.src_width || v >= p.src_height) return;
+
+    float z = src[v * p.src_width + u];
+    if (z <= 0.0f) return; // invalid depth sample
+
+    float uf = float(u), vf = float(v);
+    float px = z * (p.M[0] * uf + p.M[1] * vf + p.M[2]) + p.t[0];
+    float py = z * (p.M[3] * uf + p.M[4] * vf + p.M[5]) + p.t[1];
+    float pz = z * (p.M[6] * uf + p.M[7] * vf + p.M[8]) + p.t[2];
+    if (pz <= 0.0f) return; // behind the RGB camera
+
+    float inv_z = 1.0f / pz;
+    int u0 = __float2int_rd(px * inv_z);
+    int v0 = __float2int_rd(py * inv_z);
+
+    // 2x2 splat: the depth image is lower resolution than the RGB target, so
+    // covering the four nearest pixels reduces holes without a dilation pass.
+    #pragma unroll
+    for (int dv = 0; dv <= 1; ++dv) {
+        #pragma unroll
+        for (int du = 0; du <= 1; ++du) {
+            int x = u0 + du;
+            int y = v0 + dv;
+            if (x < 0 || y < 0 || x >= p.dst_width || y >= p.dst_height) continue;
+            // atomicMin on the raw bits keeps the nearest surface when several
+            // depth pixels land on one RGB pixel; ordering is correct because
+            // positive IEEE-754 floats compare like unsigned ints.
+            atomicMin(reinterpret_cast<unsigned int*>(&dst[y * p.dst_width + x]),
+                      __float_as_uint(pz));
+        }
+    }
+}
+
+__global__ void finalize_registered_depth_kernel(float* __restrict__ dst, int n, float sentinel) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n && dst[i] == sentinel) dst[i] = 0.0f;
+}
+
+cudaError_t register_depth_to_rgb(
+    const float* d_depth_in,
+    float* d_depth_out,
+    const DepthRegistrationParams& params,
+    cudaStream_t stream
+) {
+    const int n_dst = params.dst_width * params.dst_height;
+    if (n_dst <= 0 || params.src_width <= 0 || params.src_height <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    constexpr float kSentinel = FLT_MAX;
+    constexpr int threads = 256;
+
+    fill_float_kernel<<<(n_dst + threads - 1) / threads, threads, 0, stream>>>(
+        d_depth_out, n_dst, kSentinel);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return err;
+
+    dim3 block(32, 8);
+    dim3 grid((params.src_width + block.x - 1) / block.x,
+              (params.src_height + block.y - 1) / block.y);
+    register_depth_kernel<<<grid, block, 0, stream>>>(d_depth_in, d_depth_out, params);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) return err;
+
+    finalize_registered_depth_kernel<<<(n_dst + threads - 1) / threads, threads, 0, stream>>>(
+        d_depth_out, n_dst, kSentinel);
+    return cudaGetLastError();
 }
 
 // Dummy kernel for testing purposes (keeping original)

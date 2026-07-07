@@ -90,8 +90,24 @@ add_library(${PLUGIN_NAME} SHARED
     src/load_image_to_cuda.cu
 )
 
-# Unity Native-plugin API includes TODO: cleanup
-set(UnityPluginAPI_INCLUDE "C:/Program Files/Unity/Hub/Editor/6000.2.8f1/Editor/Data/PluginAPI")
+# Unity Native-plugin API headers (IUnityInterface.h etc.).
+# Auto-detects the newest Unity Hub install; override with -DUnityPluginAPI_INCLUDE=<path>.
+if(NOT UnityPluginAPI_INCLUDE)
+    file(GLOB _unity_editor_dirs "C:/Program Files/Unity/Hub/Editor/*")
+    list(SORT _unity_editor_dirs COMPARE NATURAL ORDER DESCENDING)
+    foreach(_unity_dir ${_unity_editor_dirs})
+        if(EXISTS "${_unity_dir}/Editor/Data/PluginAPI/IUnityInterface.h")
+            set(UnityPluginAPI_INCLUDE "${_unity_dir}/Editor/Data/PluginAPI")
+            break()
+        endif()
+    endforeach()
+endif()
+set(UnityPluginAPI_INCLUDE "${UnityPluginAPI_INCLUDE}" CACHE PATH "Path to Unity's Native Plugin API headers")
+if(NOT EXISTS "${UnityPluginAPI_INCLUDE}/IUnityInterface.h")
+    message(FATAL_ERROR "Unity Native Plugin API headers not found (IUnityInterface.h). "
+        "Set -DUnityPluginAPI_INCLUDE=<Unity>/Editor/Data/PluginAPI for your installed Unity version.")
+endif()
+message(STATUS "Using Unity Plugin API headers: ${UnityPluginAPI_INCLUDE}")
 
 # Include directories
 # TODO: Use target_include_directories instead of include_directories
