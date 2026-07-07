@@ -1,5 +1,7 @@
-# Dependency source of truth is setup.py.
-# Run this from the PySpotObserver directory for a development install.
+# Dependency source of truth is setup.py. Run from the PySpotObserver directory.
+# torch==2.8.0+cu129 is not on PyPI; this index exposes the CUDA wheel.
+--extra-index-url https://download.pytorch.org/whl/cu129
+
 -e .[dev]
 
 # Vision pipeline support is optional because it requires ONNX Runtime.

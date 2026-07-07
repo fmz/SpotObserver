@@ -156,7 +156,9 @@ jobs:
             sed 's/^Would reformat: //' | sort > .ruff-stats/format_pr.txt || true
 
           # Check formatting on main branch (same files)
-          git stash --include-untracked --quiet || true
+          # Keep .ruff-stats in place while switching branches; it is untracked
+          # and is used for PR/main comparisons below.
+          git stash --quiet || true
           git checkout origin/main --quiet
 
           MAIN_PR_FILES=""

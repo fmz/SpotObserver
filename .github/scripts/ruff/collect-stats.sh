@@ -96,8 +96,9 @@ fi
 # =============================================================================
 log_section "Analyzing main branch"
 
-# Stash any uncommitted changes
-git stash --include-untracked --quiet 2>/dev/null || true
+# Stash tracked changes only. .ruff-stats is untracked and must stay available
+# while we switch to main to compare outputs.
+git stash --quiet 2>/dev/null || true
 
 # Checkout main branch
 if git checkout origin/main --quiet 2>/dev/null; then

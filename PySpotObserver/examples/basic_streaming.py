@@ -26,7 +26,6 @@ from common_cli import (
     build_config_from_args,
     parse_camera_list,
 )
-
 from pyspotobserver import CameraType, SpotConfig, SpotConnection
 
 logging.basicConfig(
@@ -144,6 +143,13 @@ def parse_args() -> argparse.Namespace:
         action="append",
         dest="vision_providers",
         help="ONNX Runtime provider to request. Repeat to set provider preference order.",
+    )
+    parser.add_argument("--dumps-enabled", action="store_true", help="store debug information")
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        help="If ``dumps_enabled``, save data to this directory.",
+        default=None,
     )
     return parser.parse_args()
 
@@ -293,7 +299,7 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
                     stream = streams[spec.label]
 
                     fetch_start = time.perf_counter()
-                    rgb_images, depth_images = stream.get_current_images(
+                    rgb_images, depth_images, _ = stream.get_current_images(
                         timeout=args.timeout,
                         run_pipeline=args.vision_pipeline,
                     )
@@ -325,7 +331,7 @@ def run_sync(args: argparse.Namespace, specs: list[StreamSpec]) -> int:
 
 async def fetch_stream_async(stream, timeout: float, vision_pipeline: bool) -> FetchResult:
     fetch_start = time.perf_counter()
-    rgb_images, depth_images = await stream.async_get_current_images(
+    rgb_images, depth_images, _ = await stream.async_get_current_images(
         timeout=timeout, run_pipeline=vision_pipeline
     )
 

@@ -20,9 +20,10 @@ jobs:
           submodules: false
 
       - name: Install dependencies
+        working-directory: PySpotObserver
         run: |
           python -m pip install --upgrade pip
-          pip install -r PySpotObserver/requirements.txt
+          pip install -r requirements.txt
 
       - name: Run mypy delta check
         run: |
@@ -30,19 +31,19 @@ jobs:
           mkdir -p .mypy-stats
 
           echo "Running mypy on PR branch..."
-          mypy . --show-error-codes --no-error-summary --no-pretty > .mypy-stats/pr.txt || true
+          mypy . --show-error-codes --no-error-summary --no-pretty --no-incremental > .mypy-stats/pr.txt || true
 
           git checkout origin/main --quiet
 
           echo "Running mypy on main..."
-          mypy . --show-error-codes --no-error-summary --no-pretty > .mypy-stats/main.txt || true
+          mypy . --show-error-codes --no-error-summary --no-pretty --no-incremental > .mypy-stats/main.txt || true
 
           git checkout - --quiet
 
-          # Normalize output enough for stable comparison.
-          # Keeps file, line, message, and error code.
-          sort .mypy-stats/pr.txt > .mypy-stats/pr.sorted.txt
-          sort .mypy-stats/main.txt > .mypy-stats/main.sorted.txt
+          # Normalize output for stable comparison: replace line and column numbers.
+          # Keeps file, message, and error code; strips positions that shift on refactor.
+          sed -E 's/^([^:]+):[0-9]+:[0-9]+:/\1:LINE:/' .mypy-stats/pr.txt | sort > .mypy-stats/pr.sorted.txt
+          sed -E 's/^([^:]+):[0-9]+:[0-9]+:/\1:LINE:/' .mypy-stats/main.txt | sort > .mypy-stats/main.sorted.txt
 
           comm -23 .mypy-stats/pr.sorted.txt .mypy-stats/main.sorted.txt > .mypy-stats/new.txt
           comm -13 .mypy-stats/pr.sorted.txt .mypy-stats/main.sorted.txt > .mypy-stats/fixed.txt

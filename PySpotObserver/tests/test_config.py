@@ -3,11 +3,11 @@ Unit tests for configuration module.
 """
 
 import os
-import pytest
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
-from pyspotobserver.config import SpotConfig, CameraType
+import pytest
+from pyspotobserver.config import CameraType, SpotConfig
 
 
 class TestCameraType:

@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <string>
 
 namespace SOb {
 
@@ -271,7 +272,11 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             }
             LogMessage("num_images_per_iter = {}", num_images_per_iter);
 
+            const std::vector<SpotCamera>& camera_order = spot_cam_stream_.getCurrentCameraOrder();
             for (size_t i = 0; i < num_images_per_iter; i++) {
+                const std::string camera_dir = i < camera_order.size()
+                    ? spot_cam_stream_.getDumpSubdirForCamera(camera_order[i])
+                    : spot_cam_stream_.getRobotDumpName() + "/unknown";
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
                 float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape.C * depth_shape.H * depth_shape.W;
@@ -296,9 +301,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         cur_preprocessed_depth_ptr,
                         depth_shape_.W,
                         depth_shape_.H,
-                        "depth-post-prefill",
-                        dump_id+i,
-                        thread_num
+                        camera_dir + "/depth-post-prefill",
+                        dump_id
                     );
                     // Downscale
                     checkCudaError(preprocess_depth_image2(
@@ -316,9 +320,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                             cur_preprocessed_depth_ptr,
                             depth_shape.W,
                             depth_shape.H,
-                            "depth-post-downscale",
-                            dump_id+i,
-                            thread_num
+                            camera_dir + "/depth-post-downscale",
+                            dump_id
                     );
 
                 } else {
@@ -364,6 +367,9 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("VisionPipeline inference time: {} ms", inference_duration.count());
 
             for (size_t i = 0; i < num_images_per_iter; i++) {
+                const std::string camera_dir = i < camera_order.size()
+                    ? spot_cam_stream_.getDumpSubdirForCamera(camera_order[i])
+                    : spot_cam_stream_.getRobotDumpName() + "/unknown";
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
@@ -400,25 +406,22 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     cur_rgb_input_ptr,
                     input_shape_.W,
                     input_shape_.H,
-                    "input-rgb",
-                    dump_id+i,
-                    thread_num
+                    camera_dir + "/input-rgb",
+                    dump_id
                 );
                 DumpDepthImageFromCuda(
                     cur_depth_input_ptr,
                     depth_shape_.W,
                     depth_shape_.H,
-                    "input-depth",
-                    dump_id+i,
-                    thread_num
+                    camera_dir + "/input-depth",
+                    dump_id
                 );
                 DumpDepthImageFromCuda(
                     cur_depth_output_ptr,
                     depth_shape_.W,
                     depth_shape_.H,
-                    "output-depth",
-                    dump_id+i,
-                    thread_num
+                    camera_dir + "/output_depth",
+                    dump_id
                 );
             }
 
@@ -444,7 +447,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
             // first_run_ = false;
-            dump_id += num_images_per_iter;
+            dump_id++;
 
         } catch (const std::exception& e) {
             LogMessage("Exception in pipeline worker: {}", e.what());
@@ -490,4 +493,4 @@ bool VisionPipeline::getCurrentImages(
     return true;
 }
 
-} // namespace 
+} // namespace

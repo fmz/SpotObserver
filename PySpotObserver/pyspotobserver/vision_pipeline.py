@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
 
 from .config import SpotConfig
-
 
 DEFAULT_MODEL_ENV_VAR = "PYSPOTOBSERVER_VISION_MODEL"
 DEFAULT_PROVIDERS = ("CUDAExecutionProvider", "CPUExecutionProvider")
@@ -79,19 +79,26 @@ class VisionPipeline:
         self.providers = _normalize_providers(providers)
         self.depth_size = depth_size
         self._lock = threading.Lock()
-        self._session = None
+        self._session: Optional[Any] = None
         self._input_names: List[str] = []
+        self._rgb_hw: Optional[Tuple[int, int]] = (
+            None  # expected (H, W) from model; None = use input size
+        )
+        self._depth_hw: Optional[Tuple[int, int]] = (
+            None  # expected depth (H, W) from model; None = use depth_size
+        )
         self._rgb_dtype = np.dtype(np.float32)
         self._depth_dtype = np.dtype(np.float32)
         self._rgb_buffer: Optional[np.ndarray] = None
         self._depth_buffer: Optional[np.ndarray] = None
         self._depth_resize_buffer: Optional[np.ndarray] = None
+        self._rgb_resize_buffer: Optional[np.ndarray] = None
 
         if not self.model_path.exists():
             raise VisionPipelineError(f"Vision model not found: {self.model_path}")
 
     @classmethod
-    def from_config(cls, config: SpotConfig) -> "VisionPipeline":
+    def from_config(cls, config: SpotConfig) -> VisionPipeline:
         extra_params = config.extra_params or {}
         model_path = (
             config.vision_model_path
@@ -134,16 +141,15 @@ class VisionPipeline:
 
         with self._lock:
             self._init_session()
+
             self._ensure_buffers(rgb_images, depth_images)
             self._fill_buffers(rgb_images, depth_images)
 
-            output = self._session.run(
-                None,
-                {
-                    self._input_names[0]: self._rgb_buffer,
-                    self._input_names[1]: self._depth_buffer,
-                },
-            )[0]
+            feed = {
+                self._input_names[0]: self._rgb_buffer,
+                self._input_names[1]: self._depth_buffer,
+            }
+            output = self._session.run(None, feed)[0]
 
         return rgb_images, _depth_list_from_output(output, len(rgb_images))
 
@@ -152,7 +158,7 @@ class VisionPipeline:
             return
 
         try:
-            import onnxruntime as ort
+            import onnxruntime as ort  # type: ignore[import-not-found]
         except ImportError as exc:
             raise VisionPipelineError(
                 "Vision pipeline requires ONNX Runtime. "
@@ -185,6 +191,18 @@ class VisionPipeline:
         self._input_names = [inputs[0].name, inputs[1].name]
         self._rgb_dtype = _dtype_for_onnx_type(inputs[0].type)
         self._depth_dtype = _dtype_for_onnx_type(inputs[1].type)
+        shape = inputs[0].shape
+        depth_shape = inputs[1].shape
+
+        # Read expected spatial dimensions from model graph
+        if len(shape) == 4 and isinstance(shape[2], int) and isinstance(shape[3], int):
+            self._rgb_hw = (shape[2], shape[3])
+        if (
+            len(depth_shape) == 4
+            and isinstance(depth_shape[2], int)
+            and isinstance(depth_shape[3], int)
+        ):
+            self._depth_hw = (depth_shape[2], depth_shape[3])
 
     def _ensure_buffers(
         self,
@@ -192,22 +210,30 @@ class VisionPipeline:
         depth_images: Sequence[np.ndarray],
     ) -> None:
         batch_size = len(rgb_images)
-        h_rgb, w_rgb, channels = rgb_images[0].shape
+        in_h, in_w, channels = rgb_images[0].shape
         if channels != 3:
             raise VisionPipelineError(f"Expected RGB images with 3 channels, got {channels}")
 
-        depth_h, depth_w = self.depth_size
+        # Use model's expected spatial size if known; otherwise use input size.
+        h_rgb, w_rgb = self._rgb_hw if self._rgb_hw is not None else (in_h, in_w)
+
+        # Use model's expected depth size if detected; fall back to constructor argument.
+        depth_h, depth_w = self._depth_hw if self._depth_hw is not None else self.depth_size
         rgb_shape = (batch_size, 3, h_rgb, w_rgb)
         depth_shape = (batch_size, 1, depth_h, depth_w)
 
-        if self._rgb_buffer is None or self._rgb_buffer.shape != rgb_shape:
-            self._rgb_buffer = np.empty(rgb_shape, dtype=self._rgb_dtype)
-        elif self._rgb_buffer.dtype != self._rgb_dtype:
+        if (
+            self._rgb_buffer is None
+            or self._rgb_buffer.shape != rgb_shape
+            or self._rgb_buffer.dtype != self._rgb_dtype
+        ):
             self._rgb_buffer = np.empty(rgb_shape, dtype=self._rgb_dtype)
 
-        if self._depth_buffer is None or self._depth_buffer.shape != depth_shape:
-            self._depth_buffer = np.empty(depth_shape, dtype=self._depth_dtype)
-        elif self._depth_buffer.dtype != self._depth_dtype:
+        if (
+            self._depth_buffer is None
+            or self._depth_buffer.shape != depth_shape
+            or self._depth_buffer.dtype != self._depth_dtype
+        ):
             self._depth_buffer = np.empty(depth_shape, dtype=self._depth_dtype)
 
         if self._depth_dtype == np.dtype(np.float16):
@@ -216,12 +242,14 @@ class VisionPipeline:
         else:
             self._depth_resize_buffer = None
 
-        for index, rgb in enumerate(rgb_images):
-            if rgb.shape != (h_rgb, w_rgb, 3):
-                raise VisionPipelineError(
-                    "All RGB images in a pipeline batch must have the same shape; "
-                    f"image 0 is {(h_rgb, w_rgb, 3)}, image {index} is {rgb.shape}"
-                )
+        # Pre-allocate float32 intermediate for RGB resize if needed
+        if self._rgb_hw is not None and (in_h, in_w) != self._rgb_hw:
+            resize_shape = (h_rgb, w_rgb, 3)
+            if self._rgb_resize_buffer is None or self._rgb_resize_buffer.shape != resize_shape:
+                self._rgb_resize_buffer = np.empty(resize_shape, dtype=np.float32)
+        else:
+            self._rgb_resize_buffer = None
+
         for index, depth in enumerate(depth_images):
             if depth.ndim != 2:
                 raise VisionPipelineError(
@@ -233,28 +261,35 @@ class VisionPipeline:
         rgb_images: Sequence[np.ndarray],
         depth_images: Sequence[np.ndarray],
     ) -> None:
-        depth_h, depth_w = self.depth_size
+        depth_h, depth_w = self._depth_hw if self._depth_hw is not None else self.depth_size
 
-        for index, rgb in enumerate(rgb_images):
-            self._rgb_buffer[index, 0] = rgb[:, :, 0]
-            self._rgb_buffer[index, 1] = rgb[:, :, 1]
-            self._rgb_buffer[index, 2] = rgb[:, :, 2]
+        if self._rgb_buffer is not None:
+            for index, rgb in enumerate(rgb_images):
+                if self._rgb_resize_buffer is not None:
+                    if self._rgb_hw is not None:
+                        cv2.resize(
+                            rgb, (self._rgb_hw[1], self._rgb_hw[0]), dst=self._rgb_resize_buffer
+                        )
+                    rgb = self._rgb_resize_buffer
+                self._rgb_buffer[index, 0] = rgb[:, :, 0]
+                self._rgb_buffer[index, 1] = rgb[:, :, 1]
+                self._rgb_buffer[index, 2] = rgb[:, :, 2]
 
-        for index, depth in enumerate(depth_images):
-            depth_dst = self._depth_buffer[index, 0]
-            resize_dst = (
-                self._depth_resize_buffer[index, 0]
-                if self._depth_resize_buffer is not None
-                else depth_dst
-            )
-            cv2.resize(
-                depth,
-                (depth_w, depth_h),
-                dst=resize_dst,
-                interpolation=cv2.INTER_NEAREST,
-            )
-            if resize_dst is not depth_dst:
-                depth_dst[...] = resize_dst
+        depth_resize_buffer = self._depth_resize_buffer
+        if self._depth_buffer is not None:
+            for index, depth in enumerate(depth_images):
+                depth_dst = self._depth_buffer[index, 0]
+                resize_dst = (
+                    depth_resize_buffer[index, 0] if depth_resize_buffer is not None else depth_dst
+                )
+                cv2.resize(
+                    depth,
+                    (depth_w, depth_h),
+                    dst=resize_dst,
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                if resize_dst is not depth_dst:
+                    depth_dst[...] = resize_dst
 
 
 _default_pipeline: Optional[VisionPipeline] = None

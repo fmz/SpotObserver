@@ -7,15 +7,18 @@ It does not include network latency or stream-loop scheduling.
 
 import argparse
 import time
-from typing import List, Sequence, Tuple
+from collections.abc import Sequence
 
 import cv2
 import numpy as np
-from bosdyn.api import image_pb2
-from bosdyn.client.image import UnknownImageSourceError, build_image_request
+from bosdyn.api import image_pb2  # type: ignore[import-untyped]
+from bosdyn.client.image import (  # type: ignore[import-untyped]
+    UnknownImageSourceError,
+    build_image_request,
+)
+from common_cli import add_common_connection_arguments, build_config_from_args, parse_camera_list
 
 from pyspotobserver import CameraType, SpotConnection
-from common_cli import add_common_connection_arguments, build_config_from_args, parse_camera_list
 
 
 def _convert_alloc(response: image_pb2.ImageResponse, is_depth: bool) -> np.ndarray:
@@ -66,9 +69,9 @@ def _convert_alloc(response: image_pb2.ImageResponse, is_depth: bool) -> np.ndar
 def _resolve_camera_pairs(
     cameras: Sequence[CameraType],
     available_sources: set[str] | None,
-) -> List[Tuple[CameraType, str, str]]:
-    pairs: List[Tuple[CameraType, str, str]] = []
-    skipped: List[Tuple[CameraType, str, str]] = []
+) -> list[tuple[CameraType, str, str]]:
+    pairs: list[tuple[CameraType, str, str]] = []
+    skipped: list[tuple[CameraType, str, str]] = []
 
     for cam in cameras:
         rgb = CameraType.get_source_name(cam, depth=False)
@@ -83,7 +86,8 @@ def _resolve_camera_pairs(
     if skipped:
         print("Skipping unavailable camera source pairs:")
         for cam, rgb, depth in skipped:
-            print(f"  {cam.name}: rgb='{rgb}', depth='{depth}'")
+            camera_name = cam.name or f"camera_{int(cam)}"
+            print(f"  {camera_name}: rgb='{rgb}', depth='{depth}'")
 
     if not pairs:
         raise RuntimeError(
@@ -92,8 +96,8 @@ def _resolve_camera_pairs(
     return pairs
 
 
-def _build_requests(pairs: Sequence[Tuple[CameraType, str, str]]) -> List[image_pb2.ImageRequest]:
-    requests: List[image_pb2.ImageRequest] = []
+def _build_requests(pairs: Sequence[tuple[CameraType, str, str]]) -> list[image_pb2.ImageRequest]:
+    requests: list[image_pb2.ImageRequest] = []
     for _, rgb_source, depth_source in pairs:
         requests.append(
             build_image_request(
@@ -160,7 +164,7 @@ def main() -> int:
             raise RuntimeError(f"Expected {expected} responses, got {len(responses)}")
 
         # First inference pass is used to determine shapes for preallocation.
-        decoded_first_pass: List[np.ndarray] = []
+        decoded_first_pass: list[np.ndarray] = []
         for i in range(len(pairs)):
             decoded_first_pass.append(_convert_alloc(responses[i * 2], is_depth=False))
             decoded_first_pass.append(_convert_alloc(responses[i * 2 + 1], is_depth=True))
@@ -204,7 +208,8 @@ def main() -> int:
         )
 
         print("Benchmark results (single captured response set):")
-        print("Cameras used:", ", ".join(cam.name for cam, _, _ in pairs))
+        # Fallback to camera number if cam.name is None
+        print("Cameras used:", ", ".join(cam.name or f"camera_{cam.value}" for cam, _, _ in pairs))
         print(f"In-place: {per_iter_inplace_ms:.3f} ms/iter")
         print(f"Alloc   : {per_iter_alloc_ms:.3f} ms/iter")
         print(f"Speedup : {speedup:.2f}x")
