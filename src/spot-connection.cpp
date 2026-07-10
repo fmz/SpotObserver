@@ -14,6 +14,7 @@
 #include <bosdyn/math/frame_helpers.h>
 #include <bosdyn/math/proto_math.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
@@ -245,7 +246,7 @@ bool ReaderWriterCBuf::initialize(
     std::vector<SpotCamera> cameras,
     std::vector<std::string> camera_dump_subdirs,
     std::vector<DepthRegistrationParams> depth_registration,
-    size_t n_elems_per_raw_depth
+    std::vector<size_t> n_elems_per_raw_depth
 ) {
     n_elems_per_rgb_ = n_elems_per_rgb;
     n_elems_per_depth_ = n_elems_per_depth;
@@ -253,19 +254,22 @@ bool ReaderWriterCBuf::initialize(
     cameras_ = std::move(cameras);
     camera_dump_subdirs_ = std::move(camera_dump_subdirs);
     depth_registration_ = std::move(depth_registration);
-    n_elems_per_raw_depth_ = n_elems_per_raw_depth;
+    n_elems_per_raw_depth_ = std::move(n_elems_per_raw_depth);
 
     if (camera_dump_subdirs_.size() != cameras_.size()) {
         LogMessage("ReaderWriterCBuf::initialize: Expected {} camera dump subdirs, got {}",
                    cameras_.size(), camera_dump_subdirs_.size());
         return false;
     }
-    if (depth_registration_.size() != cameras_.size() || n_elems_per_raw_depth_ == 0) {
-        LogMessage("ReaderWriterCBuf::initialize: Expected {} depth registration params "
-                   "(got {}) and a nonzero raw depth size (got {})",
-                   cameras_.size(), depth_registration_.size(), n_elems_per_raw_depth_);
+    if (depth_registration_.size() != cameras_.size()
+        || n_elems_per_raw_depth_.size() != cameras_.size()
+        || std::ranges::any_of(n_elems_per_raw_depth_, [](size_t size) { return size == 0; })) {
+        LogMessage("ReaderWriterCBuf::initialize: Expected {} depth registration params and "
+                   "raw depth sizes (got {} params and {} sizes)",
+                   cameras_.size(), depth_registration_.size(), n_elems_per_raw_depth_.size());
         return false;
     }
+    raw_depth_scratch_size_ = *std::ranges::max_element(n_elems_per_raw_depth_);
 
     if (rgb_data_ != nullptr || depth_data_ != nullptr) {
         if (!rgb_data_)   checkCudaError(cudaFree(rgb_data_), "cudaFree for RGB data");
@@ -290,7 +294,7 @@ bool ReaderWriterCBuf::initialize(
         raw_depth_scratch_ = nullptr;
     }
     checkCudaError(
-        cudaMalloc(&raw_depth_scratch_, n_elems_per_raw_depth_ * sizeof(uint16_t)),
+        cudaMalloc(&raw_depth_scratch_, raw_depth_scratch_size_ * sizeof(uint16_t)),
         "cudaMalloc for raw depth scratch"
     );
 
@@ -333,14 +337,14 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         throw std::runtime_error("ReaderWriterCBuf::push: Unexpected image response count");
     }
 
-    static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
-    time_point<high_resolution_clock> end_time = high_resolution_clock::now();
-
-    auto duration = duration_cast<microseconds>(end_time - start_time);
-    double latency_ms = duration.count() / 1000.0;
-
-    LogPerf("ReaderWriterCBuf::push: latency: {:.4f} ms", latency_ms);
-    start_time = end_time; // Reset start time for next push
+    // static thread_local time_point<high_resolution_clock> start_time = high_resolution_clock::now();
+    // time_point<high_resolution_clock> end_time = high_resolution_clock::now();
+    //
+    // auto duration = duration_cast<microseconds>(end_time - start_time);
+    // double latency_ms = duration.count() / 1000.0;
+    //
+    // LogPerf("ReaderWriterCBuf::push: latency: {:.4f} ms", latency_ms);
+    // start_time = end_time; // Reset start time for next push
 
     // Compute write pointer
     int write_idx = write_idx_.load(std::memory_order_relaxed);
@@ -437,11 +441,12 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             int depth_height = img.rows();
 
             const DepthRegistrationParams& reg = depth_registration_[n_depths_written];
+            const size_t expected_depth_size = n_elems_per_raw_depth_[n_depths_written];
             size_t depth_size = size_t(depth_width) * depth_height;
-            if (depth_size != n_elems_per_raw_depth_
+            if (depth_size != expected_depth_size
                 || depth_width != reg.src_width || depth_height != reg.src_height) {
                 LogMessage("Raw depth size mismatch: expected {} ({}x{}), got {} ({}x{})",
-                           n_elems_per_raw_depth_, reg.src_width, reg.src_height,
+                           expected_depth_size, reg.src_width, reg.src_height,
                            depth_size, depth_width, depth_height);
                 throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
             }
@@ -876,19 +881,6 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                     return false;
                 }
             }
-            // Same thing for the raw depth images
-            size_t raw_depth_ref_size = image_responses[num_cams_requested].shot().image().rows()
-                                      * image_responses[num_cams_requested].shot().image().cols();
-            for (int32_t j = num_cams_requested + 1; j < image_responses.size(); j++) {
-                const auto& img_response = image_responses[j];
-                size_t depth_size = img_response.shot().image().rows() * img_response.shot().image().cols();
-                if (raw_depth_ref_size != depth_size) {
-                    LogMessage("SpotCamStream::streamCameras: Inconsistent depth image sizes"
-                               "(expected {}, got {})", raw_depth_ref_size, depth_size);
-                    return false;
-                }
-            }
-
             // Raw depth is registered into the RGB frame on the GPU, so the depth
             // ring buffer (and everything downstream) is RGB-sized.
             current_depth_shape_ = TensorShape{
@@ -904,6 +896,8 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
             // computed once per stream.
             std::vector<DepthRegistrationParams> depth_registration;
             depth_registration.reserve(num_cams_requested);
+            std::vector<size_t> raw_depth_sizes;
+            raw_depth_sizes.reserve(num_cams_requested);
 
             for (int32_t j = 0; j < num_cams_requested; j++) {
                 const auto& rgb_response   = image_responses[j];
@@ -935,6 +929,7 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                 reg.dst_width  = static_cast<int>(current_rgb_shape_.W);
                 reg.dst_height = static_cast<int>(current_rgb_shape_.H);
                 depth_registration.push_back(reg);
+                raw_depth_sizes.push_back(size_t(reg.src_width) * reg.src_height);
 
                 LogMessage("Depth registration for camera {}: {}x{} ({}) -> {}x{} ({})",
                            get_dump_name_for_camera(camera_order_[j]),
@@ -955,7 +950,7 @@ bool SpotCamStream::streamCameras(uint32_t cam_mask) {
                 camera_order_,
                 std::move(camera_dump_subdirs),
                 std::move(depth_registration),
-                raw_depth_ref_size
+                std::move(raw_depth_sizes)
             )) {
                 LogMessage("SpotCamStream::streamCameras: Failed to initialize image buffer");
                 return false;

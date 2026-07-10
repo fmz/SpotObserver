@@ -46,7 +46,8 @@ private:
     // depth images are staged in raw_depth_scratch_ (CUDA memory) and registered
     // into the depth ring at RGB resolution (converted to meters on the GPU).
     std::vector<DepthRegistrationParams> depth_registration_;
-    size_t n_elems_per_raw_depth_{0};
+    std::vector<size_t> n_elems_per_raw_depth_;
+    size_t raw_depth_scratch_size_{0};
     uint16_t* raw_depth_scratch_{nullptr};
 
     bool first_run_{true};
@@ -70,7 +71,7 @@ public:
         std::vector<SpotCamera> cameras,
         std::vector<std::string> camera_dump_subdirs,
         std::vector<DepthRegistrationParams> depth_registration,
-        size_t n_elems_per_raw_depth
+        std::vector<size_t> n_elems_per_raw_depth
     );
 
     /**

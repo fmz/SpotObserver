@@ -40,6 +40,46 @@ class DepthRegistrationParams:
     dst_shape: tuple[int, int]  # (H_dst, W_dst)
 
 
+@dataclass
+class DepthRegistrationWorkspace:
+    """Reusable scratch buffers for :func:`register_depth`."""
+
+    raw_depth: np.ndarray
+    points: np.ndarray
+    projected_x: np.ndarray
+    projected_y: np.ndarray
+    pixel_x: np.ndarray
+    pixel_y: np.ndarray
+    indices: np.ndarray
+    valid: np.ndarray
+    splat_valid: np.ndarray
+    bool_scratch: np.ndarray
+    z_buffer: np.ndarray
+    dst_empty: np.ndarray
+
+
+def create_registration_workspace(
+    params: DepthRegistrationParams,
+) -> DepthRegistrationWorkspace:
+    """Allocate scratch storage once for repeated registration with ``params``."""
+    src_shape = params.src_shape
+    dst_h, dst_w = params.dst_shape
+    return DepthRegistrationWorkspace(
+        raw_depth=np.empty(src_shape, dtype=np.float32),
+        points=np.empty((*src_shape, 3), dtype=np.float32),
+        projected_x=np.empty(src_shape, dtype=np.float32),
+        projected_y=np.empty(src_shape, dtype=np.float32),
+        pixel_x=np.empty(src_shape, dtype=np.int32),
+        pixel_y=np.empty(src_shape, dtype=np.int32),
+        indices=np.empty(src_shape, dtype=np.intp),
+        valid=np.empty(src_shape, dtype=np.bool_),
+        splat_valid=np.empty(src_shape, dtype=np.bool_),
+        bool_scratch=np.empty(src_shape, dtype=np.bool_),
+        z_buffer=np.empty(dst_h * dst_w + 1, dtype=np.float32),
+        dst_empty=np.empty((dst_h, dst_w), dtype=np.bool_),
+    )
+
+
 def _pinhole_intrinsics(source: image_pb2.ImageSource) -> np.ndarray:
     """Return the 3x3 pinhole camera matrix of an ImageSource."""
     which = source.WhichOneof("camera_models")
@@ -109,6 +149,7 @@ def register_depth(
     raw_depth: np.ndarray,
     params: DepthRegistrationParams,
     out: np.ndarray,
+    workspace: DepthRegistrationWorkspace | None = None,
 ) -> None:
     """Reproject a raw depth image into the RGB frame, in-place into ``out``.
 
@@ -117,40 +158,71 @@ def register_depth(
         params: Registration params for this camera pair.
         out: (H_dst, W_dst) float32 output, fully overwritten. Pixels that
             receive no depth sample are 0.
+        workspace: Optional reusable scratch storage. Supplying one avoids
+            per-frame allocations in streaming callers.
     """
     if raw_depth.shape != params.src_shape:
         raise ValueError(f"Raw depth shape {raw_depth.shape} != expected {params.src_shape}")
     if out.shape != params.dst_shape:
         raise ValueError(f"Output shape {out.shape} != expected {params.dst_shape}")
+    if workspace is None:
+        workspace = create_registration_workspace(params)
+    if (
+        workspace.raw_depth.shape != params.src_shape
+        or workspace.dst_empty.shape != params.dst_shape
+    ):
+        raise ValueError("Registration workspace shape does not match params")
 
-    out.fill(0.0)
-
-    valid = raw_depth > 0
+    valid = workspace.valid
+    np.greater(raw_depth, 0.0, out=valid)
     if not valid.any():
+        out.fill(0.0)
         return
 
-    z = raw_depth[valid]
-    p = z[:, None] * params.rays[valid] + params.t
-    pz = p[:, 2]
-
-    front = pz > 0  # discard points behind the RGB camera
-    p, pz = p[front], pz[front]
-    if pz.size == 0:
+    points = workspace.points
+    np.multiply(params.rays, raw_depth[..., None], out=points)
+    np.add(points, params.t, out=points)
+    pz = points[..., 2]
+    np.greater(pz, 0.0, out=workspace.bool_scratch)
+    np.logical_and(valid, workspace.bool_scratch, out=valid)
+    if not valid.any():
+        out.fill(0.0)
         return
 
-    u = np.floor(p[:, 0] / pz).astype(np.int32)
-    v = np.floor(p[:, 1] / pz).astype(np.int32)
-
-    # 2x2 splat: the raw depth image is lower resolution than the RGB target, so
-    # covering the four nearest pixels reduces holes without a dilation pass.
-    xs = np.concatenate((u, u + 1, u, u + 1))
-    ys = np.concatenate((v, v, v + 1, v + 1))
-    zs = np.concatenate((pz, pz, pz, pz))
+    np.divide(points[..., 0], pz, out=workspace.projected_x, where=valid)
+    np.divide(points[..., 1], pz, out=workspace.projected_y, where=valid)
+    np.floor(workspace.projected_x, out=workspace.projected_x)
+    np.floor(workspace.projected_y, out=workspace.projected_y)
+    workspace.pixel_x.fill(0)
+    workspace.pixel_y.fill(0)
+    np.copyto(workspace.pixel_x, workspace.projected_x, where=valid, casting="unsafe")
+    np.copyto(workspace.pixel_y, workspace.projected_y, where=valid, casting="unsafe")
 
     dst_h, dst_w = params.dst_shape
-    in_bounds = (xs >= 0) & (xs < dst_w) & (ys >= 0) & (ys < dst_h)
-    xs, ys, zs = xs[in_bounds], ys[in_bounds], zs[in_bounds]
+    sentinel_index = dst_h * dst_w
+    workspace.z_buffer.fill(np.inf)
 
-    # Paint far-to-near so the nearest surface wins where samples overlap.
-    order = np.argsort(zs)[::-1]
-    out[ys[order], xs[order]] = zs[order]
+    # A z-buffered 2x2 splat. Invalid samples all target the extra sentinel
+    # element, avoiding boolean-indexed temporaries and a global depth sort.
+    for du, dv in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        splat_valid = workspace.splat_valid
+        np.copyto(splat_valid, valid)
+        np.greater_equal(workspace.pixel_x, -du, out=workspace.bool_scratch)
+        np.logical_and(splat_valid, workspace.bool_scratch, out=splat_valid)
+        np.less(workspace.pixel_x, dst_w - du, out=workspace.bool_scratch)
+        np.logical_and(splat_valid, workspace.bool_scratch, out=splat_valid)
+        np.greater_equal(workspace.pixel_y, -dv, out=workspace.bool_scratch)
+        np.logical_and(splat_valid, workspace.bool_scratch, out=splat_valid)
+        np.less(workspace.pixel_y, dst_h - dv, out=workspace.bool_scratch)
+        np.logical_and(splat_valid, workspace.bool_scratch, out=splat_valid)
+
+        np.multiply(workspace.pixel_y, dst_w, out=workspace.indices, casting="unsafe")
+        np.add(workspace.indices, workspace.pixel_x, out=workspace.indices)
+        np.add(workspace.indices, dv * dst_w + du, out=workspace.indices)
+        np.logical_not(splat_valid, out=workspace.bool_scratch)
+        np.copyto(workspace.indices, sentinel_index, where=workspace.bool_scratch)
+        np.minimum.at(workspace.z_buffer, workspace.indices, pz)
+
+    np.copyto(out, workspace.z_buffer[:-1].reshape(params.dst_shape))
+    np.isinf(out, out=workspace.dst_empty)
+    np.copyto(out, 0.0, where=workspace.dst_empty)

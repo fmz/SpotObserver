@@ -7,6 +7,7 @@ import pytest
 from bosdyn.api import image_pb2  # type: ignore[import-untyped]
 from pyspotobserver.depth_registration import (
     DepthRegistrationParams,
+    create_registration_workspace,
     extract_registration_params,
     register_depth,
 )
@@ -78,6 +79,24 @@ class TestRegisterDepth:
             register_depth(np.zeros((2, 2), dtype=np.float32), params, np.zeros((4, 4), np.float32))
         with pytest.raises(ValueError, match="Output shape"):
             register_depth(np.zeros((4, 4), dtype=np.float32), params, np.zeros((2, 2), np.float32))
+
+    def test_workspace_can_be_reused(self) -> None:
+        params = make_params(
+            np.eye(3), np.zeros(3), src_shape=(4, 4), dst_shape=(4, 4)
+        )
+        workspace = create_registration_workspace(params)
+        out = np.empty((4, 4), dtype=np.float32)
+
+        register_depth(np.full((4, 4), 2.0, np.float32), params, out, workspace=workspace)
+        np.testing.assert_allclose(out, 2.0)
+
+        raw = np.zeros((4, 4), dtype=np.float32)
+        raw[1, 1] = 3.0
+        register_depth(raw, params, out, workspace=workspace)
+
+        expected = np.zeros((4, 4), dtype=np.float32)
+        expected[1:3, 1:3] = 3.0
+        np.testing.assert_allclose(out, expected)
 
 
 def _make_response(

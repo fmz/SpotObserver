@@ -28,7 +28,7 @@ private:
     MLModel& model_;
     const SpotCamStream& spot_cam_stream_;
     bool first_run_{true};
-    std::atomic<bool> depth_averaging_enabled_{true};
+    std::atomic<bool> depth_averaging_enabled_{false};
     
     // Threading
     std::unique_ptr<std::jthread> pipeline_thread_;
