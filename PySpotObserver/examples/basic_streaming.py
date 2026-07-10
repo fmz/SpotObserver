@@ -26,6 +26,7 @@ from common_cli import (
     build_config_from_args,
     parse_camera_list,
 )
+
 from pyspotobserver import CameraType, SpotConfig, SpotConnection
 
 logging.basicConfig(

@@ -16,16 +16,18 @@ cudaError_t setOutputToOnes_launcher(float* d_input, float* d_output, int size);
 struct DepthRegistrationParams {
     float M[9]; // Row-major 3x3
     float t[3];
+    float inv_depth_scale{0.f}; // Meters per raw uint16 unit (1 / ImageSource.depth_scale)
     int src_width{0};
     int src_height{0};
     int dst_width{0};
     int dst_height{0};
 };
 
-// Reprojects d_depth_in (src-sized, meters) into d_depth_out (dst-sized, meters,
-// fully overwritten; pixels with no depth sample are 0).
+// Reprojects d_depth_in (src-sized, raw uint16 as served by Spot, converted to
+// meters via inv_depth_scale) into d_depth_out (dst-sized, meters, fully
+// overwritten; pixels with no depth sample are 0).
 cudaError_t register_depth_to_rgb(
-    const float* d_depth_in,
+    const uint16_t* d_depth_in,
     float* d_depth_out,
     const DepthRegistrationParams& params,
     cudaStream_t stream = 0

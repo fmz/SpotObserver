@@ -12,7 +12,9 @@ from pyspotobserver.depth_registration import (
 )
 
 
-def make_params(M, t, src_shape, dst_shape) -> DepthRegistrationParams:
+def make_params(
+    M: np.ndarray, t: np.ndarray, src_shape: tuple[int, int], dst_shape: tuple[int, int]
+) -> DepthRegistrationParams:
     """Build params directly from a projection matrix, bypassing proto extraction."""
     v, u = np.indices(src_shape, dtype=np.float64)
     uv1 = np.stack([u, v, np.ones_like(u)], axis=-1)
@@ -26,7 +28,7 @@ def make_params(M, t, src_shape, dst_shape) -> DepthRegistrationParams:
 
 
 class TestRegisterDepth:
-    def test_identity_maps_constant_plane(self):
+    def test_identity_maps_constant_plane(self) -> None:
         """With an identity projection, a constant plane fills the whole output."""
         params = make_params(np.eye(3), np.zeros(3), src_shape=(6, 8), dst_shape=(6, 8))
         raw = np.full((6, 8), 2.0, dtype=np.float32)
@@ -36,7 +38,7 @@ class TestRegisterDepth:
 
         np.testing.assert_allclose(out, 2.0)
 
-    def test_nearest_surface_wins(self):
+    def test_nearest_surface_wins(self) -> None:
         """Two samples landing on the same pixel keep the nearer depth."""
         # Both source pixels project along the optical axis to dst pixel (0, 0).
         params = make_params(np.zeros((3, 3)), np.zeros(3), src_shape=(1, 2), dst_shape=(2, 2))
@@ -49,7 +51,7 @@ class TestRegisterDepth:
 
         np.testing.assert_allclose(out, 1.0)  # 2x2 splat covers the full output
 
-    def test_invalid_depth_leaves_holes(self):
+    def test_invalid_depth_leaves_holes(self) -> None:
         params = make_params(np.eye(3), np.zeros(3), src_shape=(4, 4), dst_shape=(4, 4))
         raw = np.zeros((4, 4), dtype=np.float32)
         raw[1, 1] = 3.0
@@ -61,7 +63,7 @@ class TestRegisterDepth:
         expected[1:3, 1:3] = 3.0  # the sample plus its 2x2 splat
         np.testing.assert_allclose(out, expected)
 
-    def test_points_behind_camera_are_skipped(self):
+    def test_points_behind_camera_are_skipped(self) -> None:
         params = make_params(-np.eye(3), np.zeros(3), src_shape=(4, 4), dst_shape=(4, 4))
         raw = np.full((4, 4), 2.0, dtype=np.float32)
         out = np.empty((4, 4), dtype=np.float32)
@@ -70,7 +72,7 @@ class TestRegisterDepth:
 
         np.testing.assert_allclose(out, 0.0)
 
-    def test_shape_mismatch_raises(self):
+    def test_shape_mismatch_raises(self) -> None:
         params = make_params(np.eye(3), np.zeros(3), src_shape=(4, 4), dst_shape=(4, 4))
         with pytest.raises(ValueError, match="Raw depth shape"):
             register_depth(np.zeros((2, 2), dtype=np.float32), params, np.zeros((4, 4), np.float32))
@@ -113,7 +115,7 @@ def _make_response(
 
 
 class TestExtractRegistrationParams:
-    def test_coincident_cameras_reproject_in_place(self):
+    def test_coincident_cameras_reproject_in_place(self) -> None:
         """Same pose and intrinsics for both cameras => registration is a no-op."""
         rgb = _make_response("rgb", rows=20, cols=30, fx=50.0, fy=50.0, cx=0.0, cy=0.0)
         depth = _make_response("depth", rows=20, cols=30, fx=50.0, fy=50.0, cx=0.0, cy=0.0)
@@ -126,7 +128,7 @@ class TestExtractRegistrationParams:
 
         np.testing.assert_allclose(out, 2.0, rtol=1e-5)
 
-    def test_translated_depth_camera_shifts_projection(self):
+    def test_translated_depth_camera_shifts_projection(self) -> None:
         """A depth camera offset by baseline b shifts pixels by fx * b / z."""
         fx = 100.0
         rgb = _make_response("rgb", rows=20, cols=40, fx=fx, fy=fx, cx=0.0, cy=0.0)

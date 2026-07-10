@@ -42,12 +42,12 @@ private:
     float*   depth_data_{nullptr};
     float*   cached_depth_{nullptr};
 
-    // Client-side depth registration: per-camera reprojection params. Raw depth
-    // images are staged in raw_depth_scratch_ (CUDA memory) and registered into
-    // the depth ring at RGB resolution.
+    // Client-side depth registration: per-camera reprojection params. Raw u16
+    // depth images are staged in raw_depth_scratch_ (CUDA memory) and registered
+    // into the depth ring at RGB resolution (converted to meters on the GPU).
     std::vector<DepthRegistrationParams> depth_registration_;
     size_t n_elems_per_raw_depth_{0};
-    float* raw_depth_scratch_{nullptr};
+    uint16_t* raw_depth_scratch_{nullptr};
 
     bool first_run_{true};
     const size_t max_size_; // Maximum size of the queue

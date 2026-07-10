@@ -165,13 +165,21 @@ int main(int argc, char* argv[]) {
         for (int32_t spot = 0; spot < 2; spot++) {
             int32_t spot_id = spot_ids[spot];
             if (spot_id < 0) {
-                std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
+                static bool printed_once = false;
+                if (!printed_once) {
+                    std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
+                    printed_once = true;
+                }
                 continue;
             }
             for (int32_t stream = 0; stream < cam_stream_ids[spot_id].size(); stream++) {
                 int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
                 if (cam_stream_id < 0) {
-                    std::cout << "Skipping Spot " << spot << " Stream " << stream << " as it is not valid." << std::endl;
+                    static bool printed_once = false;
+                    if (!printed_once) {
+                        std::cout << "Skipping Spot " << spot << " Stream " << stream << " as it is not valid." << std::endl;
+                        printed_once = true;
+                    }
                     continue;
                 }
 

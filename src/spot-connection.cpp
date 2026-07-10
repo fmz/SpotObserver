@@ -125,6 +125,15 @@ static bool build_depth_registration_params(
         return false;
     }
 
+    // Raw u16 -> meters conversion happens on the GPU inside the registration kernel.
+    const double depth_scale = depth_source.depth_scale();
+    if (depth_scale <= 0.0) {
+        LogMessage("build_depth_registration_params: Invalid depth_scale {} for depth '{}'",
+                   depth_scale, depth_source.name());
+        return false;
+    }
+    out.inv_depth_scale = static_cast<float>(1.0 / depth_scale);
+
     const std::array<float, 16> T = se3_pose_to_row_major_matrix(rgb_T_depth);
 
     // A = R * K_depth^-1
@@ -281,7 +290,7 @@ bool ReaderWriterCBuf::initialize(
         raw_depth_scratch_ = nullptr;
     }
     checkCudaError(
-        cudaMalloc(&raw_depth_scratch_, n_elems_per_raw_depth_ * sizeof(float)),
+        cudaMalloc(&raw_depth_scratch_, n_elems_per_raw_depth_ * sizeof(uint16_t)),
         "cudaMalloc for raw depth scratch"
     );
 
@@ -324,14 +333,14 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
         throw std::runtime_error("ReaderWriterCBuf::push: Unexpected image response count");
     }
 
-    // static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
-    // time_point<high_resolution_clock> end_time = high_resolution_clock::now();
-    //
-    // auto duration = duration_cast<microseconds>(end_time - start_time);
-    // double latency_ms = duration.count() / 1000.0;
-    //
-    // LogMessage("ReaderWriterCBuf::push: latency: {:.4f} ms", latency_ms);
-    // start_time = end_time; // Reset start time for next push
+    static time_point<high_resolution_clock> start_time = high_resolution_clock::now();
+    time_point<high_resolution_clock> end_time = high_resolution_clock::now();
+
+    auto duration = duration_cast<microseconds>(end_time - start_time);
+    double latency_ms = duration.count() / 1000.0;
+
+    LogPerf("ReaderWriterCBuf::push: latency: {:.4f} ms", latency_ms);
+    start_time = end_time; // Reset start time for next push
 
     // Compute write pointer
     int write_idx = write_idx_.load(std::memory_order_relaxed);
@@ -424,12 +433,11 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
             if (n_depths_written >= n_images_per_response_) {
                 throw std::runtime_error("ReaderWriterCBuf::push: Too many depth responses");
             }
-            cv::Mat cv_img = convert_image_to_cv_mat(img, response.source().depth_scale());
-            int depth_width = cv_img.cols;
-            int depth_height = cv_img.rows;
+            int depth_width  = img.cols();
+            int depth_height = img.rows();
 
             const DepthRegistrationParams& reg = depth_registration_[n_depths_written];
-            size_t depth_size = depth_width * depth_height;
+            size_t depth_size = size_t(depth_width) * depth_height;
             if (depth_size != n_elems_per_raw_depth_
                 || depth_width != reg.src_width || depth_height != reg.src_height) {
                 LogMessage("Raw depth size mismatch: expected {} ({}x{}), got {} ({}x{})",
@@ -437,18 +445,24 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                            depth_size, depth_width, depth_height);
                 throw std::runtime_error("ReaderWriterCBuf::push: Depth size mismatch");
             }
+            if (img.data().size() != depth_size * sizeof(uint16_t)) {
+                LogMessage("Raw depth is not uncompressed u16: expected {} bytes, got {}",
+                           depth_size * sizeof(uint16_t), img.data().size());
+                throw std::runtime_error("ReaderWriterCBuf::push: Unexpected raw depth payload");
+            }
 
             LogMessage("Registering {}x{} raw depth into {}x{} RGB frame at index {}, {:#x} depth_write_ptr",
                        depth_width, depth_height, reg.dst_width, reg.dst_height,
                        write_idx, size_t(depth_write_ptr));
 
-            // Stage the raw depth on the GPU, then reproject it into the RGB
-            // camera's image plane (client-side *_depth_in_visual_frame).
+            // Stage the raw u16 depth on the GPU; the scale to meters and the
+            // reprojection into the RGB camera's image plane both happen in the
+            // registration kernel (client-side *_depth_in_visual_frame).
             checkCudaError(
                 cudaMemcpyAsync(
                     raw_depth_scratch_,
-                    cv_img.data,
-                    depth_size * sizeof(float),
+                    img.data().data(),
+                    depth_size * sizeof(uint16_t),
                     cudaMemcpyHostToDevice,
                     cuda_stream_
                 ),
@@ -460,7 +474,8 @@ void ReaderWriterCBuf::push(const google::protobuf::RepeatedPtrField<bosdyn::api
                 depth_width,
                 depth_height,
                 camera_dump_subdirs_[n_depths_written] + "/raw-depth",
-                dump_frame_id
+                dump_frame_id,
+                reg.inv_depth_scale
             );
 
             checkCudaError(

@@ -895,83 +895,86 @@ cudaError_t preprocess_depth_image2(
 // Reprojects a raw depth image (depth sensor frame) into the RGB camera's image
 // plane, producing the same layout as Spot's *_depth_in_visual_frame sources.
 
-__global__ void fill_float_kernel(float* __restrict__ buf, int n, float value) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) buf[i] = value;
-}
+// Empty-pixel sentinel: 0xFF-memset-able, and the max unsigned value, so any
+// real depth sample's atomicMin replaces it.
+constexpr unsigned int kRegistrationSentinelBits = 0xFFFFFFFFu;
 
 __global__ void register_depth_kernel(
-    const float* __restrict__ src,
+    const uint16_t* __restrict__ src,
     float* __restrict__ dst,
     DepthRegistrationParams p
 ) {
-    int u = blockIdx.x * blockDim.x + threadIdx.x;
-    int v = blockIdx.y * blockDim.y + threadIdx.y;
-    if (u >= p.src_width || v >= p.src_height) return;
+    const int n_src = p.src_width * p.src_height;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n_src;
+         idx += gridDim.x * blockDim.x) {
+        const uint16_t raw = src[idx];
+        if (raw == 0) continue; // invalid depth sample
 
-    float z = src[v * p.src_width + u];
-    if (z <= 0.0f) return; // invalid depth sample
+        const int u = idx % p.src_width;
+        const int v = idx / p.src_width;
+        const float z = float(raw) * p.inv_depth_scale;
 
-    float uf = float(u), vf = float(v);
-    float px = z * (p.M[0] * uf + p.M[1] * vf + p.M[2]) + p.t[0];
-    float py = z * (p.M[3] * uf + p.M[4] * vf + p.M[5]) + p.t[1];
-    float pz = z * (p.M[6] * uf + p.M[7] * vf + p.M[8]) + p.t[2];
-    if (pz <= 0.0f) return; // behind the RGB camera
+        // Depth -> RGB reprojection
+        float uf = float(u), vf = float(v);
+        float px = z * (p.M[0] * uf + p.M[1] * vf + p.M[2]) + p.t[0];
+        float py = z * (p.M[3] * uf + p.M[4] * vf + p.M[5]) + p.t[1];
+        float pz = z * (p.M[6] * uf + p.M[7] * vf + p.M[8]) + p.t[2];
+        if (pz <= 0.0f) continue; // behind the RGB camera
 
-    float inv_z = 1.0f / pz;
-    int u0 = __float2int_rd(px * inv_z);
-    int v0 = __float2int_rd(py * inv_z);
+        float inv_z = fast_rcp(pz);
+        int u0 = __float2int_rd(px * inv_z);
+        int v0 = __float2int_rd(py * inv_z);
 
-    // 2x2 splat: the depth image is lower resolution than the RGB target, so
-    // covering the four nearest pixels reduces holes without a dilation pass.
-    #pragma unroll
-    for (int dv = 0; dv <= 1; ++dv) {
+        // 2x2 splat: the depth image is lower resolution than the RGB target, so
+        // covering the four nearest pixels reduces holes without a dilation pass.
         #pragma unroll
-        for (int du = 0; du <= 1; ++du) {
-            int x = u0 + du;
-            int y = v0 + dv;
-            if (x < 0 || y < 0 || x >= p.dst_width || y >= p.dst_height) continue;
-            // atomicMin on the raw bits keeps the nearest surface when several
-            // depth pixels land on one RGB pixel; ordering is correct because
-            // positive IEEE-754 floats compare like unsigned ints.
-            atomicMin(reinterpret_cast<unsigned int*>(&dst[y * p.dst_width + x]),
-                      __float_as_uint(pz));
+        for (int dv = 0; dv <= 1; ++dv) {
+            #pragma unroll
+            for (int du = 0; du <= 1; ++du) {
+                int x = u0 + du;
+                int y = v0 + dv;
+                if (x < 0 || y < 0 || x >= p.dst_width || y >= p.dst_height) continue;
+                // atomicMin on the raw bits keeps the nearest surface when several
+                // depth pixels land on one RGB pixel; ordering is correct because
+                // positive IEEE-754 floats compare like unsigned ints.
+                atomicMin(reinterpret_cast<unsigned int*>(&dst[y * p.dst_width + x]),
+                          __float_as_uint(pz));
+            }
         }
     }
 }
 
-__global__ void finalize_registered_depth_kernel(float* __restrict__ dst, int n, float sentinel) {
+__global__ void finalize_registered_depth_kernel(float* __restrict__ dst, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n && dst[i] == sentinel) dst[i] = 0.0f;
+    // The sentinel bit pattern is a NaN, so compare bits, not float values.
+    if (i < n && __float_as_uint(dst[i]) == kRegistrationSentinelBits) dst[i] = 0.0f;
 }
 
 cudaError_t register_depth_to_rgb(
-    const float* d_depth_in,
+    const uint16_t* d_depth_in,
     float* d_depth_out,
     const DepthRegistrationParams& params,
     cudaStream_t stream
 ) {
     const int n_dst = params.dst_width * params.dst_height;
-    if (n_dst <= 0 || params.src_width <= 0 || params.src_height <= 0) {
+    const int n_src = params.src_width * params.src_height;
+    if (n_dst <= 0 || n_src <= 0) {
         return cudaErrorInvalidValue;
     }
-    constexpr float kSentinel = FLT_MAX;
     constexpr int threads = 256;
 
-    fill_float_kernel<<<(n_dst + threads - 1) / threads, threads, 0, stream>>>(
-        d_depth_out, n_dst, kSentinel);
-    cudaError_t err = cudaGetLastError();
+    // 0xFF in every byte == kRegistrationSentinelBits; the memset fast path
+    // replaces a dedicated fill kernel launch.
+    cudaError_t err = cudaMemsetAsync(d_depth_out, 0xFF, n_dst * sizeof(float), stream);
     if (err != cudaSuccess) return err;
 
-    dim3 block(32, 8);
-    dim3 grid((params.src_width + block.x - 1) / block.x,
-              (params.src_height + block.y - 1) / block.y);
-    register_depth_kernel<<<grid, block, 0, stream>>>(d_depth_in, d_depth_out, params);
+    register_depth_kernel<<<(n_src + threads - 1) / threads, threads, 0, stream>>>(
+        d_depth_in, d_depth_out, params);
     err = cudaGetLastError();
     if (err != cudaSuccess) return err;
 
     finalize_registered_depth_kernel<<<(n_dst + threads - 1) / threads, threads, 0, stream>>>(
-        d_depth_out, n_dst, kSentinel);
+        d_depth_out, n_dst);
     return cudaGetLastError();
 }
 
@@ -1357,21 +1360,11 @@ __global__ void postprocess_depth_image(
 
     int idx = y * width + x;
     float generated_val = generated_depth[idx];
-    //float new_val       = sparse_depth[idx];
     float old_val       = cached_depth[idx];
 
-    // Check if new depth value is valid
-    //bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
     bool old_valid = (old_val >= min_valid_depth && old_val <= max_valid_depth);
 
     float result;
-    // if (new_valid) {
-    //     if (old_valid) {
-    //         result = old_val * (1.f-alpha_valid) + new_val * alpha_valid;
-    //     } else {
-    //         result = new_val;
-    //     }
-    // } else
     if (old_valid) {
         result = old_val * (1.f-alpha_invalid) + generated_val * alpha_invalid;
     } else {
