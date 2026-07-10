@@ -102,8 +102,11 @@ void UNITY_INTERFACE_API SOb_UnloadModel(SObModel model);
 // Config calls
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ToggleDepthCompletion(bool enable);
+// Enable/disable EMA depth averaging for the vision pipeline running on the
+// given camera stream (default: enabled). Takes effect on the next processed
+// frame. Fails if no vision pipeline exists for the given ids.
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_ToggleDepthAveraging(bool enable);
+bool UNITY_INTERFACE_API SOb_SetDepthAveraging(int32_t robot_id, int32_t cam_stream_id, bool enable);
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ToggleDepthAveragingWithOpticalFlow(bool enable);
 UNITY_INTERFACE_EXPORT

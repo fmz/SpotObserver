@@ -2,13 +2,32 @@
 // Created by fmz on 8/13/2025.
 //
 
+#ifdef _WIN32
+#include <windows.h>
+#include <d3d12.h>
+#include <dxgi.h>
+#include <libloaderapi.h>
+
+#else
+#error "Only Windows is supported for D3D12"
+#endif
+
+// This ordering is required unfortunately
+#include "spot-observer.h"
+#include "IUnityGraphics.h"
+#include "IUnityGraphicsD3D12.h"
+
 #include "unity-cuda-interop.h"
 #include "utils.h"
 #include "d3dx12.h"
+
 #include <unordered_map>
 #include <string>
 #include <chrono>
 #include <mutex>
+
+#include <cuda_runtime.h>
+#include <cuda.h>
 
 namespace SOb {
 

@@ -54,15 +54,6 @@ cudaError_t preprocess_depth_image2(
     cudaStream_t stream = 0
 );
 
-cudaError_t postprocess_depth_image(
-    float* depth_image,
-    int width,
-    int height,
-    float* workspace,
-    bool rotate_90_ccw = false,
-    cudaStream_t stream = 0
-);
-
 void convert_uint8_img_to_float_img(
     const uint8_t* d_in,  // [N,H,W,4] or [N,H,W,3]
     float* d_out,         // [N,3,H,W] or [N,3,W,H] if rotated
@@ -85,14 +76,20 @@ cudaError_t prefill_invalid_depth(
     float max_valid_depth = 100.0f,
     cudaStream_t stream = 0
 );
-cudaError_t update_depth_cache(
-    const float* generated_depth,
+// Fused output postprocess + EMA cache update: optionally rotates the
+// generated depth back into the sensor orientation (via workspace), folds it
+// into the running cache, and writes the blended result back over
+// generated_depth as the published output — one pass, no extra copies.
+cudaError_t postprocess_depth_image(
+    float* generated_depth, // Input: model output; overwritten with the blended result
     const float* sparse_depth,
-    float* cached_depth, // Input/output: running average buffer
-    float alpha_valid,   // If old and new depth are valid, use this alpha
-    float alpha_invalid, // If old depth is valid but new depth is invalid, use this alpha (between old depth and generated depth)
+    float* cached_depth,    // Input/output: running average buffer
+    float alpha_valid,      // If old and new depth are valid, use this alpha
+    float alpha_invalid,    // If old depth is valid but new depth is invalid, use this alpha (between old depth and generated depth)
     int width,
     int height,
+    float* workspace,       // >= width*height floats; only used when rotating
+    bool rotate_90_ccw = false,
     float min_valid_depth = 0.01f,
     float max_valid_depth = 100.0f,
     cudaStream_t stream = 0

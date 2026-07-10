@@ -5,8 +5,8 @@
 #include <cfloat>
 #include <cmath>
 #include <limits>
-#include <torch/torch.h>
-#include <torch/library.h>
+//#include <torch/torch.h>
+//#include <torch/library.h>
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -84,8 +84,8 @@ __global__ void downscale_optimized_kernel(
     int original_height
 ) {
     // Shared memory: input tile + intermediate results for separable convolution
-    __shared__ float s_input[TILE_SZ * SCALE_FACTOR][TILE_SZ * SCALE_FACTOR + 1];
-    __shared__ float s_horizontal[TILE_SZ][TILE_SZ * SCALE_FACTOR + 1];
+    __shared__ float s_input[TILE_SZ * SCALE_FACTOR][TILE_SZ * SCALE_FACTOR];
+    __shared__ float s_horizontal[TILE_SZ][TILE_SZ * SCALE_FACTOR];
 
     // Handle rotation: if rotating 90 CW, output dimensions are swapped
     const int new_width = ROTATE_90_CW ? (original_height / SCALE_FACTOR) : (original_width / SCALE_FACTOR);
@@ -648,39 +648,6 @@ __device__ __forceinline__ float fast_rcp(float x) {
 //
 //     return cudaGetLastError();
 // }
-
-cudaError_t postprocess_depth_image(
-    float* depth_image,
-    int width,
-    int height,
-    float* workspace,
-    bool rotate_90_ccw,
-    cudaStream_t stream
-) {
-    if (!rotate_90_ccw) {
-        return cudaSuccess; // No rotation needed
-    }
-    
-    // Apply 270 CW rotation
-    dim3 block(TILE_SIZE, TILE_SIZE);
-    dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
-              (height + TILE_SIZE - 1) / TILE_SIZE);
-
-    // Rotate to workspace buffer
-    rotateDepth_fast_kernel<Rotation::CW_270><<<grid, block, 0, stream>>>(
-        depth_image, workspace, width, height);
-    
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) return err;
-    
-    // Copy rotated result back
-    size_t image_size = width * height * sizeof(float);
-    err = cudaMemcpyAsync(depth_image, workspace, image_size, cudaMemcpyDeviceToDevice, stream);
-    if (err != cudaSuccess) return err;
-
-    err = cudaGetLastError();
-    return err;
-}
 
 struct int2_ { int x, y; };
 
@@ -1366,15 +1333,16 @@ cudaError_t prefill_invalid_depth(
     return cudaGetLastError();
 }
 
-// CUDA kernel for maintaining running average of depth values
-// new_depth: current frame depth values
-// avg_depth: running average depth buffer (input/output)
-// width, height: image dimensions
-
-__global__ void update_depth_cache_kernel(
-    const float* __restrict__ generated_depth,
+// Fused output postprocess + EMA depth-cache update. One pass over the
+// image: reads the generated depth, folds it into the running cache, and
+// writes the blended result out as the published depth.
+// generated_depth and output_depth may alias (each thread reads and writes
+// the same index), so those two pointers must not be __restrict__.
+__global__ void postprocess_depth_image(
+    const float* generated_depth,
     const float* __restrict__ sparse_depth,
     float* __restrict__ cached_depth,
+    float* output_depth,
     float alpha_valid,
     float alpha_invalid,
     int width,
@@ -1384,55 +1352,79 @@ __global__ void update_depth_cache_kernel(
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
-    
+
     if (x >= width || y >= height) return;
-    
+
     int idx = y * width + x;
     float generated_val = generated_depth[idx];
-    float new_val       = sparse_depth[idx];
+    //float new_val       = sparse_depth[idx];
     float old_val       = cached_depth[idx];
-    
+
     // Check if new depth value is valid
-    bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
+    //bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
     bool old_valid = (old_val >= min_valid_depth && old_val <= max_valid_depth);
-    
-    if (new_valid) {
-        if (old_valid) {
-            cached_depth[idx] = old_val * (1.f-alpha_valid) + new_val * alpha_valid;
-        } else {
-            cached_depth[idx] = new_val;
-        }
-    } else if (old_valid) {
-        cached_depth[idx] = old_val * (1.f-alpha_invalid) + generated_val * alpha_invalid;
+
+    float result;
+    // if (new_valid) {
+    //     if (old_valid) {
+    //         result = old_val * (1.f-alpha_valid) + new_val * alpha_valid;
+    //     } else {
+    //         result = new_val;
+    //     }
+    // } else
+    if (old_valid) {
+        result = old_val * (1.f-alpha_invalid) + generated_val * alpha_invalid;
     } else {
-        cached_depth[idx] = generated_val;
+        result = generated_val;
     }
+
+    cached_depth[idx] = result;
+    output_depth[idx] = result;
 }
 
-// Host function wrapper for depth cache update
-cudaError_t update_depth_cache(
-    const float* generated_depth,
+// Host wrapper: optionally rotates the generated depth back into the sensor
+// orientation (via workspace), then runs the fused EMA update, writing the
+// blended result back over generated_depth as the published output.
+cudaError_t postprocess_depth_image(
+    float* generated_depth,
     const float* sparse_depth,
     float* cached_depth,
     float alpha_valid,
     float alpha_invalid,
     int width,
     int height,
+    float* workspace,
+    bool rotate_90_ccw,
     float min_valid_depth,
     float max_valid_depth,
     cudaStream_t stream
 ) {
+    const float* d_generated = generated_depth;
+    if (rotate_90_ccw) {
+        // Rotate into the workspace; the fused kernel then reads from there
+        // and can safely overwrite generated_depth with the final result.
+        dim3 rot_block(TILE_SIZE, TILE_SIZE);
+        dim3 rot_grid((width + TILE_SIZE - 1) / TILE_SIZE,
+                      (height + TILE_SIZE - 1) / TILE_SIZE);
+        rotateDepth_fast_kernel<Rotation::CW_270><<<rot_grid, rot_block, 0, stream>>>(
+            generated_depth, workspace, width, height);
+
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) return err;
+        d_generated = workspace;
+    }
+
     dim3 block(32, 8);
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
-              
-    update_depth_cache_kernel<<<grid, block, 0, stream>>>(
-        generated_depth, sparse_depth, cached_depth,
+
+    postprocess_depth_image<<<grid, block, 0, stream>>>(
+        d_generated, sparse_depth, cached_depth, generated_depth,
         alpha_valid, alpha_invalid,
         width, height,
         min_valid_depth, max_valid_depth
     );
-    
+
     return cudaGetLastError();
 }
 

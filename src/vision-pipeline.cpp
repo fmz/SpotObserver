@@ -110,6 +110,8 @@ bool VisionPipeline::allocateCudaBuffers() {
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data");
     checkCudaError(cudaMalloc(&cuda_ws_.d_preprocessed_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data preprocessed");
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_cached_, depth_size), "cudaMalloc for vision pipeline input depth cached");
+    // Zero = invalid depth, so the EMA cache starts empty and gets seeded on the first update.
+    checkCudaError(cudaMemset(cuda_ws_.d_depth_cached_, 0, depth_size), "cudaMemset for vision pipeline input depth cached");
 
     size_t depth_workspace_size = depth_preprocessor2_get_workspace_size(depth_shape_.W, depth_shape_.H);
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_preprocessor_workspace_, depth_workspace_size), "cudaMalloc for vision pipeline depth preprocessor workspace");
@@ -214,6 +216,21 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             constexpr int32_t depth_scale_factor = 4;
             constexpr float   inv_scale_factor = 1.0f / depth_scale_factor;
 
+            constexpr float min_valid_depth = 0.01f;
+            constexpr float max_valid_depth = 100.0f;
+            // EMA weights for the depth cache: weight of the new sample when the
+            // sensor depth is valid, and of the generated depth when it is not.
+            constexpr float ema_alpha_valid   = 0.5f;
+            constexpr float ema_alpha_invalid = 0.5f;
+
+            // Runtime EMA toggle, sampled once per iteration so a mid-frame
+            // toggle can't mix behaviors within one image set. When disabled,
+            // the fused postprocess runs as a pass-through (alpha 1 => output =
+            // generated depth) but still refreshes the cache, so re-enabling
+            // resumes blending from the latest frame with no stale data.
+            const bool  ema_enabled   = depth_averaging_enabled_.load(std::memory_order_relaxed);
+            const float alpha_invalid = ema_enabled ? ema_alpha_invalid : 1.0f;
+
             // Copy inputs on the per-connection stream
             checkCudaError(cudaMemcpyAsync(
                 d_rgb_ptr,
@@ -285,15 +302,15 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
-                if (!first_run_) {
+                if (ema_enabled && !first_run_) {
                     checkCudaError(prefill_invalid_depth(
                         cur_depth_input_ptr,
                         cur_preprocessed_depth_ptr,
                         depth_cache_ptr,
                         depth_shape_.W,
                         depth_shape_.H,
-                        0.01f,
-                        100.0f,
+                        min_valid_depth,
+                        max_valid_depth,
                         cuda_stream_
                     ), "prefill_invalid_depth");
 
@@ -361,7 +378,6 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 continue;
             }
 
-
             auto inference_time = std::chrono::high_resolution_clock::now();
             auto inference_duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
             LogMessage("VisionPipeline inference time: {} ms", inference_duration.count());
@@ -375,29 +391,25 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
                 float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
-                // Postprocess output: rotate back if input was rotated
+                // Fused postprocess + EMA depth averaging: rotate the model output
+                // back if the input was rotated, fold it into the running cache,
+                // and publish the blended result as the pipeline output in a
+                // single pass — no intermediate copies.
                 float* temp_output_ptr = reinterpret_cast<float*>(cuda_ws_.d_depth_preprocessor_workspace_);
                 checkCudaError(postprocess_depth_image(
                     cur_depth_output_ptr,
+                    cur_depth_input_ptr,
+                    depth_cache_ptr,
+                    ema_alpha_valid,
+                    alpha_invalid,
                     output_shape_.W,
                     output_shape_.H,
                     temp_output_ptr,
                     do_rotate_90_cw,
+                    min_valid_depth,
+                    max_valid_depth,
                     cuda_stream_
-                ), "postprocess_depth_image");
-                //
-                // checkCudaError(update_depth_cache(
-                //     cur_depth_output_ptr,
-                //     cur_depth_input_ptr,
-                //     depth_cache_ptr,
-                //     0.5,
-                //     0.1,
-                //     output_shape_.W,
-                //     output_shape_.H,
-                //     0.01f,
-                //     100.0f,
-                //     cuda_stream_
-                // ), "update_depth_cache");
+                ), "postprocess_update_depth_cache");
 
                 // Ensure dumps see completed work (dumpers likely use default stream)
                 checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before dumps");
@@ -446,7 +458,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("VisionPipeline: Updating write index from {} to {}",
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
-            // first_run_ = false;
+            first_run_ = false;
             dump_id++;
 
         } catch (const std::exception& e) {
