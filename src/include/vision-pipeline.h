@@ -10,10 +10,6 @@
 #include <memory>
 #include <thread>
 #include <atomic>
-#include <mutex>
-#include <condition_variable>
-#include <queue>
-#include <vector>
 #include <stop_token>
 #include <cuda_runtime.h>
 
@@ -32,6 +28,7 @@ private:
     MLModel& model_;
     const SpotCamStream& spot_cam_stream_;
     bool first_run_{true};
+    std::atomic<bool> depth_averaging_enabled_{false};
     
     // Threading
     std::unique_ptr<std::jthread> pipeline_thread_;
@@ -79,6 +76,12 @@ public:
     bool start();
     void stop();
     bool isRunning() const { return running_.load(); }
+
+    // Runtime toggle for EMA depth averaging (default: enabled).
+    // Takes effect on the next processed frame.
+    void setDepthAveraging(bool enable) {
+        depth_averaging_enabled_.store(enable, std::memory_order_relaxed);
+    }
 
     bool getCurrentImages(
         int32_t n_images_requested,

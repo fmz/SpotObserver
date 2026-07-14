@@ -45,36 +45,9 @@ target_link_libraries(spot_camera_stream_test
     gRPC::grpc
 )
 
-# Copy only the DLLs needed for this test
-if(COPY_DLLS AND WIN32)
-    # Copy vcpkg DLLs (for gRPC/protobuf)
-    if(VCPKG_DLL_DIR AND EXISTS "${VCPKG_DLL_DIR}")
-        foreach(dll ${VCPKG_DLLS})
-            if(EXISTS "${VCPKG_DLL_DIR}/${dll}")
-                add_custom_command(TARGET spot_camera_stream_test POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${VCPKG_DLL_DIR}/${dll}"
-                    $<TARGET_FILE_DIR:spot_camera_stream_test>
-                    COMMENT "Copying ${dll} for test"
-                )
-            endif()
-        endforeach()
-    endif()
-    
-    # Copy OpenCV DLLs
-    if(EXISTS "${OPENCV_DLL_DIR}")
-        foreach(dll ${OPENCV_DLLS})
-            if(EXISTS "${OPENCV_DLL_DIR}/${dll}")
-                add_custom_command(TARGET spot_camera_stream_test POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${OPENCV_DLL_DIR}/${dll}"
-                    $<TARGET_FILE_DIR:spot_camera_stream_test>
-                    COMMENT "Copying ${dll} for test"
-                )
-            endif()
-        endforeach()
-    endif()
-endif()
+# Runtime DLLs are copied once into the shared top-level runtime directory
+# (see CMAKE_RUNTIME_OUTPUT_DIRECTORY in the top-level CMakeLists.txt), where
+# this executable also lands — no per-test copying needed.
 
 if(INSTALL_TESTS)
     install(TARGETS spot_camera_stream_test

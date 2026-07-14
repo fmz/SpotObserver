@@ -20,6 +20,13 @@ from bosdyn.client.image import ImageClient, build_image_request  # type: ignore
 
 from .color_correction import _ROBOT_CCMS
 from .config import CameraType, SpotConfig
+from .depth_registration import (
+    DepthRegistrationParams,
+    DepthRegistrationWorkspace,
+    create_registration_workspace,
+    extract_registration_params,
+    register_depth,
+)
 from .stitch import (
     STITCH_OUT_H,
     STITCH_OUT_W,
@@ -53,7 +60,8 @@ class ImageFrame:
 
     Attributes:
         rgb_images: List of RGB images as numpy arrays (H, W, 3) in float32 [0, 1]
-        depth_images: List of depth images as numpy arrays (H, W) in float32 (meters)
+        depth_images: List of depth images as numpy arrays (H, W) in float32 (meters),
+            registered into the RGB camera frame (same H, W as the RGB images)
         camera_order: List of CameraType enums indicating order of images
         timestamp: Time when frame was captured (monotonic clock)
         acquisition_time: Robot's acquisition time from image response
@@ -148,6 +156,11 @@ class SpotCamStream:
         self._frame_pool_index: int = 0
         self._image_requests: list[image_pb2.ImageRequest] = []
 
+        # Per-camera raw-depth -> RGB-frame registration params, cached from the
+        # first response batch (fixed by the mechanical mounting).
+        self._depth_reg_params: list[DepthRegistrationParams] | None = None
+        self._depth_reg_workspaces: list[DepthRegistrationWorkspace] | None = None
+
         # Optional per-stream vision pipeline, imported lazily.
         self._vision_pipeline: VisionPipeline | None = None
 
@@ -240,6 +253,8 @@ class SpotCamStream:
         self._frame_pool = []
         self._frame_pool_index = 0
         self._ccm_scratch_by_shape = {}
+        self._depth_reg_params = None
+        self._depth_reg_workspaces = None
         self._frame_count = 0
         self._error_count = 0
         self._last_body_to_worlds = None
@@ -828,10 +843,17 @@ class SpotCamStream:
                 responses[rgb_idx], is_depth=False, out_array=frame.rgb_images[frame_i], ccm=ccm
             )
 
+            if self._depth_reg_params is None or self._depth_reg_workspaces is None:
+                raise SpotCamStreamError("Depth registration state not initialized")
+            workspace = self._depth_reg_workspaces[i]
             self._convert_image_response_inplace(
-                responses[depth_idx],
-                is_depth=True,
-                out_array=frame.depth_images[frame_i],
+                responses[depth_idx], is_depth=True, out_array=workspace.raw_depth
+            )
+            register_depth(
+                workspace.raw_depth,
+                self._depth_reg_params[i],
+                out=frame.depth_images[frame_i],
+                workspace=workspace,
             )
 
         # Update timestamps and camera extrinsics params
@@ -870,6 +892,10 @@ class SpotCamStream:
     ) -> list[np.ndarray]:
         """
         Decode initial responses once for shape inference and first frame fill.
+
+        Also caches the per-camera depth registration params: the raw depth
+        sources live in the depth sensor's frame, so every depth image is
+        reprojected into the RGB camera frame (RGB-sized) before use.
         """
         n_cameras = len(self._sdk_camera_order)
         expected_count = n_cameras * 2  # RGB + depth per camera
@@ -878,6 +904,8 @@ class SpotCamStream:
             raise SpotCamStreamError(f"Expected {expected_count} responses, got {len(responses)}")
 
         decoded: list[np.ndarray] = []
+        reg_params: list[DepthRegistrationParams] = []
+        reg_workspaces: list[DepthRegistrationWorkspace] = []
         for i in range(n_cameras):
             rgb_idx = i * 2
             depth_idx = i * 2 + 1
@@ -885,7 +913,29 @@ class SpotCamStream:
             if self._ccms is not None:
                 self._apply_ccm_inplace(rgb, self._ccms[self._sdk_camera_order[i]])
             decoded.append(rgb)
-            decoded.append(self._convert_image_response_alloc(responses[depth_idx], is_depth=True))
+
+            try:
+                params = extract_registration_params(
+                    responses[rgb_idx], responses[depth_idx], dst_shape=rgb.shape[:2]
+                )
+            except ValueError as exc:
+                raise SpotCamStreamError(
+                    f"Failed to build depth registration params for "
+                    f"{self._sdk_camera_order[i].name}: {exc}"
+                ) from exc
+            reg_params.append(params)
+            workspace = create_registration_workspace(params)
+            reg_workspaces.append(workspace)
+            self._convert_image_response_inplace(
+                responses[depth_idx], is_depth=True, out_array=workspace.raw_depth
+            )
+
+            registered = np.zeros(rgb.shape[:2], dtype=np.float32)
+            register_depth(workspace.raw_depth, params, registered, workspace=workspace)
+            decoded.append(registered)
+
+        self._depth_reg_params = reg_params
+        self._depth_reg_workspaces = reg_workspaces
         return decoded
 
     def _cache_stitch_params(self, responses: list[image_pb2.ImageResponse]) -> None:

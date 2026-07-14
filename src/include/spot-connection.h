@@ -6,6 +6,7 @@
 
 #include "spot-observer.h"
 #include "model.h"
+#include "cuda_kernels.cuh"
 
 #include <bosdyn/client/sdk/client_sdk.h>
 #include <bosdyn/client/robot/robot.h>
@@ -41,6 +42,14 @@ private:
     float*   depth_data_{nullptr};
     float*   cached_depth_{nullptr};
 
+    // Client-side depth registration: per-camera reprojection params. Raw u16
+    // depth images are staged in raw_depth_scratch_ (CUDA memory) and registered
+    // into the depth ring at RGB resolution (converted to meters on the GPU).
+    std::vector<DepthRegistrationParams> depth_registration_;
+    std::vector<size_t> n_elems_per_raw_depth_;
+    size_t raw_depth_scratch_size_{0};
+    uint16_t* raw_depth_scratch_{nullptr};
+
     bool first_run_{true};
     const size_t max_size_; // Maximum size of the queue
 
@@ -60,7 +69,9 @@ public:
         size_t n_bytes_per_rgb,
         size_t n_bytes_per_depth,
         std::vector<SpotCamera> cameras,
-        std::vector<std::string> camera_dump_subdirs
+        std::vector<std::string> camera_dump_subdirs,
+        std::vector<DepthRegistrationParams> depth_registration,
+        std::vector<size_t> n_elems_per_raw_depth
     );
 
     /**
@@ -112,6 +123,8 @@ class SpotCamStream {
 
     TensorShape current_rgb_shape_{0, 0, 0, 0};
     TensorShape current_depth_shape_{0, 0, 0, 0};
+
+    TimingInfo timing_info_;
 
     bosdyn::api::GetImageRequest _createImageRequest(
         const std::vector<std::string>& rgb_sources,

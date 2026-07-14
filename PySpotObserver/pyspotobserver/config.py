@@ -36,14 +36,16 @@ class CameraType(IntFlag):
             # Hand camera uses color sensor naming, not fisheye naming.
             cls.HAND: "hand_color_image",
         }
+        # Raw depth-sensor-frame sources: substantially smaller on the wire than
+        # the robot-registered *_depth_in_visual_frame sources. Alignment with the
+        # RGB image is done client-side (see depth_registration.register_depth).
         depth_names = {
-            cls.BACK: "back_depth_in_visual_frame",
-            cls.FRONTLEFT: "frontleft_depth_in_visual_frame",
-            cls.FRONTRIGHT: "frontright_depth_in_visual_frame",
-            cls.LEFT: "left_depth_in_visual_frame",
-            cls.RIGHT: "right_depth_in_visual_frame",
-            # Hand depth is aligned to hand color frame.
-            cls.HAND: "hand_depth_in_hand_color_frame",
+            cls.BACK: "back_depth",
+            cls.FRONTLEFT: "frontleft_depth",
+            cls.FRONTRIGHT: "frontright_depth",
+            cls.LEFT: "left_depth",
+            cls.RIGHT: "right_depth",
+            cls.HAND: "hand_depth",
         }
 
         if camera not in rgb_names:

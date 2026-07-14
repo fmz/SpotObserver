@@ -66,13 +66,13 @@ int main(int argc, char* argv[]) {
     std::string password  = argv[4];
 
     //SOb_ToggleDebugDumps("./spot_dump");
-    SOb_ToggleLogging(false);
+    SOb_SetLogLevel(1);
 
     int32_t spot_ids[2] = {-1, -1};
 
     std::unordered_map<int32_t, std::vector<int32_t>> cam_stream_ids;
 
-    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT};//, HAND };
+    std::vector<uint32_t> cam_bitmasks = {FRONTRIGHT | FRONTLEFT, HAND };
     for (size_t i = 0; i < 2; i++) {
         if (robot_ips[i] == "0") {
             spot_ids[i] = -1;
@@ -165,13 +165,21 @@ int main(int argc, char* argv[]) {
         for (int32_t spot = 0; spot < 2; spot++) {
             int32_t spot_id = spot_ids[spot];
             if (spot_id < 0) {
-                std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
+                static bool printed_once = false;
+                if (!printed_once) {
+                    std::cout << "Skipping Spot " << spot << " as it is not connected." << std::endl;
+                    printed_once = true;
+                }
                 continue;
             }
             for (int32_t stream = 0; stream < cam_stream_ids[spot_id].size(); stream++) {
                 int32_t cam_stream_id = cam_stream_ids[spot_id][stream];
                 if (cam_stream_id < 0) {
-                    std::cout << "Skipping Spot " << spot << " Stream " << stream << " as it is not valid." << std::endl;
+                    static bool printed_once = false;
+                    if (!printed_once) {
+                        std::cout << "Skipping Spot " << spot << " Stream " << stream << " as it is not valid." << std::endl;
+                        printed_once = true;
+                    }
                     continue;
                 }
 

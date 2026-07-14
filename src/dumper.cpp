@@ -327,55 +327,49 @@ void DumpCameraTransform(
     }
 }
 
-// void DumpDepthImageFromCuda(const uint16_t* depth, int32_t width, int32_t height, const std::string& subdir, int32_t dump_id) {
-//     if (!m_dumps_enabled) {
-//         return;
-//     }
-//
-//     const size_t num_pixels = width * height;
-//     const size_t byte_size = num_pixels * sizeof(uint16_t);
-//
-//     // Allocate host memory for float depth image
-//     std::vector<uint16_t> h_depth(num_pixels);
-//
-//     // Copy depth image from device to host
-//     cudaError_t err = cudaMemcpy(h_depth.data(), depth, byte_size, cudaMemcpyDeviceToHost);
-//     if (err != cudaSuccess) {
-//         LogMessage("Failed to copy depth image from device to host: {}", cudaGetErrorString(err));
-//         return;
-//     }
-//
-//     // Find min and max depth values for normalization
-//     uint16_t min_val = h_depth[0];
-//     uint16_t max_val = h_depth[0];
-//     for (size_t i = 1; i < num_pixels; ++i) {
-//         if (h_depth[i] < min_val) min_val = h_depth[i];
-//         if (h_depth[i] > max_val) max_val = h_depth[i];
-//     }
-//
-//     // Allocate host memory for 8-bit grayscale image
-//     std::vector<uint8_t> h_depth_u8(num_pixels);
-//     uint16_t range = max_val - min_val;
-//
-//     // Normalize and convert to uint8
-//     if (range > 0) {
-//         for (size_t i = 0; i < num_pixels; ++i) {
-//             h_depth_u8[i] = static_cast<uint8_t>(((h_depth[i] - min_val) / range) * 255.0f);
-//         }
-//     } else {
-//         // If range is zero, the image is constant. Set to mid-gray.
-//         std::fill(h_depth_u8.begin(), h_depth_u8.end(), 128);
-//     }
-//
-//     // Generate filename
-//     std::string file_path = m_dump_path + "/" + subdir + "/depth_" + std::to_string(dump_id) + ".png";
-//
-//     // Write image to file
-//     const int channels = 1; // Grayscale
-//     const int stride_in_bytes = width * channels;
-//     if (!stbi_write_png(file_path.c_str(), width, height, channels, h_depth_u8.data(), stride_in_bytes)) {
-//         LogMessage("Failed to write depth image to: {}", file_path);
-//     }
-// }
+void DumpDepthImageFromCuda(
+    const uint16_t* depth,
+    int32_t width,
+    int32_t height,
+    const std::string& subdir,
+    int32_t dump_id,
+    float scale
+) {
+    if (!m_dumps_enabled) {
+        return;
+    }
+
+    const size_t num_pixels = size_t(width) * height;
+
+    std::vector<uint16_t> h_depth_u16(num_pixels);
+    cudaError_t err = cudaMemcpy(
+        h_depth_u16.data(), depth, num_pixels * sizeof(uint16_t), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        LogMessage("Failed to copy depth image from device to host: {}", cudaGetErrorString(err));
+        return;
+    }
+
+    // Convert with scale (meters per raw unit) and write the same reloadable
+    // count-prefixed float32 format as the float overload.
+    std::vector<float> h_depth(num_pixels);
+    for (size_t i = 0; i < num_pixels; ++i) {
+        h_depth[i] = float(h_depth_u16[i]) * scale;
+    }
+
+    std::string file_path = get_file_path(m_dump_path, subdir, "", dump_id, "");
+    std::ofstream file(file_path, std::ios::binary);
+    if (!file) {
+        LogMessage("Failed to write depth image to: {}", file_path);
+        return;
+    }
+
+    const uint32_t count = static_cast<uint32_t>(h_depth.size());
+    file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    file.write(reinterpret_cast<const char*>(h_depth.data()), static_cast<std::streamsize>(h_depth.size() * sizeof(float)));
+
+    if (!file) {
+        LogMessage("Failed while writing depth image to: {}", file_path);
+    }
+}
 
 } // namespace STb
