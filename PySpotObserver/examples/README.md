@@ -40,6 +40,7 @@ python examples/basic_streaming.py --robot-ip 192.168.80.3 --username <user> --p
 - optional OpenCV display
 - optional ONNX vision pipeline with `--vision-pipeline`
 - optional timing summaries with `--print-timing`
+- stream fused frontal view with `--stitch`
 
 Show the full CLI:
 

@@ -42,7 +42,6 @@ if TYPE_CHECKING:
 
 _VIRTUAL_CAMERAS = frozenset({CameraType.FRONTSTITCHED})
 
-
 logger = logging.getLogger(__name__)
 
 
