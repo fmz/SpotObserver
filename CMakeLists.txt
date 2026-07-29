@@ -30,7 +30,7 @@ message(STATUS "CUDAToolkit found: ${CUDAToolkit_VERSION}")
 set(SPOT_SDK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/extern/spot-sdk-install)
 set(OpenCV_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/extern/opencv/include)
 set(OpenCV_LIBS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/opencv/x64/vc16/lib)
-set(OpenCV_LIBS opencv_world4110.lib)
+set(OpenCV_LIBS opencv_world4140.lib)
 
 # Force protobuf to come from vcpkg, not libtorch
 find_package(Protobuf REQUIRED PATHS "${Protobuf_ROOT}" NO_DEFAULT_PATH)
@@ -51,7 +51,7 @@ endif()
 message(STATUS "Found libtorch: ${TORCH_LIBRARIES}")
 message(STATUS "Torch install prefix: ${TORCH_INSTALL_PREFIX}")
 
-set(ONNX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/onnxruntime-win-x64-gpu-1.22.0)
+set(ONNX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/onnxruntime-win-x64-gpu_cuda12-1.28.0)
 # Check if ONNX_DIR exists
 if(NOT EXISTS ${ONNX_DIR})
     message(FATAL_ERROR "ONNX directory not found: ${ONNX_DIR}. Please ensure ONNX Runtime is correctly extracted.")
@@ -91,7 +91,7 @@ add_library(${PLUGIN_NAME} SHARED
 )
 
 # Unity Native-plugin API includes TODO: cleanup
-set(UnityPluginAPI_INCLUDE "C:/Program Files/Unity/Hub/Editor/6000.2.0f1/Editor/Data/PluginAPI")
+set(UnityPluginAPI_INCLUDE "C:/Program Files/Unity/Hub/Editor/6000.2.8f1/Editor/Data/PluginAPI")
 
 # Include directories
 # TODO: Use target_include_directories instead of include_directories
@@ -183,7 +183,7 @@ if(COPY_DLLS)
 
     # List of required OpenCV DLLs
     set(OPENCV_DLLS
-        "opencv_world4110.dll"
+        "opencv_world4140.dll"
     )
 
     set(PLUGIN_DLLS
