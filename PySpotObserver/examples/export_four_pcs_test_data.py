@@ -20,7 +20,7 @@ Output format (plain text, whitespace-separated):
     <source point n x y z>
     <target point 1 x y z>
     ...
-    <target point m x y z>
+    <target point m x y z>.
 
 The plane line is fit_dominant_plane()'s result on the FULL source cloud
 (before downsampling), matching how it's used in the real pipeline -- plane
