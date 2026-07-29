@@ -1,17 +1,16 @@
 # Extern directory instructions
 
 ## OpenCV
-Download and extract OpenCV (grab only the 'build' directory)
+Download and extract OpenCV, grab only the contents of the 'build' directory and place them in a folder called opencv in the extern folder. Follow the "Installation by Using Pre-built Libraries" instructions.
 https://docs.opencv.org/4.x/d3/d52/tutorial_windows_install.html#tutorial_windows_install_path
 
 ## Spot SDK
-Follow the instructions here:
-https://github.com/boston-dynamics/spot-cpp-sdk/blob/master/docs/cpp/quickstart.md
 
-Important!!! 
+Clone the vcpkg into a directory adjacent to SpotObserver and open a terminal in the vcpkg directory: https://github.com/boston-dynamics/spot-cpp-sdk/blob/master/docs/cpp/quickstart.md
 
-1. Install vcpkg in a directory adjacent to SpotObserver (next to it).
-2. Do NOT git checkout the version number that is recommended in the spot-cpp-sdk quickstart, and instead add a file `vcpkg-configuration.json` inside the vcpkg directory with the following contents:
+**IMPORTANT NEXT STEPS:**
+
+1. Do NOT git checkout the version number that is recommended in the spot-cpp-sdk quickstart, and instead add a file `vcpkg-configuration.json` inside the vcpkg directory with the following contents:
 ```{
   "default-registry": {
     "kind": "git",
@@ -19,8 +18,9 @@ Important!!!
     "baseline": "3b213864579b6fa686e38715508f7cd41a50900f"
   }
 }
+
 ```
-3. To specify the dependency versions, add another file in `vcpkg`, name it `vcpkg.json`, and put the following in it:
+2. To specify the dependency versions, add another file in `vcpkg`, name it `vcpkg.json`, and put the following in it:
 ```
 {
   "dependencies": [
@@ -44,13 +44,24 @@ Important!!!
 }
 ```
 
-When running cmake on the SDK, use 
-> CMAKE_PREFIX_PATH instead of CMAKE_TOOLCHAIN_FILE:
-cmake -B build -DCMAKE_PREFIX_PATH="\<vcpkg-abs-path\>/installed/x64-windows" -DCMAKE_INSTALL_PREFIX="\<SpotObserver-abs-path\>/extern/spot-sdk-install" -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=TRUE cpp
-
-Also, apply the patch provided to spot-cpp-sdk:
+3. Apply the patch provided to spot-cpp-sdk:
+```
 > cd extern/spot-cpp-sdk
 > git apply ../spot-cpp-sdk.patch
+```
+
+4. Open git bash to extern/spot-cpp-sdk and run the follwing. When running cmake on the SDK, use 
+CMAKE_PREFIX_PATH instead of CMAKE_TOOLCHAIN_FILE:
+```
+cmake -B build -DCMAKE_PREFIX_PATH="\<vcpkg-abs-path\>/vcpkg_installed/x64-windows" -DCMAKE_INSTALL_PREFIX="\<SpotObserver-abs-path\>/extern/spot-sdk-install" -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=TRUE cpp
+```
+Replace <vcpkg-abs-path\> and <SpotObserver-abs-path\> with the real path to the respective directories.
+
+5. Then run the following commands.
+```
+cmake --build build --config Release
+cmake --install build
+```
 
 ## LibTorch
 Download and extract libtorch for windows:
