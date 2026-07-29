@@ -4,6 +4,19 @@
 add_executable(spot_camera_stream_test
     spot-camera-stream-multithreaded.cpp
 )
+
+# Standalone four-pcs correctness/timing check. Only depends on Eigen (no
+# bosdyn/OpenCV/CUDA needed), unlike the camera streaming test above.
+add_executable(four_pcs_test
+    four-pcs-test.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
+)
+target_include_directories(four_pcs_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/include
+)
+target_link_libraries(four_pcs_test
+    Eigen3::Eigen
+)
 #
 ## Link only the dependencies actually needed for the camera streaming test
 #target_link_libraries(spot_camera_stream_test

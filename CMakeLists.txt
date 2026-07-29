@@ -36,6 +36,7 @@ set(OpenCV_LIBS opencv_world4110.lib)
 find_package(Protobuf REQUIRED PATHS "${Protobuf_ROOT}" NO_DEFAULT_PATH)
 find_package(gRPC REQUIRED)
 find_package(Threads REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 # Support Ampere and Ada architectures - set BEFORE finding Torch
 set(CMAKE_CUDA_ARCHITECTURES 86;89 CACHE STRING "CUDA archs" FORCE)
@@ -88,6 +89,8 @@ add_library(${PLUGIN_NAME} SHARED
     src/vision-pipeline.cpp
     src/cuda_kernels.cu
     src/load_image_to_cuda.cu
+    src/include/four-pcs.h
+    src/four-pcs.cpp
 )
 
 # Unity Native-plugin API includes TODO: cleanup
@@ -127,6 +130,7 @@ target_link_libraries(${PLUGIN_NAME}
     gRPC::grpc
     ${TORCH_LIBRARIES}
     ${ONNX_LIB_DIR}/onnxruntime.lib
+    Eigen3::Eigen
 )
 
 # Add interface compile definitions for Windows
