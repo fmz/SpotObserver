@@ -52,12 +52,11 @@ def backproject_to_body(depth, params):
     return cam_pts @ params.rot.T + params.trans
 
 def get_robot_pose(conn):
-
-    # state_client = conn.robot.ensure_client(RobotStateClient.default_service_name)
-    # state = state_client.get_robot_state()
-
-    snapshot = conn.robot.get_frame_tree_snapshot()
-    return get_vision_tform_body(snapshot).to_matrix()
+    """Current robot pose in its own vision frame (vision_tform_body)."""
+    robot_state_client = conn.robot.ensure_client(RobotStateClient.default_service_name)
+    state = robot_state_client.get_robot_state()
+    transforms = state.kinematic_state.transforms_snapshot
+    return get_vision_tform_body(transforms).to_matrix()
 
 def save_capture(name, rgb_images, depth_images, camera_order, params_list, pose):
     CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
