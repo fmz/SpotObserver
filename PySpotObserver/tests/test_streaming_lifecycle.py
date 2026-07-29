@@ -1,11 +1,10 @@
 import threading
 import time
 
+import cv2
 import numpy as np
 import pytest
-import cv2
-from bosdyn.api import image_pb2
-
+from bosdyn.api import image_pb2  # type: ignore[import-untyped]
 from pyspotobserver.camera_stream import ImageFrame, SpotCamStream, SpotCamStreamError
 from pyspotobserver.config import CameraType, SpotConfig
 from pyspotobserver.connection import SpotConnection, SpotConnectionError
@@ -38,19 +37,21 @@ def test_get_current_images_returns_latest_frame():
         rgb_images=[np.full((1, 1, 3), 1.0, dtype=np.float32)],
         depth_images=[np.full((1, 1), 1.0, dtype=np.float32)],
         camera_order=[CameraType.FRONTLEFT],
+        body_to_world=[np.eye(4, dtype=np.float32)],
         timestamp=1.0,
     )
     newer = ImageFrame(
         rgb_images=[np.full((1, 1, 3), 2.0, dtype=np.float32)],
         depth_images=[np.full((1, 1), 2.0, dtype=np.float32)],
         camera_order=[CameraType.FRONTLEFT],
+        body_to_world=[np.eye(4, dtype=np.float32)],
         timestamp=2.0,
     )
 
     stream._image_queue.put(older)
     stream._image_queue.put(newer)
 
-    rgb_images, depth_images = stream.get_current_images(timeout=0.01)
+    rgb_images, depth_images, _ = stream.get_current_images(timeout=0.01)
 
     assert float(rgb_images[0][0, 0, 0]) == 2.0
     assert float(depth_images[0][0, 0]) == 2.0
@@ -64,6 +65,7 @@ def test_get_current_images_run_pipeline_requires_model_path():
         rgb_images=[np.full((1, 1, 3), 1.0, dtype=np.float32)],
         depth_images=[np.full((1, 1), 1.0, dtype=np.float32)],
         camera_order=[CameraType.FRONTLEFT],
+        body_to_world=[np.eye(4, dtype=np.float32)],
         timestamp=1.0,
     )
     stream._image_queue.put(frame)
@@ -91,11 +93,12 @@ def test_get_current_images_run_pipeline_uses_lazy_pipeline(monkeypatch):
         rgb_images=[np.full((1, 1, 3), 1.0, dtype=np.float32)],
         depth_images=[np.full((1, 1), 2.0, dtype=np.float32)],
         camera_order=[CameraType.FRONTLEFT],
+        body_to_world=[np.eye(4, dtype=np.float32)],
         timestamp=1.0,
     )
     stream._image_queue.put(frame)
 
-    rgb_images, depth_images = stream.get_current_images(
+    rgb_images, depth_images, _ = stream.get_current_images(
         timeout=0.01,
         run_pipeline=True,
     )

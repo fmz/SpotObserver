@@ -3,11 +3,11 @@ Unit tests for configuration module.
 """
 
 import os
-import pytest
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
-from pyspotobserver.config import SpotConfig, CameraType
+import pytest
+from pyspotobserver.config import CameraType, SpotConfig
 
 
 class TestCameraType:
@@ -27,13 +27,10 @@ class TestCameraType:
         assert CameraType.get_source_name(CameraType.HAND) == "hand_color_image"
 
     def test_get_source_name_depth(self):
-        """Test depth camera source name generation."""
-        assert CameraType.get_source_name(CameraType.FRONTLEFT, depth=True) == \
-               "frontleft_depth_in_visual_frame"
-        assert CameraType.get_source_name(CameraType.RIGHT, depth=True) == \
-               "right_depth_in_visual_frame"
-        assert CameraType.get_source_name(CameraType.HAND, depth=True) == \
-               "hand_depth_in_hand_color_frame"
+        """Test depth camera source name generation (raw depth-sensor sources)."""
+        assert CameraType.get_source_name(CameraType.FRONTLEFT, depth=True) == "frontleft_depth"
+        assert CameraType.get_source_name(CameraType.RIGHT, depth=True) == "right_depth"
+        assert CameraType.get_source_name(CameraType.HAND, depth=True) == "hand_depth"
 
 
 class TestSpotConfig:
@@ -115,8 +112,7 @@ class TestSpotConfig:
     def test_extra_params(self):
         """Test extra_params field."""
         config = SpotConfig(
-            robot_ip="192.168.80.3",
-            extra_params={"location": "lab", "experiment": "test1"}
+            robot_ip="192.168.80.3", extra_params={"location": "lab", "experiment": "test1"}
         )
         assert config.extra_params["location"] == "lab"
         assert config.extra_params["experiment"] == "test1"

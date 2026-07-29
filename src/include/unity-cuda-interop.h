@@ -4,26 +4,8 @@
 
 #pragma once
 
-#include "logger.h"
-#include "utils.h"
-
-#include <cuda_runtime.h>
-#include <cuda.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <d3d12.h>
-#include <dxgi.h>
-#include <libloaderapi.h>
-
-#else
-#error "Only Windows is supported for D3D12"
-#endif
-
-// This ordering is required unfortunately
-#include "spot-observer.h"
-#include "IUnityGraphics.h"
-#include "IUnityGraphicsD3D12.h"
+#include <cstdint>
+#include "IUnityInterface.h"
 
 namespace SOb {
 

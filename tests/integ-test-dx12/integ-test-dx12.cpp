@@ -114,7 +114,7 @@ int main(int argc, char* argv[]) {
     // ---------------------------------------------------------------------------------------
     std::cout << "Registering test log callback...\n";
     SOb_SetUnityLogCallback(TestLogCallback);
-    SOb_ToggleLogging(true);
+    SOb_SetLogLevel(1);
 
     //SOb_ToggleDebugDumps("./spot_dump_dx12");
 

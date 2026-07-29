@@ -5,8 +5,9 @@ Configuration dataclasses and enums for PySpotObserver.
 from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-import yaml
+from typing import Any
+
+import yaml  # type: ignore[import-untyped]
 
 
 class CameraType(IntFlag):
@@ -14,6 +15,7 @@ class CameraType(IntFlag):
     Camera types available on Spot robot.
     Uses IntFlag to support bitwise operations for camera masks.
     """
+
     BACK = 0x1
     FRONTLEFT = 0x2
     FRONTRIGHT = 0x4
@@ -34,14 +36,16 @@ class CameraType(IntFlag):
             # Hand camera uses color sensor naming, not fisheye naming.
             cls.HAND: "hand_color_image",
         }
+        # Raw depth-sensor-frame sources: substantially smaller on the wire than
+        # the robot-registered *_depth_in_visual_frame sources. Alignment with the
+        # RGB image is done client-side (see depth_registration.register_depth).
         depth_names = {
-            cls.BACK: "back_depth_in_visual_frame",
-            cls.FRONTLEFT: "frontleft_depth_in_visual_frame",
-            cls.FRONTRIGHT: "frontright_depth_in_visual_frame",
-            cls.LEFT: "left_depth_in_visual_frame",
-            cls.RIGHT: "right_depth_in_visual_frame",
-            # Hand depth is aligned to hand color frame.
-            cls.HAND: "hand_depth_in_hand_color_frame",
+            cls.BACK: "back_depth",
+            cls.FRONTLEFT: "frontleft_depth",
+            cls.FRONTRIGHT: "frontright_depth",
+            cls.LEFT: "left_depth",
+            cls.RIGHT: "right_depth",
+            cls.HAND: "hand_depth",
         }
 
         if camera not in rgb_names:
@@ -56,6 +60,7 @@ class SpotConfig:
 
     Can be loaded from YAML file or instantiated directly.
     """
+
     # Connection settings
     robot_ip: str
     username: str = ""
@@ -71,10 +76,10 @@ class SpotConfig:
     request_timeout_seconds: float = 10.0
     """Timeout for image requests"""
 
-    vision_model_path: Optional[str] = None
+    vision_model_path: str | None = None
     """Optional ONNX model path for run_pipeline=True"""
 
-    vision_providers: Optional[List[str]] = None
+    vision_providers: list[str] | None = None
     """Optional ONNX Runtime provider preference order"""
 
     # Advanced settings
@@ -87,7 +92,13 @@ class SpotConfig:
     connection_retry_delay_ms: int = 100
     """Delay between connection retry attempts (milliseconds)"""
 
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    dumps_enabled: bool = False
+    """Whether to save RGB images, depth data, and camera transform matrices while model is streaming. Default False."""
+
+    save_dir: str | None = None
+    """If ``dumps_enabled``, save data to this directory."""
+
+    extra_params: dict[str, Any] = field(default_factory=dict)
     """Additional user-defined parameters"""
 
     def __post_init__(self) -> None:
@@ -95,7 +106,7 @@ class SpotConfig:
             raise ValueError("request_timeout_seconds must be positive")
 
     @classmethod
-    def from_yaml(cls, yaml_path: Union[Path, str]) -> "SpotConfig":
+    def from_yaml(cls, yaml_path: Path | str) -> "SpotConfig":
         """
         Load configuration from a YAML file.
 
@@ -113,7 +124,7 @@ class SpotConfig:
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
 
-        with open(path, 'r') as f:
+        with open(path) as f:
             data = yaml.safe_load(f)
 
         if data is None:
@@ -121,7 +132,7 @@ class SpotConfig:
 
         return cls(**data)
 
-    def to_yaml(self, yaml_path: Union[Path, str]) -> None:
+    def to_yaml(self, yaml_path: Path | str) -> None:
         """
         Save configuration to a YAML file.
 
@@ -133,25 +144,27 @@ class SpotConfig:
 
         # Convert to dict, excluding extra_params if empty
         data = {
-            'robot_ip': self.robot_ip,
-            'username': self.username,
-            'password': self.password,
-            'image_buffer_size': self.image_buffer_size,
-            'image_quality_percent': self.image_quality_percent,
-            'request_timeout_seconds': self.request_timeout_seconds,
-            'vision_model_path': self.vision_model_path,
-            'vision_providers': self.vision_providers,
-            'sdk_name': self.sdk_name,
-            'connection_retry_attempts': self.connection_retry_attempts,
-            'connection_retry_delay_ms': self.connection_retry_delay_ms,
+            "robot_ip": self.robot_ip,
+            "username": self.username,
+            "password": self.password,
+            "image_buffer_size": self.image_buffer_size,
+            "image_quality_percent": self.image_quality_percent,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "vision_model_path": self.vision_model_path,
+            "vision_providers": self.vision_providers,
+            "sdk_name": self.sdk_name,
+            "connection_retry_attempts": self.connection_retry_attempts,
+            "connection_retry_delay_ms": self.connection_retry_delay_ms,
+            "dumps_enabled": self.dumps_enabled,
+            "save_dir": self.save_dir,
         }
 
         data = {key: value for key, value in data.items() if value is not None}
 
         if self.extra_params:
-            data['extra_params'] = self.extra_params
+            data["extra_params"] = self.extra_params
 
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     def __repr__(self) -> str:

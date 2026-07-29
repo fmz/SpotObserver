@@ -43,6 +43,12 @@ TorchModel::TorchModel(const std::string& model_path, const std::string& device_
         m_module = torch::jit::load(model_path);
         LogMessage("Model loaded successfully from: " + model_path);
 
+        // Memory overhead summary (gated by LogLevel::PERF). The on-disk
+        // size of the serialized weights is a close proxy for the model's GPU footprint.
+        LogPerf("[mem] TorchModel weights ({}): {:.2f} MB",
+                model_path,
+                fs::file_size(model_path) / (1024.0 * 1024.0));
+
         m_module.eval();
         LogMessage("Model set to evaluation mode.");
 
@@ -405,6 +411,12 @@ ONNXModel::ONNXModel(const std::string& model_path, const std::string& device_ty
         m_session = std::make_unique<Ort::Session>(m_env, wide_model_path.c_str(), m_sess_options);
 
         LogMessage("ONNX model loaded successfully from: " + model_path);
+
+        // Memory overhead summary (gated by LogLevel::PERF). The on-disk
+        // size of the serialized weights is a close proxy for the model's GPU footprint.
+        LogPerf("[mem] ONNXModel weights ({}): {:.2f} MB",
+                model_path,
+                fs::file_size(model_path) / (1024.0 * 1024.0));
 
         m_allocator = std::make_unique<Ort::Allocator>(*m_session, m_memory_info);
 

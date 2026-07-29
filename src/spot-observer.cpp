@@ -20,7 +20,7 @@ namespace SOb {
 
 // Function pointer for Unity logging callback
 LogCallback unityLogCallback = nullptr;
-bool logging_enabled = true;
+LogLevel    logging_level = LogLevel::ALL;
 
 // Map to hold robot connections by ID
 static int32_t __next_robot_id = 0; // Incremental ID for each robot connection
@@ -205,6 +205,24 @@ static bool getNextImageSetFromVisionPipeline(
         //LogMessage("SOb_GetNextVisionPipelineImageSet: Failed to retrieve images from vision pipeline for robot ID {}", robot_id);
         return false;
     }
+}
+
+static bool setPipelineDepthAveraging(int32_t robot_id, int32_t cam_stream_id, bool enable) {
+    auto it = __robot_connections.find(robot_id);
+    if (it == __robot_connections.end()) {
+        LogMessage("SOb_SetDepthAveraging: Robot ID {} not found", robot_id);
+        return false;
+    }
+
+    VisionPipeline* pipeline = it->second->getVisionPipeline(cam_stream_id);
+    if (!pipeline) {
+        LogMessage("SOb_SetDepthAveraging: Vision pipeline for camera stream ID {} not found for robot ID {}",
+            cam_stream_id, robot_id);
+        return false;
+    }
+
+    pipeline->setDepthAveraging(enable);
+    return true;
 }
 
 static SObModel loadTorchModel(const std::string& modelPath, const std::string& backend) {
@@ -637,9 +655,10 @@ bool UNITY_INTERFACE_API SOb_ToggleDepthCompletion(bool enable) {
 }
 
 UNITY_INTERFACE_EXPORT
-bool UNITY_INTERFACE_API SOb_ToggleDepthAveraging(bool enable) {
-    SOb::LogMessage("SOb_ToggleDepthAveraging called with enable: {}", enable);
-    return true;
+bool UNITY_INTERFACE_API SOb_SetDepthAveraging(int32_t robot_id, int32_t cam_stream_id, bool enable) {
+    SOb::LogMessage("SOb_SetDepthAveraging called for robot ID {} @ stream-ID {} with enable: {}",
+        robot_id, cam_stream_id, enable);
+    return SOb::setPipelineDepthAveraging(robot_id, cam_stream_id, enable);
 }
 
 UNITY_INTERFACE_EXPORT
@@ -651,6 +670,15 @@ bool UNITY_INTERFACE_API SOb_ToggleDepthAveragingWithOpticalFlow(bool enable) {
 UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_ToggleLogging(bool enable) {
     SOb::ToggleLogging(enable);
+    return true;
+}
+
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_SetLogLevel(int32_t level) {
+    if (level < int32_t(SOb::LogLevel::NONE) || level > int32_t(SOb::LogLevel::ALL)) {
+        return false;
+    }
+    SOb::SetLogLevel(SOb::LogLevel(level));
     return true;
 }
 

@@ -6,13 +6,18 @@
 
 #include "spot-observer.h"
 #include "model.h"
+#include "cuda_kernels.cuh"
 
 #include <bosdyn/client/sdk/client_sdk.h>
 #include <bosdyn/client/robot/robot.h>
 #include <bosdyn/client/image/image_client.h>
 
+#include <mutex>
 #include <stop_token>
 #include <cuda_runtime.h>
+#include <string>
+#include <tuple>
+#include <vector>
 
 namespace SOb {
 /**
@@ -28,6 +33,8 @@ private:
     size_t n_elems_per_depth_{0}; // Bytes per depth image
 
     std::vector<SpotCamera> cameras_;
+    std::vector<std::string> camera_dump_subdirs_;
+    std::vector<bosdyn::api::SE3Pose> world_T_body_buffer_;
     size_t n_images_per_response_{0}; // Number of images per response
 
     // Circular buffer data. CUDA memory
@@ -35,11 +42,20 @@ private:
     float*   depth_data_{nullptr};
     float*   cached_depth_{nullptr};
 
+    // Client-side depth registration: per-camera reprojection params. Raw u16
+    // depth images are staged in raw_depth_scratch_ (CUDA memory) and registered
+    // into the depth ring at RGB resolution (converted to meters on the GPU).
+    std::vector<DepthRegistrationParams> depth_registration_;
+    std::vector<size_t> n_elems_per_raw_depth_;
+    size_t raw_depth_scratch_size_{0};
+    uint16_t* raw_depth_scratch_{nullptr};
+
     bool first_run_{true};
     const size_t max_size_; // Maximum size of the queue
 
     // Owned by SpotConnection
     cudaStream_t cuda_stream_{nullptr};
+    int32_t num_frames_{0};
 
 public:
     explicit ReaderWriterCBuf(size_t max_size);
@@ -52,7 +68,10 @@ public:
     bool initialize(
         size_t n_bytes_per_rgb,
         size_t n_bytes_per_depth,
-        const std::vector<SpotCamera>& cameras
+        std::vector<SpotCamera> cameras,
+        std::vector<std::string> camera_dump_subdirs,
+        std::vector<DepthRegistrationParams> depth_registration,
+        std::vector<size_t> n_elems_per_raw_depth
     );
 
     /**
@@ -63,8 +82,7 @@ public:
     /**
      * Consume image and depth data
      */
-    std::pair<uint8_t*, float*> pop(int32_t count) const;
-
+    std::tuple<uint8_t*, float*, const bosdyn::api::SE3Pose*> pop(int32_t count) const;
     // Attach a stream created/owned by SpotConnection.
     inline void attachCudaStream(cudaStream_t stream) { cuda_stream_ = stream; }
 
@@ -93,6 +111,8 @@ class SpotCamStream {
     int32_t current_num_cams_;
     bosdyn::api::GetImageRequest current_request_;
     std::vector<SpotCamera> camera_order_;
+    // camera extrinsics
+    std::vector<bosdyn::api::SE3Pose> body_T_cameras_;
 
     std::unique_ptr<std::jthread> image_streamer_thread_ = nullptr;
 
@@ -103,6 +123,8 @@ class SpotCamStream {
 
     TensorShape current_rgb_shape_{0, 0, 0, 0};
     TensorShape current_depth_shape_{0, 0, 0, 0};
+
+    TimingInfo timing_info_;
 
     bosdyn::api::GetImageRequest _createImageRequest(
         const std::vector<std::string>& rgb_sources,
@@ -128,12 +150,16 @@ public:
     bool getCurrentImages(
         int32_t n_images_requested,
         uint8_t** images,
-        float** depths
+        float** depths,
+        bosdyn::api::SE3Pose* world_T_bodies = nullptr
     ) const;
 
     bool     isStreaming()       const { return streaming_; }
     uint32_t getCurrentCamMask() const { return current_cam_mask_; }
     int32_t  getCurrentNumCams() const { return current_num_cams_; }
+    const std::vector<SpotCamera>& getCurrentCameraOrder() const { return camera_order_; }
+    const std::string& getRobotDumpName() const;
+    std::string getDumpSubdirForCamera(SpotCamera camera) const;
 
     TensorShape getCurrentRGBTensorShape() const { return current_rgb_shape_; }
     TensorShape getCurrentDepthTensorShape() const { return current_depth_shape_; }
@@ -146,6 +172,7 @@ class SpotConnection {
     std::unique_ptr<bosdyn::client::Robot> robot_;
     std::unique_ptr<bosdyn::client::ClientSdk> sdk_;
     bosdyn::client::ImageClient* image_client_;
+    std::mutex image_client_mutex_;
 
     int32_t image_lifo_max_size_;
 
@@ -153,6 +180,7 @@ class SpotConnection {
     std::unordered_map<int32_t, std::unique_ptr<VisionPipeline>> vision_pipelines_;
 
     bool connected_;
+    std::string robot_dump_name_;
 
     int32_t next_stream_id_{0xee1};
 
@@ -174,6 +202,7 @@ public:
     VisionPipeline* getVisionPipeline(int32_t stream_id);
 
     bool isConnected() const { return connected_; }
+    const std::string& getRobotDumpName() const { return robot_dump_name_; }
 
     friend class SpotCamStream;
 };

@@ -9,10 +9,11 @@
 
 #include <chrono>
 #include <algorithm>
+#include <string>
 
 namespace SOb {
 
-static int32_t thread_id_ = 0;
+static int32_t S_thread_id_ = 0;
 
 VisionPipeline::VisionPipeline(
     MLModel& model,
@@ -28,7 +29,7 @@ VisionPipeline::VisionPipeline(
     , output_shape_(output_shape)
     , max_size_(max_results)
     , cuda_stream_(spot_cam_stream_.getCudaStream())
-    , thread_num(thread_id_++)
+    , thread_num(S_thread_id_++)
 { }
 
 VisionPipeline::~VisionPipeline() {
@@ -109,6 +110,8 @@ bool VisionPipeline::allocateCudaBuffers() {
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data");
     checkCudaError(cudaMalloc(&cuda_ws_.d_preprocessed_depth_data_, depth_size), "cudaMalloc for vision pipeline input depth data preprocessed");
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_cached_, depth_size), "cudaMalloc for vision pipeline input depth cached");
+    // Zero = invalid depth, so the EMA cache starts empty and gets seeded on the first update.
+    checkCudaError(cudaMemset(cuda_ws_.d_depth_cached_, 0, depth_size), "cudaMemset for vision pipeline input depth cached");
 
     size_t depth_workspace_size = depth_preprocessor2_get_workspace_size(depth_shape_.W, depth_shape_.H);
     checkCudaError(cudaMalloc(&cuda_ws_.d_depth_preprocessor_workspace_, depth_workspace_size), "cudaMalloc for vision pipeline depth preprocessor workspace");
@@ -128,6 +131,23 @@ bool VisionPipeline::allocateCudaBuffers() {
         depth_workspace_size,
         output_size
     );
+
+    // Memory overhead summary (gated by LogLevel::PERF).
+    size_t total_bytes = rgb_buffer_size
+                       + rgb_image_size_batch * sizeof(float)
+                       + 3 * depth_size        // depth data, preprocessed, cached
+                       + depth_workspace_size
+                       + output_size;
+    LogPerf(
+        "[mem] VisionPipeline (thread {}): {:.2f} MB total (RGB ring {:.2f} MB, RGB float {:.2f} MB, "
+        "depth x3 {:.2f} MB, depth workspace {:.2f} MB, output {:.2f} MB)",
+        thread_num,
+        total_bytes / (1024.0 * 1024.0),
+        rgb_buffer_size / (1024.0 * 1024.0),
+        (rgb_image_size_batch * sizeof(float)) / (1024.0 * 1024.0),
+        (3 * depth_size) / (1024.0 * 1024.0),
+        depth_workspace_size / (1024.0 * 1024.0),
+        output_size / (1024.0 * 1024.0));
 
     return true;
 }
@@ -174,7 +194,6 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
     size_t num_output_elements = output_shape_.N * output_shape_.C * output_shape_.H * output_shape_.W;
 
     while (!stop_token.stop_requested() && running_.load()) {
-        auto start_time = std::chrono::high_resolution_clock::now();
         try {
             // Get current images from SpotConnection
             if (!spot_cam_stream_.getCurrentImages(
@@ -185,6 +204,10 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
+            // Marks the start of active work for this iteration (images are ready).
+            // Timing is accumulated at the end of the iteration so the idle poll
+            // above is excluded.
+            auto start_time = std::chrono::high_resolution_clock::now();
 
             // Prepare device pointers
             uint8_t* d_rgb_ptr = d_rgb_data_ + write_idx_ * num_rgb_elemenets;
@@ -192,6 +215,21 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
             constexpr int32_t depth_scale_factor = 4;
             constexpr float   inv_scale_factor = 1.0f / depth_scale_factor;
+
+            constexpr float min_valid_depth = 0.01f;
+            constexpr float max_valid_depth = 100.0f;
+            // EMA weights for the depth cache: weight of the new sample when the
+            // sensor depth is valid, and of the generated depth when it is not.
+            constexpr float ema_alpha_valid   = 0.5f;
+            constexpr float ema_alpha_invalid = 0.5f;
+
+            // Runtime EMA toggle, sampled once per iteration so a mid-frame
+            // toggle can't mix behaviors within one image set. When disabled,
+            // the fused postprocess runs as a pass-through (alpha 1 => output =
+            // generated depth) but still refreshes the cache, so re-enabling
+            // resumes blending from the latest frame with no stale data.
+            const bool  ema_enabled   = depth_averaging_enabled_.load(std::memory_order_relaxed);
+            const float alpha_invalid = ema_enabled ? ema_alpha_invalid : 1.0f;
 
             // Copy inputs on the per-connection stream
             checkCudaError(cudaMemcpyAsync(
@@ -251,7 +289,11 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             }
             LogMessage("num_images_per_iter = {}", num_images_per_iter);
 
+            const std::vector<SpotCamera>& camera_order = spot_cam_stream_.getCurrentCameraOrder();
             for (size_t i = 0; i < num_images_per_iter; i++) {
+                const std::string camera_dir = i < camera_order.size()
+                    ? spot_cam_stream_.getDumpSubdirForCamera(camera_order[i])
+                    : spot_cam_stream_.getRobotDumpName() + "/unknown";
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
                 float* cur_preprocessed_depth_ptr = cuda_ws_.d_preprocessed_depth_data_ + i * depth_shape.C * depth_shape.H * depth_shape.W;
@@ -260,15 +302,15 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
-                if (!first_run_) {
+                if (ema_enabled && !first_run_) {
                     checkCudaError(prefill_invalid_depth(
                         cur_depth_input_ptr,
                         cur_preprocessed_depth_ptr,
                         depth_cache_ptr,
                         depth_shape_.W,
                         depth_shape_.H,
-                        0.01f,
-                        100.0f,
+                        min_valid_depth,
+                        max_valid_depth,
                         cuda_stream_
                     ), "prefill_invalid_depth");
 
@@ -276,9 +318,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                         cur_preprocessed_depth_ptr,
                         depth_shape_.W,
                         depth_shape_.H,
-                        "depth-post-prefill",
-                        dump_id+i,
-                        thread_num
+                        camera_dir + "/depth-post-prefill",
+                        dump_id
                     );
                     // Downscale
                     checkCudaError(preprocess_depth_image2(
@@ -296,9 +337,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                             cur_preprocessed_depth_ptr,
                             depth_shape.W,
                             depth_shape.H,
-                            "depth-post-downscale",
-                            dump_id+i,
-                            thread_num
+                            camera_dir + "/depth-post-downscale",
+                            dump_id
                     );
 
                 } else {
@@ -317,8 +357,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             }
 
             auto preprocess_time = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(preprocess_time - start_time);
-            LogMessage("VisionPipeline preprocess time: {} ms", duration.count());
+            auto preprocess_duration = std::chrono::duration_cast<std::chrono::milliseconds>(preprocess_time - start_time);
+            LogMessage("VisionPipeline preprocess time: {} ms", preprocess_duration.count());
 
             // Stream-scoped sync before inference (keeps other connections running)
             checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize before running inference");
@@ -338,40 +378,38 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 continue;
             }
 
-
             auto inference_time = std::chrono::high_resolution_clock::now();
-            duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
-            LogMessage("VisionPipeline inference time: {} ms", duration.count());
+            auto inference_duration = std::chrono::duration_cast<std::chrono::milliseconds>(inference_time - preprocess_time);
+            LogMessage("VisionPipeline inference time: {} ms", inference_duration.count());
 
             for (size_t i = 0; i < num_images_per_iter; i++) {
+                const std::string camera_dir = i < camera_order.size()
+                    ? spot_cam_stream_.getDumpSubdirForCamera(camera_order[i])
+                    : spot_cam_stream_.getRobotDumpName() + "/unknown";
                 float* cur_rgb_input_ptr    = cuda_ws_.d_rgb_float_data_ + i * 3 * input_shape_.H * input_shape_.W;
                 float* cur_depth_input_ptr  = cuda_ws_.d_depth_data_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
                 float* cur_depth_output_ptr = d_depth_output_ptr + i * output_shape_.C * output_shape_.H * output_shape_.W;
                 float* depth_cache_ptr      = cuda_ws_.d_depth_cached_ + i * depth_shape_.C * depth_shape_.H * depth_shape_.W;
 
-                // Postprocess output: rotate back if input was rotated
+                // Fused postprocess + EMA depth averaging: rotate the model output
+                // back if the input was rotated, fold it into the running cache,
+                // and publish the blended result as the pipeline output in a
+                // single pass — no intermediate copies.
                 float* temp_output_ptr = reinterpret_cast<float*>(cuda_ws_.d_depth_preprocessor_workspace_);
                 checkCudaError(postprocess_depth_image(
                     cur_depth_output_ptr,
+                    cur_depth_input_ptr,
+                    depth_cache_ptr,
+                    ema_alpha_valid,
+                    alpha_invalid,
                     output_shape_.W,
                     output_shape_.H,
                     temp_output_ptr,
                     do_rotate_90_cw,
+                    min_valid_depth,
+                    max_valid_depth,
                     cuda_stream_
-                ), "postprocess_depth_image");
-                //
-                // checkCudaError(update_depth_cache(
-                //     cur_depth_output_ptr,
-                //     cur_depth_input_ptr,
-                //     depth_cache_ptr,
-                //     0.5,
-                //     0.1,
-                //     output_shape_.W,
-                //     output_shape_.H,
-                //     0.01f,
-                //     100.0f,
-                //     cuda_stream_
-                // ), "update_depth_cache");
+                ), "postprocess_update_depth_cache");
 
                 // Ensure dumps see completed work (dumpers likely use default stream)
                 checkCudaError(cudaStreamSynchronize(cuda_stream_), "sync before dumps");
@@ -380,32 +418,38 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                     cur_rgb_input_ptr,
                     input_shape_.W,
                     input_shape_.H,
-                    "input-rgb",
-                    dump_id+i,
-                    thread_num
+                    camera_dir + "/input-rgb",
+                    dump_id
                 );
                 DumpDepthImageFromCuda(
                     cur_depth_input_ptr,
                     depth_shape_.W,
                     depth_shape_.H,
-                    "input-depth",
-                    dump_id+i,
-                    thread_num
+                    camera_dir + "/input-depth",
+                    dump_id
                 );
                 DumpDepthImageFromCuda(
                     cur_depth_output_ptr,
                     depth_shape_.W,
                     depth_shape_.H,
-                    "output-depth",
-                    dump_id+i,
-                    thread_num
+                    camera_dir + "/output_depth",
+                    dump_id
                 );
             }
 
             checkCudaError(cudaStreamSynchronize(cuda_stream_), "cudaStreamSynchronize after postprocess");
             auto postprocess_time = std::chrono::high_resolution_clock::now();
-            duration = std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_time - inference_time);
-            LogMessage("VisionPipeline postprocess time: {} ms", duration.count());
+            auto postprocess_duration = std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_time - inference_time);
+            LogMessage("VisionPipeline postprocess time: {} ms", postprocess_duration.count());
+
+            auto total_duration = preprocess_duration + inference_duration + postprocess_duration;
+            LogPerf("VisionPipeline total duration: {} ms", total_duration.count());
+
+            // Accumulate active-work time only (start of work -> end of GPU work for
+            // this iteration). Excludes the idle poll/wait for new images.
+            accumTimingSample(timing_info_,
+                              std::chrono::duration<double, std::milli>(postprocess_time - start_time).count(),
+                              "pipelineWorker", {"thread", thread_num});
 
             // Publish only after stream work completes
             read_idx_.store(write_idx_, std::memory_order_release);
@@ -414,8 +458,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             LogMessage("VisionPipeline: Updating write index from {} to {}",
                        write_idx_, (write_idx_ + 1) % max_size_);
             write_idx_ = (write_idx_ + 1) % max_size_;
-            // first_run_ = false;
-            dump_id += num_images_per_iter;
+            first_run_ = false;
+            dump_id++;
 
         } catch (const std::exception& e) {
             LogMessage("Exception in pipeline worker: {}", e.what());
@@ -423,8 +467,8 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        LogMessage("VisionPipeline iteration time: {} ms", duration.count());
+        // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        // LogMessage("VisionPipeline iteration time: {} ms", duration.count());
     }
 
     // Cleanup
@@ -461,4 +505,4 @@ bool VisionPipeline::getCurrentImages(
     return true;
 }
 
-} // namespace 
+} // namespace

@@ -2,10 +2,11 @@
 #include "cuda_kernels.cuh"
 
 #include <vector>
+#include <cfloat>
 #include <cmath>
 #include <limits>
-#include <torch/torch.h>
-#include <torch/library.h>
+//#include <torch/torch.h>
+//#include <torch/library.h>
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -83,8 +84,8 @@ __global__ void downscale_optimized_kernel(
     int original_height
 ) {
     // Shared memory: input tile + intermediate results for separable convolution
-    __shared__ float s_input[TILE_SZ * SCALE_FACTOR][TILE_SZ * SCALE_FACTOR + 1];
-    __shared__ float s_horizontal[TILE_SZ][TILE_SZ * SCALE_FACTOR + 1];
+    __shared__ float s_input[TILE_SZ * SCALE_FACTOR][TILE_SZ * SCALE_FACTOR];
+    __shared__ float s_horizontal[TILE_SZ][TILE_SZ * SCALE_FACTOR];
 
     // Handle rotation: if rotating 90 CW, output dimensions are swapped
     const int new_width = ROTATE_90_CW ? (original_height / SCALE_FACTOR) : (original_width / SCALE_FACTOR);
@@ -648,39 +649,6 @@ __device__ __forceinline__ float fast_rcp(float x) {
 //     return cudaGetLastError();
 // }
 
-cudaError_t postprocess_depth_image(
-    float* depth_image,
-    int width,
-    int height,
-    float* workspace,
-    bool rotate_90_ccw,
-    cudaStream_t stream
-) {
-    if (!rotate_90_ccw) {
-        return cudaSuccess; // No rotation needed
-    }
-    
-    // Apply 270 CW rotation
-    dim3 block(TILE_SIZE, TILE_SIZE);
-    dim3 grid((width + TILE_SIZE - 1) / TILE_SIZE,
-              (height + TILE_SIZE - 1) / TILE_SIZE);
-
-    // Rotate to workspace buffer
-    rotateDepth_fast_kernel<Rotation::CW_270><<<grid, block, 0, stream>>>(
-        depth_image, workspace, width, height);
-    
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) return err;
-    
-    // Copy rotated result back
-    size_t image_size = width * height * sizeof(float);
-    err = cudaMemcpyAsync(depth_image, workspace, image_size, cudaMemcpyDeviceToDevice, stream);
-    if (err != cudaSuccess) return err;
-
-    err = cudaGetLastError();
-    return err;
-}
-
 struct int2_ { int x, y; };
 
 __device__ __forceinline__
@@ -921,6 +889,93 @@ cudaError_t preprocess_depth_image2(
     }
 
     return err;
+}
+
+// ---- Depth-to-RGB registration ---------------------------------------------
+// Reprojects a raw depth image (depth sensor frame) into the RGB camera's image
+// plane, producing the same layout as Spot's *_depth_in_visual_frame sources.
+
+// Empty-pixel sentinel: 0xFF-memset-able, and the max unsigned value, so any
+// real depth sample's atomicMin replaces it.
+constexpr unsigned int kRegistrationSentinelBits = 0xFFFFFFFFu;
+
+__global__ void register_depth_kernel(
+    const uint16_t* __restrict__ src,
+    float* __restrict__ dst,
+    DepthRegistrationParams p
+) {
+    const int n_src = p.src_width * p.src_height;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n_src;
+         idx += gridDim.x * blockDim.x) {
+        const uint16_t raw = src[idx];
+        if (raw == 0) continue; // invalid depth sample
+
+        const int u = idx % p.src_width;
+        const int v = idx / p.src_width;
+        const float z = float(raw) * p.inv_depth_scale;
+
+        // Depth -> RGB reprojection
+        float uf = float(u), vf = float(v);
+        float px = z * (p.M[0] * uf + p.M[1] * vf + p.M[2]) + p.t[0];
+        float py = z * (p.M[3] * uf + p.M[4] * vf + p.M[5]) + p.t[1];
+        float pz = z * (p.M[6] * uf + p.M[7] * vf + p.M[8]) + p.t[2];
+        if (pz <= 0.0f) continue; // behind the RGB camera
+
+        float inv_z = fast_rcp(pz);
+        int u0 = __float2int_rd(px * inv_z);
+        int v0 = __float2int_rd(py * inv_z);
+
+        // 2x2 splat: the depth image is lower resolution than the RGB target, so
+        // covering the four nearest pixels reduces holes without a dilation pass.
+        #pragma unroll
+        for (int dv = 0; dv <= 1; ++dv) {
+            #pragma unroll
+            for (int du = 0; du <= 1; ++du) {
+                int x = u0 + du;
+                int y = v0 + dv;
+                if (x < 0 || y < 0 || x >= p.dst_width || y >= p.dst_height) continue;
+                // atomicMin on the raw bits keeps the nearest surface when several
+                // depth pixels land on one RGB pixel; ordering is correct because
+                // positive IEEE-754 floats compare like unsigned ints.
+                atomicMin(reinterpret_cast<unsigned int*>(&dst[y * p.dst_width + x]),
+                          __float_as_uint(pz));
+            }
+        }
+    }
+}
+
+__global__ void finalize_registered_depth_kernel(float* __restrict__ dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    // The sentinel bit pattern is a NaN, so compare bits, not float values.
+    if (i < n && __float_as_uint(dst[i]) == kRegistrationSentinelBits) dst[i] = 0.0f;
+}
+
+cudaError_t register_depth_to_rgb(
+    const uint16_t* d_depth_in,
+    float* d_depth_out,
+    const DepthRegistrationParams& params,
+    cudaStream_t stream
+) {
+    const int n_dst = params.dst_width * params.dst_height;
+    const int n_src = params.src_width * params.src_height;
+    if (n_dst <= 0 || n_src <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    constexpr int threads = 256;
+
+    // 0xFF in every byte == kRegistrationSentinelBits; the memset fast path
+    // replaces a dedicated fill kernel launch.
+    cudaError_t err = cudaMemsetAsync(d_depth_out, 0xFF, n_dst * sizeof(float), stream);
+    if (err != cudaSuccess) return err;
+
+    register_depth_kernel<<<(n_src + threads - 1) / threads, threads, 0, stream>>>(
+        d_depth_in, d_depth_out, params);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) return err;
+
+    finalize_registered_depth_kernel<<<(n_dst + threads - 1) / threads, threads, 0, stream>>>(
+        d_depth_out, n_dst);
+    return cudaGetLastError();
 }
 
 // Dummy kernel for testing purposes (keeping original)
@@ -1281,15 +1336,16 @@ cudaError_t prefill_invalid_depth(
     return cudaGetLastError();
 }
 
-// CUDA kernel for maintaining running average of depth values
-// new_depth: current frame depth values
-// avg_depth: running average depth buffer (input/output)
-// width, height: image dimensions
-
-__global__ void update_depth_cache_kernel(
-    const float* __restrict__ generated_depth,
+// Fused output postprocess + EMA depth-cache update. One pass over the
+// image: reads the generated depth, folds it into the running cache, and
+// writes the blended result out as the published depth.
+// generated_depth and output_depth may alias (each thread reads and writes
+// the same index), so those two pointers must not be __restrict__.
+__global__ void postprocess_depth_image(
+    const float* generated_depth,
     const float* __restrict__ sparse_depth,
     float* __restrict__ cached_depth,
+    float* output_depth,
     float alpha_valid,
     float alpha_invalid,
     int width,
@@ -1299,55 +1355,69 @@ __global__ void update_depth_cache_kernel(
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
-    
+
     if (x >= width || y >= height) return;
-    
+
     int idx = y * width + x;
     float generated_val = generated_depth[idx];
-    float new_val       = sparse_depth[idx];
     float old_val       = cached_depth[idx];
-    
-    // Check if new depth value is valid
-    bool new_valid = (new_val >= min_valid_depth && new_val <= max_valid_depth);
+
     bool old_valid = (old_val >= min_valid_depth && old_val <= max_valid_depth);
-    
-    if (new_valid) {
-        if (old_valid) {
-            cached_depth[idx] = old_val * (1.f-alpha_valid) + new_val * alpha_valid;
-        } else {
-            cached_depth[idx] = new_val;
-        }
-    } else if (old_valid) {
-        cached_depth[idx] = old_val * (1.f-alpha_invalid) + generated_val * alpha_invalid;
+
+    float result;
+    if (old_valid) {
+        result = old_val * (1.f-alpha_invalid) + generated_val * alpha_invalid;
     } else {
-        cached_depth[idx] = generated_val;
+        result = generated_val;
     }
+
+    cached_depth[idx] = result;
+    output_depth[idx] = result;
 }
 
-// Host function wrapper for depth cache update
-cudaError_t update_depth_cache(
-    const float* generated_depth,
+// Host wrapper: optionally rotates the generated depth back into the sensor
+// orientation (via workspace), then runs the fused EMA update, writing the
+// blended result back over generated_depth as the published output.
+cudaError_t postprocess_depth_image(
+    float* generated_depth,
     const float* sparse_depth,
     float* cached_depth,
     float alpha_valid,
     float alpha_invalid,
     int width,
     int height,
+    float* workspace,
+    bool rotate_90_ccw,
     float min_valid_depth,
     float max_valid_depth,
     cudaStream_t stream
 ) {
+    const float* d_generated = generated_depth;
+    if (rotate_90_ccw) {
+        // Rotate into the workspace; the fused kernel then reads from there
+        // and can safely overwrite generated_depth with the final result.
+        dim3 rot_block(TILE_SIZE, TILE_SIZE);
+        dim3 rot_grid((width + TILE_SIZE - 1) / TILE_SIZE,
+                      (height + TILE_SIZE - 1) / TILE_SIZE);
+        rotateDepth_fast_kernel<Rotation::CW_270><<<rot_grid, rot_block, 0, stream>>>(
+            generated_depth, workspace, width, height);
+
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) return err;
+        d_generated = workspace;
+    }
+
     dim3 block(32, 8);
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
-              
-    update_depth_cache_kernel<<<grid, block, 0, stream>>>(
-        generated_depth, sparse_depth, cached_depth,
+
+    postprocess_depth_image<<<grid, block, 0, stream>>>(
+        d_generated, sparse_depth, cached_depth, generated_depth,
         alpha_valid, alpha_invalid,
         width, height,
         min_valid_depth, max_valid_depth
     );
-    
+
     return cudaGetLastError();
 }
 
