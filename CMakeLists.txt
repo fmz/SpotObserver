@@ -36,7 +36,7 @@ message(STATUS "CUDAToolkit found: ${CUDAToolkit_VERSION}")
 set(SPOT_SDK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/extern/spot-sdk-install)
 set(OpenCV_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/extern/opencv/include)
 set(OpenCV_LIBS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/opencv/x64/vc16/lib)
-set(OpenCV_LIBS opencv_world4110.lib)
+set(OpenCV_LIBS opencv_world4140.lib)
 
 # Force protobuf to come from vcpkg, not libtorch
 find_package(Protobuf REQUIRED PATHS "${Protobuf_ROOT}" NO_DEFAULT_PATH)
@@ -70,7 +70,7 @@ message(STATUS "Torch install prefix: ${TORCH_INSTALL_PREFIX}")
 # wrong -gencode set is visible at configure time.
 message(STATUS "CMAKE_CUDA_FLAGS after Torch: ${CMAKE_CUDA_FLAGS}")
 
-set(ONNX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/onnxruntime-win-x64-gpu-1.22.0)
+set(ONNX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/onnxruntime-win-x64-gpu_cuda12-1.28.0)
 # Check if ONNX_DIR exists
 if(NOT EXISTS ${ONNX_DIR})
     message(FATAL_ERROR "ONNX directory not found: ${ONNX_DIR}. Please ensure ONNX Runtime is correctly extracted.")
@@ -192,7 +192,7 @@ if(COPY_DLLS AND WIN32)
     # libs (not imported targets), and torch/ONNX also load some DLLs dynamically
     # at runtime (cuDNN, CUDA execution provider), so their DLLs are collected
     # from their lib dirs explicitly.
-    set(OPENCV_DLLS "${CMAKE_SOURCE_DIR}/extern/opencv/x64/vc16/bin/opencv_world4110.dll")
+    set(OPENCV_DLLS "${CMAKE_SOURCE_DIR}/extern/opencv/x64/vc16/bin/opencv_world4140.dll")
     file(GLOB LIBTORCH_DLLS "${TORCH_INSTALL_PREFIX}/lib/*.dll")
     file(GLOB ONNX_DLLS "${ONNX_LIB_DIR}/*.dll")
 
