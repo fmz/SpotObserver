@@ -17,6 +17,22 @@ target_include_directories(four_pcs_test PRIVATE
 target_link_libraries(four_pcs_test
     Eigen3::Eigen
 )
+
+# GPU-vs-CPU correctness check for four-pcs-gpu.cu -- needs CUDA (cudaMalloc/
+# cudaMemcpy, plus the compiled four-pcs-gpu.cu kernels themselves) in
+# addition to Eigen3.
+add_executable(four_pcs_gpu_test
+    four-pcs-gpu-test.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu.cu
+)
+target_include_directories(four_pcs_gpu_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/include
+)
+target_link_libraries(four_pcs_gpu_test
+    Eigen3::Eigen
+    CUDA::cudart
+)
 #
 ## Link only the dependencies actually needed for the camera streaming test
 #target_link_libraries(spot_camera_stream_test

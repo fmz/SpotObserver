@@ -109,6 +109,8 @@ add_library(${PLUGIN_NAME} SHARED
     src/load_image_to_cuda.cu
     src/include/four-pcs.h
     src/four-pcs.cpp
+    src/include/four-pcs-gpu.cuh
+    src/four-pcs-gpu.cu
 )
 
 # Unity Native-plugin API headers (IUnityInterface.h etc.).
