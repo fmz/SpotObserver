@@ -284,6 +284,29 @@ static SObModel loadONNXModel(const std::string& modelPath, const std::string& b
     return ret;
 }
 
+// Autoregressive KV-cache model. Deliberately not registered in
+// s_path_to_model_map: that map hands the same instance to every pipeline asking
+// for a path, and a streaming model's cache belongs to one camera's frame
+// sequence. Each load returns a fresh instance; s_model_to_path_map is still
+// populated so unloadModel can find it.
+static SObModel loadStreamingONNXModel(const std::string& modelPath, const std::string& device) {
+    LogMessage("Loading streaming ONNX model: {}", modelPath);
+    LogMessage("Using Provider: {}", device);
+
+    SObModel ret = nullptr;
+    try {
+        auto* model = new StreamingONNXModel(modelPath, device);
+        ret = reinterpret_cast<SObModel>(model);
+    } catch (const std::exception& e) {
+        LogMessage("Exception while loading streaming ONNX model: {}", e.what());
+        return nullptr;
+    }
+
+    s_model_to_path_map[ret] = modelPath;
+    LogMessage("Successfully loaded streaming ONNX model: {}", modelPath);
+    return ret;
+}
+
 static void unloadModel(SObModel model) {
     if (!model) {
         LogMessage("SOb::unloadModel: Model is null, nothing to unload");
@@ -297,7 +320,14 @@ static void unloadModel(SObModel model) {
     }
 
     std::string modelPath = it->second;
-    s_path_to_model_map.erase(modelPath);
+    // Streaming models are deliberately absent from the path map (each pipeline
+    // gets its own instance), so only erase an entry that maps back to this exact
+    // model. Erasing by path alone would deregister a different, still-live model
+    // loaded from the same file and orphan its session.
+    auto path_it = s_path_to_model_map.find(modelPath);
+    if (path_it != s_path_to_model_map.end() && path_it->second == model) {
+        s_path_to_model_map.erase(path_it);
+    }
     s_model_to_path_map.erase(it);
 
     delete reinterpret_cast<MLModel*>(model);
@@ -422,9 +452,19 @@ SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* ba
     // If model filename ends with .onnx, use ONNX model loader
     std::string model_path_str(modelPath);
 
+    // Both model families are .onnx, so the streaming one is selected explicitly
+    // by the caller via the backend string (e.g. "cuda-streaming"): it needs a
+    // different session setup and a different per-frame protocol.
+    std::string backend_str(backend);
+    const bool want_streaming = backend_str.find("streaming") != std::string::npos;
+
     SObModel ret = nullptr;
     if (model_path_str.ends_with(".onnx")) {
-        ret = SOb::loadONNXModel(modelPath, backend);
+        if (want_streaming) {
+            ret = SOb::loadStreamingONNXModel(model_path_str, "cuda");
+        } else {
+            ret = SOb::loadONNXModel(modelPath, backend);
+        }
     } else {
         ret = SOb::loadTorchModel(modelPath, backend);
     }

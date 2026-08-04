@@ -1421,4 +1421,129 @@ cudaError_t postprocess_depth_image(
     return cudaGetLastError();
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Resampling between camera resolution and a model's native input size.
+
+__device__ __forceinline__ float fetch_plane(
+    const float* plane, int y, int x, int in_h, int in_w, bool transposed
+) {
+    return transposed ? plane[static_cast<size_t>(x) * in_h + y]
+                      : plane[static_cast<size_t>(y) * in_w + x];
+}
+
+__global__ void resize_bilinear_chw_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    int in_h, int in_w,
+    int out_h, int out_w,
+    int channels,
+    bool src_transposed
+) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int c = blockIdx.z;
+    if (x >= out_w || y >= out_h || c >= channels) return;
+
+    // Half-pixel centres (equivalent to align_corners=False), so the resample
+    // stays centred and does not shift the image by half a source pixel.
+    const float fy = (y + 0.5f) * in_h / out_h - 0.5f;
+    const float fx = (x + 0.5f) * in_w / out_w - 0.5f;
+
+    int y0 = static_cast<int>(floorf(fy));
+    int x0 = static_cast<int>(floorf(fx));
+    const float wy = fy - y0;
+    const float wx = fx - x0;
+    const int y1 = min(max(y0 + 1, 0), in_h - 1);
+    const int x1 = min(max(x0 + 1, 0), in_w - 1);
+    y0 = min(max(y0, 0), in_h - 1);
+    x0 = min(max(x0, 0), in_w - 1);
+
+    const float* plane = src + static_cast<size_t>(c) * in_h * in_w;
+    const float v00 = fetch_plane(plane, y0, x0, in_h, in_w, src_transposed);
+    const float v01 = fetch_plane(plane, y0, x1, in_h, in_w, src_transposed);
+    const float v10 = fetch_plane(plane, y1, x0, in_h, in_w, src_transposed);
+    const float v11 = fetch_plane(plane, y1, x1, in_h, in_w, src_transposed);
+
+    dst[static_cast<size_t>(c) * out_h * out_w + static_cast<size_t>(y) * out_w + x] =
+        (1.f - wy) * ((1.f - wx) * v00 + wx * v01) +
+                wy * ((1.f - wx) * v10 + wx * v11);
+}
+
+__global__ void resize_sparse_depth_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    int in_h, int in_w,
+    int out_h, int out_w,
+    float min_valid, float max_valid
+) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= out_w || y >= out_h) return;
+
+    // Source footprint of this output pixel, plus its centre for tie-breaking.
+    const float cy = (y + 0.5f) * in_h / out_h;
+    const float cx = (x + 0.5f) * in_w / out_w;
+    int y0 = max(static_cast<int>(floorf(static_cast<float>(y)     * in_h / out_h)), 0);
+    int y1 = min(static_cast<int>(ceilf (static_cast<float>(y + 1) * in_h / out_h)), in_h);
+    int x0 = max(static_cast<int>(floorf(static_cast<float>(x)     * in_w / out_w)), 0);
+    int x1 = min(static_cast<int>(ceilf (static_cast<float>(x + 1) * in_w / out_w)), in_w);
+    // Upscaling can leave an empty footprint; always sample at least one pixel.
+    if (y1 <= y0) y1 = min(y0 + 1, in_h);
+    if (x1 <= x0) x1 = min(x0 + 1, in_w);
+
+    float best = 0.f;
+    float best_dist2 = CUDART_INF_F;
+    for (int yy = y0; yy < y1; ++yy) {
+        for (int xx = x0; xx < x1; ++xx) {
+            const float v = src[static_cast<size_t>(yy) * in_w + xx];
+            // Out-of-range readings are discarded as invalid, not clamped: a
+            // clamped reading would be indistinguishable from a real measurement
+            // at that distance. Negated compare so NaN is rejected too.
+            if (!(v >= min_valid && v <= max_valid)) continue;
+            const float dy = (yy + 0.5f) - cy;
+            const float dx = (xx + 0.5f) - cx;
+            const float d2 = dy * dy + dx * dx;
+            if (d2 < best_dist2) { best_dist2 = d2; best = v; }
+        }
+    }
+    dst[static_cast<size_t>(y) * out_w + x] = best;
+}
+
+cudaError_t resize_bilinear_chw(
+    const float* d_in,
+    float* d_out,
+    int in_h, int in_w,
+    int out_h, int out_w,
+    int channels,
+    bool src_transposed,
+    cudaStream_t stream
+) {
+    dim3 block(32, 8);
+    dim3 grid((out_w + block.x - 1) / block.x,
+              (out_h + block.y - 1) / block.y,
+              channels);
+    resize_bilinear_chw_kernel<<<grid, block, 0, stream>>>(
+        d_in, d_out, in_h, in_w, out_h, out_w, channels, src_transposed
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t resize_sparse_depth(
+    const float* d_in,
+    float* d_out,
+    int in_h, int in_w,
+    int out_h, int out_w,
+    float min_valid_depth,
+    float max_valid_depth,
+    cudaStream_t stream
+) {
+    dim3 block(32, 8);
+    dim3 grid((out_w + block.x - 1) / block.x,
+              (out_h + block.y - 1) / block.y);
+    resize_sparse_depth_kernel<<<grid, block, 0, stream>>>(
+        d_in, d_out, in_h, in_w, out_h, out_w, min_valid_depth, max_valid_depth
+    );
+    return cudaGetLastError();
+}
+
 } // namespace SOb

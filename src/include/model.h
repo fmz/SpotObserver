@@ -6,6 +6,7 @@
 
 #include "utils.h"
 
+#include <atomic>
 #include <string>
 #include <torch/script.h>
 #include <torch/torch.h>
@@ -32,6 +33,22 @@ public:
         TensorShape    depth_shape,
         TensorShape    output_shape
     ) = 0;
+
+    // Streaming models carry per-frame state (e.g. a KV cache) that is only valid
+    // for a contiguous frame sequence. The pipeline calls this whenever the
+    // sequence restarts. No-op for stateless models.
+    virtual void resetState() {}
+
+    // True when the model consumes full-resolution sparse metric depth directly
+    // instead of the pipeline's downscaled depth.
+    virtual bool wantsFullResDepth() const { return false; }
+
+    // Models holding per-sequence state can serve exactly one pipeline at a time;
+    // a second pipeline driving the same instance would interleave two camera
+    // streams into one cache. Stateless models are freely shareable, so the
+    // default always succeeds. Returns false if another owner holds the instance.
+    virtual bool acquire(const void* owner) { (void)owner; return true; }
+    virtual void release(const void* owner) { (void)owner; }
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -86,10 +103,14 @@ class ONNXModel : public MLModel {
         Ort::Allocator* alloc_;
     };
 
-    std::unique_ptr<Ort::Session> m_session;
+    // Declaration order is load-bearing: members are destroyed in reverse, and
+    // Ort::Env must outlive every Session created from it (and the Session must
+    // outlive the Allocator/IoBinding that reference it). Keep m_env first and
+    // m_session ahead of m_allocator/m_binding.
     Ort::Env m_env;
     Ort::SessionOptions m_sess_options;
     Ort::MemoryInfo m_memory_info;
+    std::unique_ptr<Ort::Session> m_session;
     std::unique_ptr<Ort::Allocator> m_allocator;
 
     std::vector<std::string> m_input_names;
@@ -134,4 +155,111 @@ public:
     std::string getDevice() const;
 };
 
-} // namespace UB
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Autoregressive depth model with a transformer KV cache.
+//
+// Graph I/O (50 in, 50 out):
+//   in  : rgb [1,3,H,W], sparse_depth [1,1,H,W], then past_k_00, past_v_00,
+//         past_k_01, ... interleaved K/V per layer, each [1,16,n_frames,P,64]
+//   out : depth, depth_conf, then new_k_00, new_v_00, ... in the same interleaved
+//         order, already sliced to the model's retention window
+//
+// The caches never leave the GPU. Each frame binds the previous step's outputs
+// straight back as inputs via IoBinding, and binds the new outputs by MemoryInfo
+// so ORT sizes them to whatever n_frames_out the graph produced -- they cannot be
+// pre-allocated because the sequence axis grows before the window clamps it.
+// Frame 0 feeds zero-length caches.
+//
+// The cache is per-frame-sequence state, so an instance must not be shared
+// between pipelines; interleaving two camera streams into one cache silently
+// corrupts it. Load a separate instance per pipeline.
+class StreamingONNXModel : public MLModel {
+    static constexpr int32_t kNumCacheTensors = 48; // 24 layers x {K, V}
+    static constexpr int32_t kNumFixedInputs  = 2;  // rgb, sparse_depth
+    static constexpr int32_t kNumFixedOutputs = 2;  // depth, depth_conf
+    // Runaway guard, not the retention window: the graph slices to its own window
+    // (20 in the current export). If a re-export ever forgets that slice the cache
+    // would grow ~195 MB per frame until the GPU runs out, so refuse it instead.
+    static constexpr int64_t kMaxRetainedFrames = 64;
+    // Sparse-depth validity window in metres. Readings outside it are discarded as
+    // invalid rather than clamped. This is a property of what this model expects,
+    // so it belongs here rather than in the pipeline or the resample kernel.
+    static constexpr float kMinValidDepth = 0.01f;
+    static constexpr float kMaxValidDepth = 100.0f;
+
+    // Declaration order is load-bearing; see the note in ONNXModel.
+    Ort::Env m_env;
+    Ort::SessionOptions m_sess_options;
+    Ort::MemoryInfo m_memory_info;
+    std::unique_ptr<Ort::Session> m_session;
+    std::unique_ptr<Ort::IoBinding> m_binding;
+
+    // Index-aligned by construction: m_past_names[i] pairs with m_new_names[i],
+    // which is session output kNumFixedOutputs + i, which is m_cache[i].
+    std::vector<std::string> m_past_names;
+    std::vector<std::string> m_new_names;
+    std::vector<const char*> m_past_cstr;
+    std::vector<const char*> m_new_cstr;
+
+    // Previous step's caches, device-resident and owned by ORT's CUDA allocator.
+    std::vector<Ort::Value> m_cache;
+    // Backing pointer for the zero-length frame-0 caches (no elements are read).
+    void* m_d_empty{nullptr};
+
+    // Model-native input geometry, read from the graph rather than assumed.
+    int64_t m_model_h{0};
+    int64_t m_model_w{0};
+    int64_t m_num_heads{0};
+    int64_t m_num_tokens{0};
+    int64_t m_head_dim{0};
+
+    // Scratch at model resolution.
+    float* m_d_rgb{nullptr};
+    float* m_d_depth{nullptr};
+
+    int64_t m_frames_seen{0};
+    bool m_use_cuda{false};
+    // The pipeline currently driving this instance, or null when free.
+    std::atomic<const void*> m_owner{nullptr};
+
+    void _setDevice(const std::string& device_type);
+    void _buildCacheNames();
+    void _readGeometry();
+    void _allocScratch();
+    void _freeScratch();
+    std::vector<Ort::Value> _makeEmptyCaches() const;
+
+public:
+    explicit StreamingONNXModel(const std::string& model_path, const std::string& device_type = "cuda");
+    ~StreamingONNXModel() override;
+
+    bool runInference(
+        const float* input_data,
+        const float* depth_data,
+        float*       output_data,
+        TensorShape  input_shape,
+        TensorShape  depth_shape,
+        TensorShape  output_shape
+    ) override;
+
+    bool runInference(
+        const uint8_t* input_data,
+        const float*   depth_data,
+        float*         output_data,
+        TensorShape    input_shape,
+        TensorShape    depth_shape,
+        TensorShape    output_shape
+    ) override;
+
+    void resetState() override;
+    bool wantsFullResDepth() const override { return true; }
+    bool acquire(const void* owner) override;
+    void release(const void* owner) override;
+
+    std::string getDevice() const { return m_use_cuda ? "cuda" : "cpu"; }
+    int64_t getModelHeight() const { return m_model_h; }
+    int64_t getModelWidth() const { return m_model_w; }
+};
+
+} // namespace SOb
