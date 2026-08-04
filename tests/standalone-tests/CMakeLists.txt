@@ -59,6 +59,11 @@ add_executable(wall_align_gpu_test
     wall-align-gpu-test.cpp
     ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
     ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu.cu
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu-diagonal.cpp
+    ${CMAKE_SOURCE_DIR}/src/wall-align-gpu.cu
+)
+target_include_directories(wall_align_gpu_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/include
 )
 target_link_libraries(wall_align_gpu_test
     Eigen3::Eigen
