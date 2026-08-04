@@ -925,9 +925,16 @@ StreamingONNXModel::StreamingONNXModel(const std::string& model_path, const std:
         const double cache_mb_per_frame =
             static_cast<double>(kNumCacheTensors) * m_num_heads * m_num_tokens * m_head_dim
             * onnxElementSize(m_cache_type) / (1024.0 * 1024.0);
-        LogPerf("[mem] StreamingONNXModel: weights {:.2f} MB on disk, KV cache {:.2f} MB per retained frame "
+        // The .onnx file is just the graph; the weights live in the external-data
+        // sibling, so include it or the log understates the footprint ~400x.
+        uintmax_t weight_bytes = fs::file_size(model_path);
+        const fs::path external_data = fs::path(model_path).concat(".data");
+        if (fs::exists(external_data)) {
+            weight_bytes += fs::file_size(external_data);
+        }
+        LogPerf("[mem] StreamingONNXModel: graph + weights {:.2f} MB on disk, KV cache {:.2f} MB per retained frame "
                 "(x2 live during Run)",
-                fs::file_size(model_path) / (1024.0 * 1024.0), cache_mb_per_frame);
+                weight_bytes / (1024.0 * 1024.0), cache_mb_per_frame);
 
     } catch (const Ort::Exception& e) {
         // The destructor does not run for a partially constructed object, so any
@@ -987,19 +994,13 @@ void StreamingONNXModel::_setDevice(const std::string& device_type) {
     std::unique_ptr<OrtCUDAProviderOptionsV2, decltype(ort_api.ReleaseCUDAProviderOptions)>
         rel_cuda_options(cuda_options, ort_api.ReleaseCUDAProviderOptions);
 
-    // The cache tensors grow by ~195 MB every frame until the retention window
-    // clamps, which is the pathological case for the default kNextPowerOfTwo
-    // arena: it would round each step up and reserve far past what is live.
-    // kSameAsRequested keeps the arena tracking actual demand. Non-fatal: this is
-    // an optimisation, not a correctness requirement.
-    const char* arena_keys[] = {"arena_extend_strategy"};
-    const char* arena_vals[] = {"kSameAsRequested"};
-    if (OrtStatus* status = ort_api.UpdateCUDAProviderOptions(
-            rel_cuda_options.get(), arena_keys, arena_vals, 1)) {
-        LogMessage("StreamingONNXModel: arena_extend_strategy not applied: {}",
-            ort_api.GetErrorMessage(status));
-        ort_api.ReleaseStatus(status);
-    }
+    // Arena strategy stays at the default (kNextPowerOfTwo) deliberately. The
+    // cache tensors grow to a NEW size every frame until the window clamps, and
+    // exact-size allocation (kSameAsRequested) can never reuse a freed chunk for
+    // the next, larger request -- the arena extends every frame and VRAM climbs
+    // ~quadratically until WDDM starts evicting (measured: 375 ms -> 14.8 s per
+    // frame at the cliff). Power-of-two rounding puts consecutive sizes in the
+    // same bucket, so freed generations actually get reused during growth.
 
     // Deliberately no enable_cuda_graph here: graph capture requires static
     // shapes, and the cache sequence axis grows for the first frames before the

@@ -72,9 +72,11 @@ int main(int argc, char* argv[]) {
     std::string password  = argv[4];
 
     //SOb_ToggleDebugDumps("./spot_dump");
-    // ALL, not PERF: launch/inference failures are reported via LogMessage, and a
-    // console test that swallows its own diagnostics is worse than a chatty one.
-    SOb_SetLogLevel(2);
+    // PERF (1): timing + memory lines only. Level 2 (ALL) additionally prints
+    // several LogMessage lines per camera frame -- useful when diagnosing a
+    // launch failure, but console I/O at that volume measurably drags the
+    // streaming threads. Bump to 2 temporarily when something fails silently.
+    SOb_SetLogLevel(1);
 
     int32_t spot_ids[2] = {-1, -1};
 
