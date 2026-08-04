@@ -24,7 +24,7 @@ def capture_one_robot(robot_ip, username, password,
     try:
         pose = get_robot_pose(conn)
 
-        rgb_images, depth_images = stream.get_current_images(timeout=5.0, copy=True)
+        rgb_images, depth_images, _ = stream.get_current_images(timeout=5.0, copy=True)
         camera_order = stream.get_camera_order()   # e.g. [FRONTLEFT, FRONTRIGHT], matches array order above
 
         from bosdyn.client.image import build_image_request
