@@ -51,6 +51,24 @@ target_link_libraries(four_pcs_gpu_param_sweep
     CUDA::cudart
 )
 
+# Live-demo runner: runs BOTH 4PCS+ICP and wall-align on an exported capture
+# pair, scores them with a shared metric, writes the winner's transform to a
+# result file for run_demo.py to render.
+add_executable(align_demo
+    align-demo.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu.cu
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu-diagonal.cpp
+    ${CMAKE_SOURCE_DIR}/src/wall-align-gpu.cu
+)
+target_include_directories(align_demo PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/include
+)
+target_link_libraries(align_demo
+    Eigen3::Eigen
+    CUDA::cudart
+)
+
 # Wall-constrained gravity-aligned coarse alignment (wall-align-gpu.cu) on
 # real exported capture data -- the deterministic alternative to the 4PCS
 # coarse stage. Needs the four-pcs GPU sources (plane fit, spatial grid, and
