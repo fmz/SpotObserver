@@ -26,6 +26,7 @@ add_executable(four_pcs_gpu_test
     ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
     ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu.cu
     ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu-diagonal.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu-multiseed.cpp
 )
 target_include_directories(four_pcs_gpu_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src/include
