@@ -2,7 +2,7 @@
 // Standalone correctness/timing check for the C++ port of four_pcs.py.
 //
 // Loads a point cloud pair exported by
-// PySpotObserver/examples/export_four_pcs_test_data.py and runs the same
+// PySpotObserver/pyspotobserver/tools/export_four_pcs_test_data.py and runs the same
 // registration recipe validated in Python all session: plane-aware
 // fourPointCongruentSets() with source-side floor rejection.
 //
@@ -17,6 +17,7 @@
 // Usage: four_pcs_test [path-to-exported-data.txt]
 //
 
+#define _USE_MATH_DEFINES
 #include "four-pcs.h"
 
 #include <chrono>
@@ -26,13 +27,14 @@
 #include <string>
 
 int main(int argc, char** argv) {
-    std::string data_path = argc > 1 ? argv[1] : "four_pcs_test_data.txt";
+    std::string data_path = argc > 1 ? argv[1]
+        : "PySpotObserver/pyspotobserver/tools/captures/four_pcs_test_data.txt";
 
     std::ifstream f(data_path);
     if (!f) {
         std::cerr << "Could not open " << data_path << "\n"
                   << "Generate it first with:\n"
-                  << "  python PySpotObserver/examples/export_four_pcs_test_data.py "
+                  << "  python PySpotObserver/pyspotobserver/tools/export_four_pcs_test_data.py "
                   << data_path << "\n";
         return 1;
     }
@@ -58,16 +60,16 @@ int main(int argc, char** argv) {
     std::cout << "Loaded " << n_src << " source / " << n_tgt << " target points, "
               << "plane normal (" << nx << ", " << ny << ", " << nz << "), offset " << offset << "\n";
 
-    // same recipe validated in Python across every real capture this session:
-    // seed=7, iterations=42, min_spread=0.3, max_spread=8.0 (NOT the repo
-    // default of 1.2 -- see four-pcs.h's note on why that default returns
-    // zero valid bases on real, room-scale captures).
+    // Recipe tuned against real capture data's known ground-truth transform
+    // (see four_pcs_gpu_param_sweep): seed=5, iterations=70, min_spread=0.3,
+    // max_spread=5.0 (NOT the repo default of 1.2 -- see four-pcs.h's note on
+    // why that default returns zero valid bases on real, room-scale captures).
     auto t0 = std::chrono::steady_clock::now();
     SOb::RegistrationResult result = SOb::fourPointCongruentSets(
         source, target,
-        /*iterations=*/42, /*max_distance=*/0.1,
-        /*min_spread=*/0.3, /*max_spread=*/8.0, /*coplanar_tol=*/0.05,
-        /*distance_tol=*/0.03, /*e_tol=*/0.05, /*seed=*/7,
+        /*iterations=*/70, /*max_distance=*/0.1,
+        /*min_spread=*/0.3, /*max_spread=*/5.0, /*coplanar_tol=*/0.05,
+        /*distance_tol=*/0.03, /*e_tol=*/0.05, /*seed=*/5,
         &plane_normal, offset);
     auto t1 = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t1 - t0).count();

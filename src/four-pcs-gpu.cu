@@ -1,4 +1,15 @@
+// Workaround for a known Eigen/nvcc incompatibility (libeigen/eigen#2690):
+// under nvcc device compilation, Eigen's arg_default_impl expects a
+// global-scope ::arg, which newer MSVC STL no longer exposes globally. Bring
+// std::arg into the global namespace ourselves before Eigen (pulled in
+// transitively via four-pcs-gpu.cuh -> four-pcs.h) gets included. Needed
+// whenever Eigen types are touched in this file at all, not just for the
+// JacobiSVD call that used to live here.
+#include <complex>
+using std::arg;
+
 #include "four-pcs-gpu.cuh"
+#include "four-pcs-gpu-diagonal.h"
 #include "utils.h"
 
 #include <thrust/device_ptr.h>
@@ -806,60 +817,6 @@ static std::vector<CandidateQuad> findCongruentGPU(
 }
 
 // ===========================================================================
-// Diagonal pairing + crossing ratios for one coplanar base. Four points and
-// a handful of dot products -- there is nothing here worth a GPU kernel, so
-// this runs on the host using Eigen, matching diagonalPairingAndRatios() in
-// four-pcs.cpp exactly (same least-squares solve), just taking float3 in and
-// converting to Eigen::Vector3d at the boundary so the actual math is
-// byte-identical to the already-validated CPU version.
-// ===========================================================================
-
-namespace {
-
-struct HostDiagonalPairing {
-    bool found = false;
-    int order[4] = {0, 1, 2, 3};
-    double ratio_a = 0, ratio_b = 0, diag_a = 0, diag_b = 0;
-};
-
-inline Eigen::Vector3d toEigen(float3 v) { return {v.x, v.y, v.z}; }
-
-HostDiagonalPairing diagonalPairingAndRatiosHost(const float3 base_points[4]) {
-    static const int orderings[3][4] = {{0, 1, 2, 3}, {0, 2, 1, 3}, {0, 3, 1, 2}};
-
-    for (auto& ordering : orderings) {
-        int a = ordering[0], b = ordering[1], c = ordering[2], d = ordering[3];
-        Eigen::Vector3d pa = toEigen(base_points[a]), pb = toEigen(base_points[b]);
-        Eigen::Vector3d pc = toEigen(base_points[c]), pd = toEigen(base_points[d]);
-
-        Eigen::Matrix<double, 3, 2> coeff;
-        coeff.col(0) = pb - pa;
-        coeff.col(1) = -(pd - pc);
-        Eigen::Vector3d rhs = pc - pa;
-        Eigen::Vector2d solution = coeff.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(rhs);
-        double ratio_a = solution(0), ratio_b = solution(1);
-
-        if (ratio_a >= -0.05 && ratio_a <= 1.05 && ratio_b >= -0.05 && ratio_b <= 1.05) {
-            Eigen::Vector3d crossing = pa + ratio_a * (pb - pa);
-            Eigen::Vector3d crossing_check = pc + ratio_b * (pd - pc);
-            if ((crossing - crossing_check).norm() < 0.02) {
-                HostDiagonalPairing result;
-                result.found = true;
-                result.order[0] = a; result.order[1] = b; result.order[2] = c; result.order[3] = d;
-                result.ratio_a = ratio_a;
-                result.ratio_b = ratio_b;
-                result.diag_a = (pb - pa).norm();
-                result.diag_b = (pd - pc).norm();
-                return result;
-            }
-        }
-    }
-    return HostDiagonalPairing{};
-}
-
-}  // namespace
-
-// ===========================================================================
 // Stage 7: host orchestration. Same control flow, same order of checks, and
 // the same parameters as SOb::fourPointCongruentSets() in four-pcs.cpp --
 // the difference is entirely in what each step costs: the base search,
@@ -963,10 +920,10 @@ RegistrationResult fourPointCongruentSetsGPU(
 
             PointCloud base_pts(4, 3), matched_pts(4, 3);
             for (int k = 0; k < 4; k++) {
-                Eigen::Vector3d bp = toEigen(ordered_base_points[k]);
-                base_pts.row(k) = bp.transpose();
-                Eigen::Vector3d mp = toEigen(target_points_host[idxs[k]]);
-                matched_pts.row(k) = mp.transpose();
+                float3 bp = ordered_base_points[k];
+                base_pts.row(k) = Eigen::Vector3d(bp.x, bp.y, bp.z).transpose();
+                float3 mp = target_points_host[idxs[k]];
+                matched_pts.row(k) = Eigen::Vector3d(mp.x, mp.y, mp.z).transpose();
             }
             auto [rotation, translation] = kabsch(base_pts, matched_pts);
 

@@ -25,11 +25,27 @@ add_executable(four_pcs_gpu_test
     four-pcs-gpu-test.cpp
     ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
     ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu.cu
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu-diagonal.cpp
 )
 target_include_directories(four_pcs_gpu_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src/include
 )
 target_link_libraries(four_pcs_gpu_test
+    Eigen3::Eigen
+    CUDA::cudart
+)
+
+# Seed/parameter sweep tool for four-pcs-gpu.cu -- same deps as four_pcs_gpu_test.
+add_executable(four_pcs_gpu_param_sweep
+    four-pcs-gpu-param-sweep.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu.cu
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu-diagonal.cpp
+)
+target_include_directories(four_pcs_gpu_param_sweep PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/include
+)
+target_link_libraries(four_pcs_gpu_param_sweep
     Eigen3::Eigen
     CUDA::cudart
 )

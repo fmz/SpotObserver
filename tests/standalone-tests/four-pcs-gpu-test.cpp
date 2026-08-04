@@ -2,7 +2,7 @@
 // Correctness check for the GPU port of four_pcs (four-pcs-gpu.cu), checked
 // against the already-validated CPU/Eigen version (four-pcs.cpp) on the same
 // real capture data. Loads the same exported point cloud pair used by
-// four-pcs-test.cpp (see PySpotObserver/examples/export_four_pcs_test_data.py)
+// four-pcs-test.cpp (see PySpotObserver/pyspotobserver/tools/export_four_pcs_test_data.py)
 // and runs both the CPU and GPU registration on it.
 //
 // NOTE on reproducibility: the CPU version uses std::mt19937_64; the GPU
@@ -17,6 +17,7 @@
 // Usage: four_pcs_gpu_test [path-to-exported-data.txt]
 //
 
+#define _USE_MATH_DEFINES
 #include "four-pcs.h"
 #include "four-pcs-gpu.cuh"
 
@@ -42,16 +43,23 @@ bool isWellFormed(const SOb::RegistrationResult& result) {
     return std::isfinite(angle) && std::isfinite(t_norm) && angle >= 0.0 && angle <= 180.0;
 }
 
+void printTransform(const std::string& label, const SOb::RegistrationResult& result) {
+    Eigen::IOFormat rowFmt(Eigen::StreamPrecision, 0, ", ", "\n", "  [", "]");
+    std::cout << label << " rotation:\n" << result.rotation.format(rowFmt) << "\n"
+              << label << " translation: [" << result.translation.transpose() << "]\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string data_path = argc > 1 ? argv[1] : "four_pcs_test_data.txt";
+    std::string data_path = argc > 1 ? argv[1]
+        : "PySpotObserver/pyspotobserver/tools/captures/four_pcs_test_data.txt";
 
     std::ifstream f(data_path);
     if (!f) {
         std::cerr << "Could not open " << data_path << "\n"
                   << "Generate it first with:\n"
-                  << "  python PySpotObserver/examples/export_four_pcs_test_data.py "
+                  << "  python PySpotObserver/pyspotobserver/tools/export_four_pcs_test_data.py "
                   << data_path << "\n";
         return 1;
     }
@@ -76,17 +84,20 @@ int main(int argc, char** argv) {
 
     std::cout << "Loaded " << n_src << " source / " << n_tgt << " target points\n";
 
-    // Same recipe validated across every real capture this session: seed=7,
-    // iterations=42, min_spread=0.3, max_spread=8.0 (see four-pcs.h's note on
-    // why 8.0, not the repo default of 1.2, for real room-scale captures).
+    // Recipe tuned against real capture data's known ground-truth transform
+    // (see four_pcs_gpu_param_sweep): seed=5, iterations=70, min_spread=0.3,
+    // max_spread=5.0 (see four-pcs.h's note on why not the repo default of
+    // 1.2, for real room-scale captures). Applied identically to both the CPU
+    // and GPU calls below, though their RNGs differ (see reproducibility note
+    // above) so this doesn't guarantee matching results between them.
 
     // ---- CPU reference ----
     auto t0 = std::chrono::steady_clock::now();
     SOb::RegistrationResult cpu_result = SOb::fourPointCongruentSets(
         source, target,
-        /*iterations=*/42, /*max_distance=*/0.1,
-        /*min_spread=*/0.3, /*max_spread=*/8.0, /*coplanar_tol=*/0.05,
-        /*distance_tol=*/0.03, /*e_tol=*/0.05, /*seed=*/7,
+        /*iterations=*/70, /*max_distance=*/0.1,
+        /*min_spread=*/0.3, /*max_spread=*/5.0, /*coplanar_tol=*/0.05,
+        /*distance_tol=*/0.03, /*e_tol=*/0.05, /*seed=*/5,
         &plane_normal, offset);
     auto t1 = std::chrono::steady_clock::now();
     double cpu_elapsed = std::chrono::duration<double>(t1 - t0).count();
@@ -95,6 +106,7 @@ int main(int argc, char** argv) {
     double cpu_t_norm = cpu_result.translation.norm();
     std::cout << "CPU:  rotation=" << cpu_angle << " deg, translation=" << cpu_t_norm
               << ", elapsed=" << cpu_elapsed << "s\n";
+    printTransform("CPU", cpu_result);
 
     // ---- GPU version: upload the same points, run the same recipe ----
     std::vector<float3> h_source(n_src), h_target(n_tgt);
@@ -124,9 +136,9 @@ int main(int argc, char** argv) {
     auto t2 = std::chrono::steady_clock::now();
     SOb::RegistrationResult gpu_result = SOb::fourPointCongruentSetsGPU(
         d_source, d_target,
-        /*iterations=*/42, /*max_distance=*/0.1f,
-        /*min_spread=*/0.3f, /*max_spread=*/8.0f, /*coplanar_tol=*/0.05f,
-        /*distance_tol=*/0.03f, /*e_tol=*/0.05f, /*seed=*/7,
+        /*iterations=*/70, /*max_distance=*/0.1f,
+        /*min_spread=*/0.3f, /*max_spread=*/5.0f, /*coplanar_tol=*/0.05f,
+        /*distance_tol=*/0.03f, /*e_tol=*/0.05f, /*seed=*/5,
         &plane_normal_f, (float)offset);
     cudaDeviceSynchronize();
     auto t3 = std::chrono::steady_clock::now();
@@ -139,6 +151,7 @@ int main(int argc, char** argv) {
     double gpu_t_norm = gpu_result.translation.norm();
     std::cout << "GPU:  rotation=" << gpu_angle << " deg, translation=" << gpu_t_norm
               << ", elapsed=" << gpu_elapsed << "s\n";
+    printTransform("GPU", gpu_result);
 
     // ---- checks ----
     bool cpu_ok = isWellFormed(cpu_result);

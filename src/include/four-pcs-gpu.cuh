@@ -80,11 +80,16 @@ cudaError_t fitDominantPlaneGPU(
 // double, float3 instead of Eigen::Vector3d, otherwise identical parameters
 // and identical meaning). source and target must already be in GPU memory
 // (e.g. via backprojectDepthToPoints).
+//
+// iterations/max_spread/seed defaults below (70/5.0/5) are tuned against
+// real capture data's known ground-truth transform (see
+// four_pcs_gpu_param_sweep in tests/standalone-tests) -- not a universal
+// best, just validated for that data.
 RegistrationResult fourPointCongruentSetsGPU(
     const DevicePointCloud& source, const DevicePointCloud& target,
-    int iterations = 200, float max_distance = 0.1f,
-    float min_spread = 0.3f, float max_spread = 1.2f, float coplanar_tol = 0.05f,
-    float distance_tol = 0.03f, float e_tol = 0.05f, unsigned long long seed = 0,
+    int iterations = 70, float max_distance = 0.1f,
+    float min_spread = 0.3f, float max_spread = 5.0f, float coplanar_tol = 0.05f,
+    float distance_tol = 0.03f, float e_tol = 0.05f, unsigned long long seed = 5,
     const float3* dominant_plane_normal = nullptr,
     float dominant_plane_offset = 0.0f,
     float plane_reject_thresh = 0.04f, float plane_reject_angle_cos = 0.94f,

@@ -111,6 +111,8 @@ add_library(${PLUGIN_NAME} SHARED
     src/four-pcs.cpp
     src/include/four-pcs-gpu.cuh
     src/four-pcs-gpu.cu
+    src/include/four-pcs-gpu-diagonal.h
+    src/four-pcs-gpu-diagonal.cpp
 )
 
 # Unity Native-plugin API headers (IUnityInterface.h etc.).

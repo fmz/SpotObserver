@@ -6,6 +6,9 @@ from .config import CameraType
 _GOUGER_IP = "128.148.138.21"
 _TUSKER_IP = "128.148.138.22"
 
+# No color correction data for BACK/HAND -- pass pixels through unchanged.
+_IDENTITY_3x3 = np.eye(3, dtype=np.float32)
+
 # Color correction matrices per robot, keyed by CameraType.
 # Convention: corrected_pixel = raw_pixel @ M  (row-vector form),
 # applied in numpy as: img @ M  for (H, W, 3) images.

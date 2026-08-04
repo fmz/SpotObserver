@@ -4,6 +4,10 @@ source cloud -- to a plain-text file the C++ standalone tests
 (four-pcs-test.cpp, four-pcs-gpu-test.cpp) can load without needing Python,
 Eigen bindings, or a point cloud library: just whitespace-separated numbers.
 
+Source and target clouds come from captures/<name>_points_body.npy, written by
+capture_dual.py -- already-backprojected, real depth-camera points in each
+robot's own body frame (see backproject_to_body() there), not synthetic data.
+
 The clouds written out are voxel-downsampled, matching how the real
 fourPointCongruentSets() call is used in practice -- the same coarse clouds
 serve both the base search and the final whole-cloud scoring, not the raw
@@ -18,40 +22,27 @@ Output format (all whitespace-separated, no fixed column widths):
 
 Usage:
     python export_four_pcs_test_data.py <output.txt> \\
-        [--source-index N] [--target-index N] [--voxel-size V]
+        [--source-name robotA] [--target-name robotB] [--voxel-size V]
 """
 
 import argparse
-import struct
+from pathlib import Path
 
 import numpy as np
 
 from pyspotobserver.four_pcs import downsample_cloud, fit_dominant_plane
 
-DATA_DIR = "/Users/adannaobuba/Documents/Brown/GHOST/GHOST/Assets/PointClouds"
+CAPTURES_DIR = Path(__file__).parent / "captures"
 
 
-def load_mesh_array(path, width=640, height=480):
-    """Matches test_icp_align.py's convention: a little-endian int32 point
-    count followed by that many little-endian float32 depth values, one per
-    pixel, row-major."""
-    with open(path, "rb") as f:
-        data = f.read()
-    length = struct.unpack("<i", data[:4])[0]
-    assert length == width * height, (
-        f"{path}: expected {width * height} depth values, file has {length}"
-    )
-    return np.frombuffer(data[4:4 + length * 4], dtype="<f4").reshape(height, width)
-
-
-def backproject(depth, fx, fy, cx, cy):
-    h, w = depth.shape
-    v, u = np.indices((h, w))
-    valid = depth > 0
-    z = depth[valid]
-    x = (u[valid] - cx) * z / fx
-    y = (v[valid] - cy) * z / fy
-    return np.stack([x, y, z], axis=-1)  # camera-frame points, Nx3
+def load_capture_points(name):
+    path = CAPTURES_DIR / f"{name}_points_body.npy"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found -- run capture_dual.py first to record '{name}' "
+            f"(or pass --source-name/--target-name matching an existing capture)."
+        )
+    return np.load(path)
 
 
 def write_test_data(path, source, target, plane_normal, plane_offset):
@@ -67,10 +58,12 @@ def write_test_data(path, source, target, plane_normal, plane_offset):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", help="path to write the exported test data to")
-    parser.add_argument("--source-index", type=int, default=0,
-                         help="mesh_array_<N> to use as the source cloud (default 0)")
-    parser.add_argument("--target-index", type=int, default=1,
-                         help="mesh_array_<N> to use as the target cloud (default 1)")
+    parser.add_argument("--source-name", default="robotA",
+                         help="captures/<name>_points_body.npy to use as the source cloud "
+                              "(default robotA)")
+    parser.add_argument("--target-name", default="robotB",
+                         help="captures/<name>_points_body.npy to use as the target cloud "
+                              "(default robotB)")
     parser.add_argument("--voxel-size", type=float, default=0.05,
                          help="downsample_cloud() voxel size for the coarse clouds used in "
                               "both the base search and final scoring (default 0.05)")
@@ -81,16 +74,9 @@ def main():
                          help="inlier distance threshold for fit_dominant_plane() (default 0.04)")
     args = parser.parse_args()
 
-    w, h = 640, 480
-    fx = fy = max(w, h)
-    cx, cy = w / 2, h / 2
-
-    src_depth = load_mesh_array(f"{DATA_DIR}/mesh_array_{args.source_index}", w, h)
-    tgt_depth = load_mesh_array(f"{DATA_DIR}/mesh_array_{args.target_index}", w, h)
-
-    print(f"Backprojecting mesh_array_{args.source_index} and mesh_array_{args.target_index}...")
-    src_full = backproject(src_depth, fx, fy, cx, cy)
-    tgt_full = backproject(tgt_depth, fx, fy, cx, cy)
+    print(f"Loading '{args.source_name}' and '{args.target_name}' from {CAPTURES_DIR}...")
+    src_full = load_capture_points(args.source_name)
+    tgt_full = load_capture_points(args.target_name)
     print(f"  source: {len(src_full)} points, target: {len(tgt_full)} points (full resolution)")
 
     print(f"Downsampling with voxel size {args.voxel_size}...")
