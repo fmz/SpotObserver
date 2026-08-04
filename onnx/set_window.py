@@ -44,12 +44,31 @@ def main() -> int:
     graph = model.graph
 
     cache_outputs = {v.name for v in graph.output if v.name.startswith("new_")}
-    starts_inputs = {
-        n.input[1] for n in graph.node
-        if n.op_type == "Slice" and any(o in cache_outputs for o in n.output)
-    }
+    producer = {o: n for n in graph.node for o in n.output}
+
+    # The Slice may not feed the graph output directly: fp16 conversion and
+    # re-exports append pass-through ops (Cast, Identity) after it. Walk back
+    # from each new_* output through those to the producing Slice.
+    PASSTHROUGH = {"Identity", "Cast", "Squeeze", "Unsqueeze"}
+    def find_slice(output_name):
+        node, hops = producer.get(output_name), 0
+        while node is not None and node.op_type in PASSTHROUGH and hops < 8:
+            node = producer.get(node.input[0])
+            hops += 1
+        return node if node is not None and node.op_type == "Slice" else None
+
+    slice_nodes = [s for s in (find_slice(name) for name in sorted(cache_outputs)) if s is not None]
+    starts_inputs = {n.input[1] for n in slice_nodes}
+
     if len(starts_inputs) != N_CACHE:
+        # Fallback: find Slices by pattern -- 1-element negative `starts` -- and
+        # report what actually feeds the outputs so a failure is diagnosable.
+        feeders = sorted({(producer[n].op_type if n in producer else "<graph input>")
+                          for n in cache_outputs})
         print(f"expected {N_CACHE} cache Slice nodes, found {len(starts_inputs)}", file=sys.stderr)
+        print(f"ops feeding new_* outputs: {feeders}", file=sys.stderr)
+        print("(if these are not Slice/Cast/Identity, the export's window structure "
+              "changed -- send this output back)", file=sys.stderr)
         return 1
 
     patched, old_values = 0, set()
