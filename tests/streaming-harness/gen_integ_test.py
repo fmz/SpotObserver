@@ -144,6 +144,7 @@ public:
     virtual bool wantsFullResDepth() const { return false; }
     virtual bool acquire(const void* owner) { (void)owner; return true; }
     virtual void release(const void* owner) { (void)owner; }
+    virtual bool supportsBatch(int32_t n) const { return n >= 1; }
 };
 
 // ---- verbatim class declaration from src/include/model.h --------------------
@@ -250,9 +251,85 @@ static void run_suite(const char* model, bool fp16_cache) {
     check(g_free_count > before, (std::string(tag) + "teardown: scratch freed").c_str());
 }
 
+static void run_batch_suite(const char* dyn_model, const char* static_model) {
+    using namespace SOb;
+    const size_t CH = 12, CW = 16;        // "camera" resolution; model is 8x10
+    printf("\n--- dynamic batch (symbolic B, per-slot sequences) ---\n");
+
+    std::unique_ptr<StreamingONNXModel> m;
+    try {
+        m = std::make_unique<StreamingONNXModel>(dyn_model, "cuda");
+    } catch (const std::exception& e) {
+        printf("[dyn] construction threw: %s\n", e.what());
+        g_fail++; return;
+    }
+    check(true, "[dyn] construct: symbolic-batch graph accepted");
+    check(m->supportsBatch(1) && m->supportsBatch(2) && !m->supportsBatch(0),
+          "[dyn] supportsBatch: any positive batch accepted");
+
+    // Phase 1: batch 1, two frames.
+    TensorShape in1{1, 3, CH, CW}, dp1{1, 1, CH, CW}, out1{1, 1, CH, CW};
+    std::vector<float> rgb1(3 * CH * CW, 1.0f), depth1(CH * CW, 2.0f), out_b1(CH * CW, -1.f);
+    bool ok = m->runInference(rgb1.data(), depth1.data(), out_b1.data(), in1, dp1, out1)
+           && m->runInference(rgb1.data(), depth1.data(), out_b1.data(), in1, dp1, out1);
+    auto cshape = m->testCache()[0].GetTensorTypeAndShapeInfo().GetShape();
+    check(ok && cshape[0] == 1 && cshape[2] == 2,
+          "[dyn] batch 1: runs, cache [1,..,2,..]",
+          std::format("batch={} frames={}", cshape[0], cshape[2]));
+
+    // Phase 2: switch to batch 2 mid-stream -> sequence must restart cleanly.
+    TensorShape in2{2, 3, CH, CW}, dp2{2, 1, CH, CW}, out2{2, 1, CH, CW};
+    std::vector<float> rgb2(2 * 3 * CH * CW), depth2(2 * CH * CW, 2.0f), out_b2(2 * CH * CW, -1.f);
+    std::fill(rgb2.begin(), rgb2.begin() + 3 * CH * CW, 1.0f);   // slot 0
+    std::fill(rgb2.begin() + 3 * CH * CW, rgb2.end(), 3.0f);      // slot 1
+    ok = m->runInference(rgb2.data(), depth2.data(), out_b2.data(), in2, dp2, out2);
+    cshape = m->testCache()[0].GetTensorTypeAndShapeInfo().GetShape();
+    check(ok && cshape[0] == 2 && cshape[2] == 1 && m->testFrames() == 1,
+          "[dyn] batch change 1->2: restarts sequence, cache [2,..,1,..]",
+          std::format("batch={} frames={} counter={}", cshape[0], cshape[2], m->testFrames()));
+
+    // Phase 3: batch-2 streaming -- growth, per-slot output, cache identity.
+    bool growth_ok = true, slot_ok = true, content_ok = true;
+    for (int f = 0; f < 5; ++f) {
+        std::fill(out_b2.begin(), out_b2.end(), -1.f);
+        if (!m->runInference(rgb2.data(), depth2.data(), out_b2.data(), in2, dp2, out2)) {
+            check(false, "[dyn] batch-2 runInference returned false"); return;
+        }
+        int64_t n = m->testCache()[0].GetTensorTypeAndShapeInfo().GetShape()[2];
+        if (n != std::min<int64_t>(f + 2, 4)) growth_ok = false;   // continues from frame 1
+        for (size_t i = 0; i < CH * CW; ++i) {
+            if (std::fabs(out_b2[i] - 1.0f) > 1e-4f) slot_ok = false;              // slot 0
+            if (std::fabs(out_b2[CH * CW + i] - 3.0f) > 1e-4f) slot_ok = false;    // slot 1
+        }
+        for (int i = 0; i < 48; ++i)
+            if (cache_elem0(m->testCache()[i]) != float(i)) content_ok = false;
+    }
+    check(growth_ok, "[dyn] batch 2: n_frames grows then clamps");
+    check(slot_ok, "[dyn] batch 2: slot outputs independent (1.0 / 3.0)");
+    check(content_ok, "[dyn] batch 2: cache[i] carries layer i");
+
+    // Phase 4: back to batch 1 -> restart again.
+    ok = m->runInference(rgb1.data(), depth1.data(), out_b1.data(), in1, dp1, out1);
+    cshape = m->testCache()[0].GetTensorTypeAndShapeInfo().GetShape();
+    check(ok && cshape[0] == 1 && cshape[2] == 1,
+          "[dyn] batch change 2->1: restarts sequence, cache [1,..,1,..]");
+
+    // Fixed-batch graph must refuse a batch-2 call cleanly, not crash.
+    std::unique_ptr<StreamingONNXModel> ms;
+    try {
+        ms = std::make_unique<StreamingONNXModel>(static_model, "cuda");
+    } catch (const std::exception& e) {
+        printf("[static] construction threw: %s\n", e.what()); g_fail++; return;
+    }
+    check(!ms->supportsBatch(2), "[static] fixed batch-1 graph reports supportsBatch(2)==false");
+    ok = ms->runInference(rgb2.data(), depth2.data(), out_b2.data(), in2, dp2, out2);
+    check(!ok, "[static] batch-2 call on fixed-batch-1 graph fails cleanly");
+}
+
 int main() {
     run_suite("STUB_PATH", false);
     run_suite("STUB_PATH_FP16", true);
+    run_batch_suite("STUB_PATH_DYN", "STUB_PATH");
     printf("\n%s (%d failure(s))\n",
            g_fail ? "FAILURES PRESENT" : "ALL INTEGRATION TESTS PASSED", g_fail);
     return g_fail ? 1 : 0;
@@ -263,6 +340,7 @@ tu = tu.replace("KERNELS_HERE", kernels)
 tu = tu.replace("CLASS_DECL_HERE", class_decl)
 tu = tu.replace("CLASS_IMPL_HERE", class_impl)
 tu = tu.replace("STUB_PATH_FP16", str(OUT / "stub_stream_fp16cache.onnx").replace("\\", "/"))
+tu = tu.replace("STUB_PATH_DYN", str(OUT / "stub_stream_dyn.onnx").replace("\\", "/"))
 tu = tu.replace("STUB_PATH", str(OUT / "stub_stream.onnx").replace("\\", "/"))
 (OUT / "integ_test.cpp").write_text(tu, encoding="utf-8")
 print("wrote", OUT / "integ_test.cpp")

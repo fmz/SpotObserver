@@ -116,12 +116,11 @@ int main(int argc, char* argv[]) {
     const int32_t model_kind  = (argc >= 7) ? std::atoi(argv[6]) : SOb_MODEL_SINGLE_SHOT;
     const bool    switching   = (argc >= 8);
     const int32_t model2_kind = (argc == 9) ? std::atoi(argv[8]) : SOb_MODEL_SINGLE_SHOT;
-    // Streaming models are batch-1 (their KV cache is one camera's sequence), so
-    // launch on the single-camera HAND stream (index 1) instead of the
-    // two-camera front stream (index 0). When switching, both models run on the
-    // same stream, so a single streaming participant forces the batch-1 stream.
-    const int32_t vp_stream_idx =
-        (model_kind == SOb_MODEL_STREAMING || (switching && model2_kind == SOb_MODEL_STREAMING)) ? 1 : 0;
+    // Preferred pipeline stream: the two-camera front stream (index 0).
+    // Batch-capable streaming exports (dynamic or batch-2) run there directly; a
+    // fixed batch-1 export is refused by the native supportsBatch guard, and the
+    // launch loop falls back to the single-camera HAND stream (index 1).
+    int32_t vp_stream_idx = 0;
 
     SObModel models[2] = {nullptr, nullptr};
     int32_t  active_model = 0;
@@ -144,11 +143,17 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "Model(s) loaded successfully!" << std::endl;
 
-        // Launch vision pipeline on both robots
+        // Launch vision pipeline on both robots. Try the front stream first;
+        // fall back to the HAND stream if the model can't take its batch (e.g.
+        // a fixed batch-1 streaming export against the two-camera front pair).
         for (size_t i = 0; i < 2; i++) {
             if (spot_ids[i] < 0) continue;
-            // Launch vision pipeline only on the stream picked for this model kind
             bool ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][vp_stream_idx], models[0]);
+            if (!ret && vp_stream_idx == 0 && cam_stream_ids[spot_ids[i]].size() > 1) {
+                std::cout << "Front-stream launch refused (see native log); trying HAND stream" << std::endl;
+                vp_stream_idx = 1;
+                ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][vp_stream_idx], models[0]);
+            }
             if (!ret) {
                 std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
                 disconnect_from_spots(spot_ids, 2);
@@ -156,7 +161,8 @@ int main(int argc, char* argv[]) {
                 cv::destroyAllWindows();
                 return -1;
             }
-            std::cout << "Vision pipeline launched on robot " << i << std::endl;
+            std::cout << "Vision pipeline launched on robot " << i
+                      << " (stream idx " << vp_stream_idx << ")" << std::endl;
         }
     }
 
@@ -263,8 +269,13 @@ int main(int argc, char* argv[]) {
                     cv::cvtColor(image, image, cv::COLOR_RGBA2BGR);
                     cv::normalize(depth, depth, 0, 1, cv::NORM_MINMAX);
 
+                    // Make it unmistakable which depth is model output and which is
+                    // raw sensor depth -- the pipeline stream moves depending on
+                    // model kind, and raw registered depth masquerades convincingly.
+                    const bool is_model_stream = using_vision_pipeline && stream == vp_stream_idx;
+                    const std::string depth_tag = is_model_stream ? " Depth[MODEL]" : " Depth[RAW]";
                     cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " RGB" + std::to_string(i), image);
-                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " Depth" + std::to_string(i), depth);
+                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + depth_tag + std::to_string(i), depth);
                 }
                 if (cv::waitKey(1) == 'q') {
                     exit_requested = true;

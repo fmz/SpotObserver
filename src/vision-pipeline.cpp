@@ -65,11 +65,12 @@ bool VisionPipeline::start() {
         return false;
     }
 
-    // Models that take full-resolution depth are the streaming ones: they carry a
-    // KV cache keyed to one camera's contiguous frames, and that cache is batch-1.
-    // Interleaving several cameras through it would corrupt it silently.
-    if (model_.wantsFullResDepth() && output_shape_.N != 1) {
-        LogMessage("Streaming model requires a single camera per pipeline, got N={}", output_shape_.N);
+    // A streaming model's cache has one sequence per batch slot, so the stream's
+    // camera count must be a batch size the graph accepts (fixed-batch exports
+    // pin it; dynamic-batch exports take any). Refusing here beats the silent
+    // cache corruption that a mismatched batch would cause.
+    if (!model_.supportsBatch(static_cast<int32_t>(output_shape_.N))) {
+        LogMessage("Model does not support {} images per step for this stream", output_shape_.N);
         return false;
     }
 

@@ -49,6 +49,11 @@ public:
     // default always succeeds. Returns false if another owner holds the instance.
     virtual bool acquire(const void* owner) { (void)owner; return true; }
     virtual void release(const void* owner) { (void)owner; }
+
+    // Whether the model can run a batch of n images per step. Streaming models
+    // constrain this to their graph's batch dim (or accept any n when the export
+    // declares it symbolic); stateless models take whatever they're given.
+    virtual bool supportsBatch(int32_t n) const { return n >= 1; }
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -205,6 +210,16 @@ class StreamingONNXModel : public MLModel {
     int64_t m_num_tokens{0};
     int64_t m_head_dim{0};
 
+    // Batch handling. m_graph_batch is what the graph declares for the batch dim:
+    // a positive value pins it; 0 means symbolic ("B"), so the model takes
+    // whatever batch each pipeline stream delivers (one cache sequence per batch
+    // slot -- slots are independent views, e.g. the two front cameras).
+    // m_cur_batch is the batch of the active sequence; changing it invalidates
+    // the cache, so a mid-stream change forces a sequence restart.
+    int64_t m_graph_batch{1};
+    int64_t m_cur_batch{1};
+    int64_t m_alloc_batch{0}; // scratch capacity, grown on demand
+
     // Element type the graph declares for the caches. Their contents are never
     // read or written here -- they leave ORT and come straight back in -- so this
     // only decides how the zero-length frame-0 tensors are created. An fp16 cache
@@ -223,7 +238,7 @@ class StreamingONNXModel : public MLModel {
     void _setDevice(const std::string& device_type);
     void _buildCacheNames();
     void _readGeometry();
-    void _allocScratch();
+    void _ensureScratch(int64_t batch);
     void _freeScratch();
     std::vector<Ort::Value> _makeEmptyCaches() const;
 
@@ -253,6 +268,10 @@ public:
     bool wantsFullResDepth() const override { return true; }
     bool acquire(const void* owner) override;
     void release(const void* owner) override;
+    bool supportsBatch(int32_t n) const override {
+        if (n < 1) return false;
+        return m_graph_batch == 0 || n == m_graph_batch;
+    }
 
     std::string getDevice() const { return m_use_cuda ? "cuda" : "cpu"; }
     int64_t getModelHeight() const { return m_model_h; }

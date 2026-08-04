@@ -86,6 +86,7 @@ public:
     virtual bool wantsFullResDepth() const {{ return false; }}
     virtual bool acquire(const void* owner) {{ (void)owner; return true; }}
     virtual void release(const void* owner) {{ (void)owner; }}
+    virtual bool supportsBatch(int32_t n) const {{ return n >= 1; }}
 }};
 
 // ---- verbatim class declaration from src/include/model.h --------------------

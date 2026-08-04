@@ -26,6 +26,7 @@ if errorlevel 1 ( echo ERROR: vcvars64.bat failed & exit /b 1 )
 echo === generating harnesses from src/ ===
 "%PY%" "%HERE%make_stub_model.py"        || exit /b 1
 "%PY%" "%HERE%make_stub_model.py" --fp16 || exit /b 1
+"%PY%" "%HERE%make_stub_model.py" --dyn  || exit /b 1
 "%PY%" "%HERE%gen_ort_check.py"          || exit /b 1
 "%PY%" "%HERE%gen_kernel_test.py"        || exit /b 1
 "%PY%" "%HERE%gen_integ_test.py"         || exit /b 1

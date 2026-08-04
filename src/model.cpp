@@ -917,7 +917,7 @@ StreamingONNXModel::StreamingONNXModel(const std::string& model_path, const std:
 
         _buildCacheNames();
         _readGeometry();
-        _allocScratch();
+        _ensureScratch(m_cur_batch);
 
         m_binding = std::make_unique<Ort::IoBinding>(*m_session);
         resetState();
@@ -1086,14 +1086,17 @@ void StreamingONNXModel::_readGeometry() {
     Ort::TypeInfo depth_out_type_info = m_session->GetOutputTypeInfo(0);
     Ort::TypeInfo cache_type_info     = m_session->GetInputTypeInfo(kNumFixedInputs);
 
-    // rgb: [1, 3, H, W]
+    // rgb: [B, 3, H, W]. H and W must be static; the batch dim may be a fixed
+    // value or symbolic (reported as -1), in which case any batch is accepted
+    // and each batch slot carries its own independent cache sequence.
     auto rgb_info = rgb_type_info.GetTensorTypeAndShapeInfo();
     auto rgb_shape = rgb_info.GetShape();
     if (rgb_shape.size() != 4 || rgb_shape[2] <= 0 || rgb_shape[3] <= 0) {
-        throw std::runtime_error("rgb input must have static [1,3,H,W] shape");
+        throw std::runtime_error("rgb input must have [B,3,H,W] shape with static H and W");
     }
     m_model_h = rgb_shape[2];
     m_model_w = rgb_shape[3];
+    m_graph_batch = rgb_shape[0] > 0 ? rgb_shape[0] : 0; // 0 = symbolic = any
 
     // The image tensors are read and written directly by the fp32 resize kernels,
     // so those must be fp32. Fail loudly here rather than reinterpret half floats
@@ -1121,23 +1124,44 @@ void StreamingONNXModel::_readGeometry() {
     // Any element type is fine here: the caches are opaque to this class.
     m_cache_type = cache_info.GetElementType();
 
-    LogMessage("StreamingONNXModel geometry: input {}x{}, cache [1,{},n_frames,{},{}] element type {} ({} bytes)",
-        m_model_h, m_model_w, m_num_heads, m_num_tokens, m_head_dim,
+    // The cache batch dim must agree with rgb's -- a graph that batches images
+    // but not cache sequences cannot stream per-view.
+    const int64_t cache_batch = cache_shape[0] > 0 ? cache_shape[0] : 0;
+    if (cache_batch != m_graph_batch) {
+        throw std::runtime_error("rgb and cache batch dims disagree (" +
+            std::to_string(m_graph_batch) + " vs " + std::to_string(cache_batch) + ")");
+    }
+
+    m_cur_batch = m_graph_batch > 0 ? m_graph_batch : 1;
+
+    LogMessage("StreamingONNXModel geometry: input {}x{}, batch {}, cache [B,{},n_frames,{},{}] element type {} ({} bytes)",
+        m_model_h, m_model_w, m_graph_batch == 0 ? "dynamic" : std::to_string(m_graph_batch),
+        m_num_heads, m_num_tokens, m_head_dim,
         static_cast<int>(m_cache_type), onnxElementSize(m_cache_type));
 }
 
-void StreamingONNXModel::_allocScratch() {
-    checkCudaError(cudaMalloc(&m_d_rgb, 3 * m_model_h * m_model_w * sizeof(float)),
+void StreamingONNXModel::_ensureScratch(int64_t batch) {
+    if (batch <= m_alloc_batch) {
+        return;
+    }
+    // Scratch is only live within a single runInference call (which syncs before
+    // returning), so growing it between calls is safe.
+    if (m_d_rgb)   { cudaFree(m_d_rgb);   m_d_rgb = nullptr; }
+    if (m_d_depth) { cudaFree(m_d_depth); m_d_depth = nullptr; }
+    checkCudaError(cudaMalloc(&m_d_rgb, batch * 3 * m_model_h * m_model_w * sizeof(float)),
         "cudaMalloc streaming model rgb scratch");
-    checkCudaError(cudaMalloc(&m_d_depth, m_model_h * m_model_w * sizeof(float)),
+    checkCudaError(cudaMalloc(&m_d_depth, batch * m_model_h * m_model_w * sizeof(float)),
         "cudaMalloc streaming model depth scratch");
-    // Backing for the zero-length frame-0 caches. No elements are read; ORT just
-    // wants a valid device pointer.
-    checkCudaError(cudaMalloc(&m_d_empty, 256), "cudaMalloc streaming model empty cache backing");
+    if (!m_d_empty) {
+        // Backing for the zero-length frame-0 caches. No elements are read; ORT
+        // just wants a valid device pointer.
+        checkCudaError(cudaMalloc(&m_d_empty, 256), "cudaMalloc streaming model empty cache backing");
+    }
+    m_alloc_batch = batch;
 }
 
 std::vector<Ort::Value> StreamingONNXModel::_makeEmptyCaches() const {
-    std::vector<int64_t> shape{1, m_num_heads, 0, m_num_tokens, m_head_dim};
+    std::vector<int64_t> shape{m_cur_batch, m_num_heads, 0, m_num_tokens, m_head_dim};
     std::vector<Ort::Value> caches;
     caches.reserve(kNumCacheTensors);
     for (int32_t i = 0; i < kNumCacheTensors; ++i) {
@@ -1201,36 +1225,60 @@ bool StreamingONNXModel::runInference(
 
     auto time_start = std::chrono::high_resolution_clock::now();
 
+    // Batch = images per step, one independent cache sequence per slot.
+    const int64_t batch = static_cast<int64_t>(input_shape.N);
+    if (!supportsBatch(static_cast<int32_t>(batch))) {
+        LogMessage("StreamingONNXModel: batch {} not supported (graph batch: {})",
+            batch, m_graph_batch == 0 ? std::string("dynamic") : std::to_string(m_graph_batch));
+        return false;
+    }
+    if (batch != m_cur_batch) {
+        // The cache's batch dim is part of the sequence state; a different batch
+        // means a different set of view sequences, so restart rather than feed a
+        // mismatched cache into the graph.
+        LogMessage("StreamingONNXModel: batch changed {} -> {}, restarting sequence",
+            m_cur_batch, batch);
+        m_cur_batch = batch;
+        resetState();
+    }
+
     try {
-        // Camera resolution -> model resolution. Depth is resampled sparsely so
-        // invalid (zero) pixels are never blended into valid ones. Range
-        // validation and orientation are handled inside the graph.
+        _ensureScratch(batch);
+
+        // Camera resolution -> model resolution, all batch slots in one pass:
+        // [B,3,H,W] is B*3 contiguous planes to the resampler. Depth is resampled
+        // sparsely so invalid (zero) pixels are never blended into valid ones.
+        // Range validation and orientation are handled inside the graph.
         checkCudaError(resize_bilinear_chw(
             input_data, m_d_rgb,
             static_cast<int>(input_shape.H), static_cast<int>(input_shape.W),
             static_cast<int>(m_model_h), static_cast<int>(m_model_w),
-            3, 0
+            static_cast<int>(batch * 3), 0
         ), "resize rgb to model resolution");
 
-        checkCudaError(resize_sparse_depth(
-            depth_data, m_d_depth,
-            static_cast<int>(depth_shape.H), static_cast<int>(depth_shape.W),
-            static_cast<int>(m_model_h), static_cast<int>(m_model_w),
-            0
-        ), "resize sparse depth to model resolution");
+        const size_t depth_in_elems  = depth_shape.H * depth_shape.W;
+        const size_t depth_mdl_elems = static_cast<size_t>(m_model_h * m_model_w);
+        for (int64_t b = 0; b < batch; ++b) {
+            checkCudaError(resize_sparse_depth(
+                depth_data + b * depth_in_elems, m_d_depth + b * depth_mdl_elems,
+                static_cast<int>(depth_shape.H), static_cast<int>(depth_shape.W),
+                static_cast<int>(m_model_h), static_cast<int>(m_model_w),
+                0
+            ), "resize sparse depth to model resolution");
+        }
 
         // ORT runs on its own stream; make sure the resamples are visible first.
         checkCudaError(cudaStreamSynchronize(0), "sync before streaming Run");
 
-        std::vector<int64_t> rgb_tensor_shape{1, 3, m_model_h, m_model_w};
-        std::vector<int64_t> depth_tensor_shape{1, 1, m_model_h, m_model_w};
+        std::vector<int64_t> rgb_tensor_shape{batch, 3, m_model_h, m_model_w};
+        std::vector<int64_t> depth_tensor_shape{batch, 1, m_model_h, m_model_w};
 
         Ort::Value rgb_tensor = Ort::Value::CreateTensor<float>(
-            m_memory_info, m_d_rgb, static_cast<size_t>(3 * m_model_h * m_model_w),
+            m_memory_info, m_d_rgb, static_cast<size_t>(batch * 3 * m_model_h * m_model_w),
             rgb_tensor_shape.data(), rgb_tensor_shape.size()
         );
         Ort::Value depth_tensor = Ort::Value::CreateTensor<float>(
-            m_memory_info, m_d_depth, static_cast<size_t>(m_model_h * m_model_w),
+            m_memory_info, m_d_depth, static_cast<size_t>(batch * m_model_h * m_model_w),
             depth_tensor_shape.data(), depth_tensor_shape.size()
         );
 
@@ -1267,27 +1315,31 @@ bool StreamingONNXModel::runInference(
         m_binding->ClearBoundInputs();
         m_binding->ClearBoundOutputs();
 
-        // depth is [1, H, W] in whatever orientation the graph emits; take the
+        // depth is [B, H, W] in whatever orientation the graph emits; take the
         // dims it reports rather than assuming them.
         auto depth_out_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
-        if (depth_out_shape.size() != 3) {
-            LogMessage("StreamingONNXModel: unexpected depth output rank {}", depth_out_shape.size());
+        if (depth_out_shape.size() != 3 || depth_out_shape[0] != batch) {
+            LogMessage("StreamingONNXModel: unexpected depth output shape (rank {}, batch {})",
+                depth_out_shape.size(), depth_out_shape.empty() ? -1 : depth_out_shape[0]);
             return false;
         }
         const int64_t src_h = depth_out_shape[1];
         const int64_t src_w = depth_out_shape[2];
 
+        // All batch slots in one pass: [B,H,W] in and [B,H',W'] out are both
+        // contiguous single-channel planes.
         checkCudaError(resize_bilinear_chw(
             outputs[0].GetTensorData<float>(), output_data,
             static_cast<int>(src_h), static_cast<int>(src_w),
             static_cast<int>(output_shape.H), static_cast<int>(output_shape.W),
-            1, 0
+            static_cast<int>(batch), 0
         ), "resize model depth to output resolution");
         checkCudaError(cudaStreamSynchronize(0), "sync after streaming depth resize");
 
         auto cache_shape = outputs[kNumFixedOutputs].GetTensorTypeAndShapeInfo().GetShape();
-        if (cache_shape.size() != 5) {
-            LogMessage("StreamingONNXModel: cache output rank {}, expected 5", cache_shape.size());
+        if (cache_shape.size() != 5 || cache_shape[0] != batch) {
+            LogMessage("StreamingONNXModel: cache output shape unexpected (rank {}, batch {} vs {})",
+                cache_shape.size(), cache_shape.empty() ? -1 : cache_shape[0], batch);
             resetState();
             return false;
         }
@@ -1305,8 +1357,8 @@ bool StreamingONNXModel::runInference(
         m_frames_seen++;
 
         auto time_end = std::chrono::high_resolution_clock::now();
-        LogMessage("StreamingONNXModel frame {}: {} frames retained, depth out [{}, {}], {} ms",
-            m_frames_seen, retained, src_h, src_w,
+        LogMessage("StreamingONNXModel frame {}: batch {}, {} frames retained, depth out [{}, {}], {} ms",
+            m_frames_seen, batch, retained, src_h, src_w,
             std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count());
 
     } catch (const std::exception& e) {
