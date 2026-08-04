@@ -50,6 +50,20 @@ target_link_libraries(four_pcs_gpu_param_sweep
     Eigen3::Eigen
     CUDA::cudart
 )
+
+# Wall-constrained gravity-aligned coarse alignment (wall-align-gpu.cu) on
+# real exported capture data -- the deterministic alternative to the 4PCS
+# coarse stage. Needs the four-pcs GPU sources (plane fit, spatial grid, and
+# the icpGPU used for per-candidate refinement).
+add_executable(wall_align_gpu_test
+    wall-align-gpu-test.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs.cpp
+    ${CMAKE_SOURCE_DIR}/src/four-pcs-gpu.cu
+)
+target_link_libraries(wall_align_gpu_test
+    Eigen3::Eigen
+    CUDA::cudart
+)
 #
 ## Link only the dependencies actually needed for the camera streaming test
 #target_link_libraries(spot_camera_stream_test
