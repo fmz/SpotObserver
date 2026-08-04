@@ -1424,20 +1424,12 @@ cudaError_t postprocess_depth_image(
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Resampling between camera resolution and a model's native input size.
 
-__device__ __forceinline__ float fetch_plane(
-    const float* plane, int y, int x, int in_h, int in_w, bool transposed
-) {
-    return transposed ? plane[static_cast<size_t>(x) * in_h + y]
-                      : plane[static_cast<size_t>(y) * in_w + x];
-}
-
 __global__ void resize_bilinear_chw_kernel(
     const float* __restrict__ src,
     float* __restrict__ dst,
     int in_h, int in_w,
     int out_h, int out_w,
-    int channels,
-    bool src_transposed
+    int channels
 ) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1459,10 +1451,10 @@ __global__ void resize_bilinear_chw_kernel(
     x0 = min(max(x0, 0), in_w - 1);
 
     const float* plane = src + static_cast<size_t>(c) * in_h * in_w;
-    const float v00 = fetch_plane(plane, y0, x0, in_h, in_w, src_transposed);
-    const float v01 = fetch_plane(plane, y0, x1, in_h, in_w, src_transposed);
-    const float v10 = fetch_plane(plane, y1, x0, in_h, in_w, src_transposed);
-    const float v11 = fetch_plane(plane, y1, x1, in_h, in_w, src_transposed);
+    const float v00 = plane[static_cast<size_t>(y0) * in_w + x0];
+    const float v01 = plane[static_cast<size_t>(y0) * in_w + x1];
+    const float v10 = plane[static_cast<size_t>(y1) * in_w + x0];
+    const float v11 = plane[static_cast<size_t>(y1) * in_w + x1];
 
     dst[static_cast<size_t>(c) * out_h * out_w + static_cast<size_t>(y) * out_w + x] =
         (1.f - wy) * ((1.f - wx) * v00 + wx * v01) +
@@ -1473,8 +1465,7 @@ __global__ void resize_sparse_depth_kernel(
     const float* __restrict__ src,
     float* __restrict__ dst,
     int in_h, int in_w,
-    int out_h, int out_w,
-    float min_valid, float max_valid
+    int out_h, int out_w
 ) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1496,10 +1487,9 @@ __global__ void resize_sparse_depth_kernel(
     for (int yy = y0; yy < y1; ++yy) {
         for (int xx = x0; xx < x1; ++xx) {
             const float v = src[static_cast<size_t>(yy) * in_w + xx];
-            // Out-of-range readings are discarded as invalid, not clamped: a
-            // clamped reading would be indistinguishable from a real measurement
-            // at that distance. Negated compare so NaN is rejected too.
-            if (!(v >= min_valid && v <= max_valid)) continue;
+            // 0 means "no sample". Negated compare so NaN is rejected too.
+            // Range validation is the model's, not the resample's.
+            if (!(v > 0.f)) continue;
             const float dy = (yy + 0.5f) - cy;
             const float dx = (xx + 0.5f) - cx;
             const float d2 = dy * dy + dx * dx;
@@ -1515,7 +1505,6 @@ cudaError_t resize_bilinear_chw(
     int in_h, int in_w,
     int out_h, int out_w,
     int channels,
-    bool src_transposed,
     cudaStream_t stream
 ) {
     dim3 block(32, 8);
@@ -1523,7 +1512,7 @@ cudaError_t resize_bilinear_chw(
               (out_h + block.y - 1) / block.y,
               channels);
     resize_bilinear_chw_kernel<<<grid, block, 0, stream>>>(
-        d_in, d_out, in_h, in_w, out_h, out_w, channels, src_transposed
+        d_in, d_out, in_h, in_w, out_h, out_w, channels
     );
     return cudaGetLastError();
 }
@@ -1533,15 +1522,13 @@ cudaError_t resize_sparse_depth(
     float* d_out,
     int in_h, int in_w,
     int out_h, int out_w,
-    float min_valid_depth,
-    float max_valid_depth,
     cudaStream_t stream
 ) {
     dim3 block(32, 8);
     dim3 grid((out_w + block.x - 1) / block.x,
               (out_h + block.y - 1) / block.y);
     resize_sparse_depth_kernel<<<grid, block, 0, stream>>>(
-        d_in, d_out, in_h, in_w, out_h, out_w, min_valid_depth, max_valid_depth
+        d_in, d_out, in_h, in_w, out_h, out_w
     );
     return cudaGetLastError();
 }

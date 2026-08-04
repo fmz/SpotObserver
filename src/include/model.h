@@ -178,15 +178,6 @@ class StreamingONNXModel : public MLModel {
     static constexpr int32_t kNumCacheTensors = 48; // 24 layers x {K, V}
     static constexpr int32_t kNumFixedInputs  = 2;  // rgb, sparse_depth
     static constexpr int32_t kNumFixedOutputs = 2;  // depth, depth_conf
-    // Runaway guard, not the retention window: the graph slices to its own window
-    // (20 in the current export). If a re-export ever forgets that slice the cache
-    // would grow ~195 MB per frame until the GPU runs out, so refuse it instead.
-    static constexpr int64_t kMaxRetainedFrames = 64;
-    // Sparse-depth validity window in metres. Readings outside it are discarded as
-    // invalid rather than clamped. This is a property of what this model expects,
-    // so it belongs here rather than in the pipeline or the resample kernel.
-    static constexpr float kMinValidDepth = 0.01f;
-    static constexpr float kMaxValidDepth = 100.0f;
 
     // Declaration order is load-bearing; see the note in ONNXModel.
     Ort::Env m_env;
@@ -213,6 +204,12 @@ class StreamingONNXModel : public MLModel {
     int64_t m_num_heads{0};
     int64_t m_num_tokens{0};
     int64_t m_head_dim{0};
+
+    // Element type the graph declares for the caches. Their contents are never
+    // read or written here -- they leave ORT and come straight back in -- so this
+    // only decides how the zero-length frame-0 tensors are created. An fp16 cache
+    // halves the largest allocation this model makes.
+    ONNXTensorElementDataType m_cache_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};
 
     // Scratch at model resolution.
     float* m_d_rgb{nullptr};

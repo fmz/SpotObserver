@@ -71,33 +71,27 @@ void loadImageToCudaFloatRGB(const std::string& path, int& outW, int& outH, floa
 // Neither axis is an integer ratio (e.g. 480->392, 640->518), so the integer
 // downscale in preprocess_depth_image2 does not cover this.
 
-// Planar CHW bilinear resample. When src_transposed is set the source is read as
-// [C, W, H] (the rotated layout some exports emit); in_h/in_w are the logical
-// height/width either way, so callers pass the same dims regardless.
+// Planar CHW bilinear resample.
 cudaError_t resize_bilinear_chw(
     const float* d_in,
     float* d_out,
     int in_h, int in_w,
     int out_h, int out_w,
     int channels,
-    bool src_transposed = false,
     cudaStream_t stream = 0
 );
 
 // Resample sparse metric depth. Bilinear is wrong here: 0 means "no sample", and
 // blending it with valid neighbours fabricates depth. Each output pixel takes the
-// valid sample nearest its source footprint's centre, which preserves sparse
-// points that plain nearest-neighbour would drop when downscaling.
-// Samples outside [min_valid_depth, max_valid_depth] (and NaN) are discarded as
-// invalid rather than clamped. The caller owns those bounds -- they are a
-// property of the consuming model, not of the resample.
+// nearest sampled pixel in its source footprint, which preserves sparse points
+// that plain nearest-neighbour would drop when downscaling.
+// Only 0 (and NaN) are treated as "no sample"; range validation belongs to the
+// consuming model, not to the resample.
 cudaError_t resize_sparse_depth(
     const float* d_in,
     float* d_out,
     int in_h, int in_w,
     int out_h, int out_w,
-    float min_valid_depth = 0.01f,
-    float max_valid_depth = 100.0f,
     cudaStream_t stream = 0
 );
 
