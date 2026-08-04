@@ -398,6 +398,7 @@ RegistrationResult fourPointCongruentSets(
         double min_spread, double max_spread, double coplanar_tol,
         double distance_tol, double e_tol, unsigned seed,
         const Eigen::Vector3d* dominant_plane_normal, double dominant_plane_offset,
+        const Eigen::Vector3d* target_plane_normal, double plane_alignment_cos_thresh,
         double plane_reject_thresh, double plane_reject_angle_cos) {
 
     std::mt19937_64 rng(seed);
@@ -463,6 +464,21 @@ RegistrationResult fourPointCongruentSets(
             }
             auto [rotation_matrix, translation_vector] = kabsch(base_pts, matched_pts);
 
+            // Both robots stand on the same real floor -- a genuinely correct
+            // transform shouldn't rotate source's floor-normal far from
+            // target's own, independently-fitted floor-normal. Signed dot
+            // product (no fabs): both normals are pre-oriented toward their
+            // own cloud's frame origin (see export_four_pcs_test_data.py's
+            // canonicalize_plane_sign()), so a real match points the SAME
+            // way, not just along the same axis -- catches an upside-down
+            // flip, not only a 90-degree wall-to-floor tilt, before the
+            // expensive whole-cloud scoring pass below.
+            if (plane_active && target_plane_normal != nullptr) {
+                Eigen::Vector3d rotated_normal = rotation_matrix * (*dominant_plane_normal);
+                double cos_angle = rotated_normal.dot(*target_plane_normal);
+                if (cos_angle < plane_alignment_cos_thresh) continue;
+            }
+
             PointCloud transformed_source = (rotation_matrix * source.transpose()).transpose();
             transformed_source.rowwise() += translation_vector.transpose();
 
@@ -479,6 +495,7 @@ RegistrationResult fourPointCongruentSets(
                 best_score = score;
                 best.rotation = rotation_matrix;
                 best.translation = translation_vector;
+                best.score = best_score;
             }
         }
     }

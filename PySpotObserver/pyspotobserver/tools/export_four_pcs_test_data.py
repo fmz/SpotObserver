@@ -1,6 +1,6 @@
 """
-Exports a source/target point cloud pair -- plus a dominant-plane fit for the
-source cloud -- to a plain-text file the C++ standalone tests
+Exports a source/target point cloud pair -- plus a dominant-plane fit for
+EACH cloud -- to a plain-text file the C++ standalone tests
 (four-pcs-test.cpp, four-pcs-gpu-test.cpp) can load without needing Python,
 Eigen bindings, or a point cloud library: just whitespace-separated numbers.
 
@@ -14,9 +14,25 @@ serve both the base search and the final whole-cloud scoring, not the raw
 backprojected depth image (hundreds of thousands of points, far too many for
 the brute-force base search to be practical).
 
+The target cloud's own dominant-plane fit (in addition to source's) lets the
+C++ side reject a candidate transform whose rotation doesn't map source's
+floor-normal close to target's floor-normal -- both robots stand on the same
+real floor, so a genuinely correct transform shouldn't rotate "up" by ~90
+degrees. Catches a wall-matched-to-floor false positive before it's ever
+scored.
+
+Each fit's normal sign is arbitrary (RANSAC picks it up from whichever 3
+points it happened to sample, independently for each cloud), so before
+writing them out, each normal is re-oriented to point toward its own cloud's
+frame origin -- the robot's own body, which sits above its own floor by
+construction. Without this, the C++ side's alignment check would have to
+compare normals direction-agnostically (via |cos|), which can't tell a
+correct match from a genuine upside-down flip (both give |cos| close to 1).
+
 Output format (all whitespace-separated, no fixed column widths):
     n_src n_tgt
-    nx ny nz offset
+    nx ny nz offset  (source dominant-plane fit)
+    nx ny nz offset  (target dominant-plane fit)
     x y z            (repeated n_src times -- source cloud)
     x y z            (repeated n_tgt times -- target cloud)
 
@@ -35,6 +51,17 @@ from pyspotobserver.four_pcs import downsample_cloud, fit_dominant_plane
 CAPTURES_DIR = Path(__file__).parent / "captures"
 
 
+def canonicalize_plane_sign(normal, offset):
+    """Orient (normal, offset) so the cloud's own frame origin -- the
+    robot's own body, which sits above its own floor by construction --
+    lies on the positive side of normal.x + offset = 0. Evaluating the
+    plane equation at the origin gives exactly `offset`, so this is just:
+    flip both if offset is negative."""
+    if offset < 0:
+        return -normal, -offset
+    return normal, offset
+
+
 def load_capture_points(name):
     path = CAPTURES_DIR / f"{name}_points_body.npy"
     if not path.exists():
@@ -45,10 +72,13 @@ def load_capture_points(name):
     return np.load(path)
 
 
-def write_test_data(path, source, target, plane_normal, plane_offset):
+def write_test_data(path, source, target,
+                     src_plane_normal, src_plane_offset,
+                     tgt_plane_normal, tgt_plane_offset):
     with open(path, "w") as f:
         f.write(f"{len(source)} {len(target)}\n")
-        f.write(f"{plane_normal[0]} {plane_normal[1]} {plane_normal[2]} {plane_offset}\n")
+        f.write(f"{src_plane_normal[0]} {src_plane_normal[1]} {src_plane_normal[2]} {src_plane_offset}\n")
+        f.write(f"{tgt_plane_normal[0]} {tgt_plane_normal[1]} {tgt_plane_normal[2]} {tgt_plane_offset}\n")
         for p in source:
             f.write(f"{p[0]} {p[1]} {p[2]}\n")
         for p in target:
@@ -85,15 +115,29 @@ def main():
     print(f"  source: {len(src_coarse)} points, target: {len(tgt_coarse)} points (downsampled)")
 
     print("Fitting dominant plane on the source cloud...")
-    normal, offset, inlier_mask = fit_dominant_plane(
+    src_normal, src_offset, src_inlier_mask = fit_dominant_plane(
         src_coarse, iterations=args.plane_iterations, threshold=args.plane_threshold)
-    if normal is None:
+    if src_normal is None:
         raise RuntimeError(
             "fit_dominant_plane found no plane (source cloud has fewer than 3 points after "
             "downsampling -- try a smaller --voxel-size)")
-    print(f"  normal={normal}, offset={offset:.4f}, inliers={int(inlier_mask.sum())}/{len(src_coarse)}")
+    src_normal, src_offset = canonicalize_plane_sign(src_normal, src_offset)
+    print(f"  normal={src_normal}, offset={src_offset:.4f}, "
+          f"inliers={int(src_inlier_mask.sum())}/{len(src_coarse)}")
 
-    write_test_data(args.output, src_coarse, tgt_coarse, normal, offset)
+    print("Fitting dominant plane on the target cloud...")
+    tgt_normal, tgt_offset, tgt_inlier_mask = fit_dominant_plane(
+        tgt_coarse, iterations=args.plane_iterations, threshold=args.plane_threshold)
+    if tgt_normal is None:
+        raise RuntimeError(
+            "fit_dominant_plane found no plane (target cloud has fewer than 3 points after "
+            "downsampling -- try a smaller --voxel-size)")
+    tgt_normal, tgt_offset = canonicalize_plane_sign(tgt_normal, tgt_offset)
+    print(f"  normal={tgt_normal}, offset={tgt_offset:.4f}, "
+          f"inliers={int(tgt_inlier_mask.sum())}/{len(tgt_coarse)}")
+
+    write_test_data(args.output, src_coarse, tgt_coarse,
+                     src_normal, src_offset, tgt_normal, tgt_offset)
     print(f"Wrote {args.output}")
 
 

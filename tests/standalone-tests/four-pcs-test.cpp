@@ -44,6 +44,9 @@ int main(int argc, char** argv) {
     double nx, ny, nz, offset;
     f >> nx >> ny >> nz >> offset;
     Eigen::Vector3d plane_normal(nx, ny, nz);
+    double tnx, tny, tnz, toffset;
+    f >> tnx >> tny >> tnz >> toffset;
+    Eigen::Vector3d target_plane_normal(tnx, tny, tnz);
 
     SOb::PointCloud source(n_src, 3), target(n_tgt, 3);
     for (size_t i = 0; i < n_src; i++) {
@@ -70,7 +73,7 @@ int main(int argc, char** argv) {
         /*iterations=*/70, /*max_distance=*/0.1,
         /*min_spread=*/0.3, /*max_spread=*/5.0, /*coplanar_tol=*/0.05,
         /*distance_tol=*/0.03, /*e_tol=*/0.05, /*seed=*/5,
-        &plane_normal, offset);
+        &plane_normal, offset, &target_plane_normal);
     auto t1 = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
 

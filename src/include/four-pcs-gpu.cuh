@@ -85,14 +85,65 @@ cudaError_t fitDominantPlaneGPU(
 // real capture data's known ground-truth transform (see
 // four_pcs_gpu_param_sweep in tests/standalone-tests) -- not a universal
 // best, just validated for that data.
+//
+// target_plane_normal: pass the TARGET cloud's own independently-fitted
+// dominant-plane normal to reject any candidate whose rotation doesn't map
+// source's floor-normal close to this direction, within
+// plane_alignment_cos_thresh. Compared as a SIGNED dot product, not
+// |cos(angle)| -- the caller must pre-orient both normals to a shared
+// convention first (e.g. export_four_pcs_test_data.py's
+// canonicalize_plane_sign(), which points each toward its own cloud's frame
+// origin), otherwise this can't tell a correct match from a genuine
+// upside-down flip, since both give the same |cos(angle)|. Both robots
+// stand on the same real floor, so a genuinely correct transform shouldn't
+// rotate "up" by ~90 degrees, let alone flip it entirely -- catches both a
+// wall-matched-to-floor tilt and an upside-down flip before the expensive
+// whole-cloud scoring pass. Only active when both dominant_plane_normal and
+// target_plane_normal are non-null.
 RegistrationResult fourPointCongruentSetsGPU(
     const DevicePointCloud& source, const DevicePointCloud& target,
-    int iterations = 70, float max_distance = 0.1f,
+    int iterations = 150, float max_distance = 0.1f,
     float min_spread = 0.3f, float max_spread = 5.0f, float coplanar_tol = 0.05f,
     float distance_tol = 0.03f, float e_tol = 0.05f, unsigned long long seed = 5,
     const float3* dominant_plane_normal = nullptr,
     float dominant_plane_offset = 0.0f,
+    const float3* target_plane_normal = nullptr,
+    float plane_alignment_cos_thresh = 0.866f,
     float plane_reject_thresh = 0.04f, float plane_reject_angle_cos = 0.94f,
+    cudaStream_t stream = 0);
+
+// GPU port of icp() in icp_align.py -- refines an initial rigid alignment
+// (e.g. fourPointCongruentSetsGPU()'s output) by iterating: transform every
+// source point by the current estimate, find its nearest target point
+// (correspondence), then re-fit rotation/translation from those
+// correspondences with kabsch(), composing the result into a running total.
+// Repeats until max_iterations or the per-iteration correction drops below
+// tolerance.
+//
+// Not just four-pcs with smaller steps: unlike fourPointCongruentSetsGPU()'s
+// 4-point random sampling, every source point participates every iteration,
+// so this converges to a locally-precise fit instead of searching for a
+// global correspondence -- meant to be handed an already-roughly-correct
+// starting guess (four-pcs's job), not run from scratch.
+//
+// dominant_plane_normal / dominant_plane_offset: same floor_mask idea as
+// icp() -- SOURCE points near this plane still participate every iteration,
+// just matched against target with the looser max_distance_floor tolerance
+// instead of max_distance, since floor correspondences are noisier. Pass
+// nullptr (default) to use max_distance for every point uniformly.
+//
+// kabsch() itself is called directly (defined in four-pcs.cpp, a plain .cpp
+// never compiled by nvcc) -- same pattern fourPointCongruentSetsGPU() already
+// uses for its own 4-point fit, so no separate host-only split was needed
+// here despite ICP's kabsch() call operating on potentially thousands of
+// correspondences instead of exactly 4.
+RegistrationResult icpGPU(
+    const DevicePointCloud& source, const DevicePointCloud& target,
+    const RegistrationResult& initial,
+    int max_iterations = 100, float tolerance = 1e-6f, float max_distance = 0.1f,
+    const float3* dominant_plane_normal = nullptr,
+    float dominant_plane_offset = 0.0f,
+    float max_distance_floor = 0.5f,
     cudaStream_t stream = 0);
 
 }  // namespace SOb

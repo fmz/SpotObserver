@@ -49,6 +49,12 @@ PlaneFit fitDominantPlane(const PointCloud& points, int iterations = 300,
 struct RegistrationResult {
     Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
     Eigen::Vector3d translation = Eigen::Vector3d::Zero();
+    // Number of source points (fewer, if a dominant plane was given -- see
+    // fourPointCongruentSets()) that landed within max_distance of some
+    // target point under this transform. -1 if no candidate was ever found.
+    // The real signal for "did this actually find a strong global alignment,
+    // or just win by default against other weak candidates."
+    long score = -1;
 };
 
 // Find an initial rigid alignment between two point clouds with no prior
@@ -61,6 +67,21 @@ struct RegistrationResult {
 // scoring -- otherwise a transform that just slides the plane onto itself
 // wins by default. Pass nullptr (default) for the original, plane-unaware
 // behavior.
+//
+// target_plane_normal: pass the TARGET cloud's own independently-fitted
+// dominant-plane normal (e.g. from fitDominantPlane() on target) to reject
+// any candidate whose rotation doesn't map source's floor-normal close to
+// this direction, within plane_alignment_cos_thresh. Compared as a SIGNED
+// dot product, not |cos(angle)| -- the caller must pre-orient both normals
+// to a shared convention first (e.g. export_four_pcs_test_data.py's
+// canonicalize_plane_sign(), which points each toward its own cloud's frame
+// origin), otherwise this can't tell a correct match from a genuine
+// upside-down flip, since both give the same |cos(angle)|. Both robots
+// stand on the same real floor, so a genuinely correct transform shouldn't
+// rotate "up" by ~90 degrees, let alone flip it entirely -- this catches
+// both a wall-matched-to-floor tilt and an upside-down flip before the
+// expensive whole-cloud scoring pass. Only active when both
+// dominant_plane_normal and target_plane_normal are non-null.
 //
 // max_spread default note (carried over from four_pcs.py): 1.2 was found to
 // return zero valid bases at all on a real, room-scale, voxel-downsampled
@@ -79,6 +100,8 @@ RegistrationResult fourPointCongruentSets(
     double distance_tol = 0.03, double e_tol = 0.05, unsigned seed = 5,
     const Eigen::Vector3d* dominant_plane_normal = nullptr,
     double dominant_plane_offset = 0.0,
+    const Eigen::Vector3d* target_plane_normal = nullptr,
+    double plane_alignment_cos_thresh = 0.866,
     double plane_reject_thresh = 0.04, double plane_reject_angle_cos = 0.94);
 
 }  // namespace SOb

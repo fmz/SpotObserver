@@ -460,12 +460,25 @@ static cudaError_t scoreCandidateTransform(
 // sequence per thread from a single seed + the thread's own id, so two
 // different threads (almost certainly) never draw the same numbers. No new
 // library dependency (e.g. curand) needed for something this simple.
+//
+// Stream construction follows splitmix64's own documented splitting method
+// (as used by e.g. Java's SplittableRandom): stream i's starting state is
+// seed + i*GOLDEN_GAMMA, plain integer addition, no XOR. That's the
+// construction the algorithm was actually designed and tested around --
+// every next() call advances state by the same GOLDEN_GAMMA before mixing,
+// so giving each thread a starting state on that same arithmetic ladder
+// just hands it a distinct, non-overlapping segment of one long sequence,
+// which the avalanche mix then decorrelates. An earlier version combined
+// seed and stream_id with XOR instead of addition; that isn't the
+// documented construction and doesn't carry the same independence
+// guarantee (XOR after the fact can partially cancel the additive stride
+// structure the mix step relies on).
 // ===========================================================================
 
 struct GpuRng {
     unsigned long long state;
     __device__ explicit GpuRng(unsigned long long seed, unsigned long long stream_id) {
-        state = seed ^ (stream_id * 0x9E3779B97F4A7C15ULL + 0x243F6A8885A308D3ULL);
+        state = seed + stream_id * 0x9E3779B97F4A7C15ULL;
     }
     __device__ unsigned long long next() {
         state += 0x9E3779B97F4A7C15ULL;
@@ -594,22 +607,44 @@ static bool searchCoplanarBasesGPU(
 // correctly every time instead. Point clouds here are small (thousands, not
 // hundreds of thousands), so rebuilding is cheap.
 //
-// One simplification versus the CPU version: when there are more matching
-// pairs than max_pairs, the CPU does an unbiased random subsample; this
-// keeps whichever pairs happened to be found first (capped by an atomic
-// counter). Both are just "a representative subset of the matches" for the
-// purposes of the search that follows, so this is a minor, disclosed
-// shortcut rather than a silent behavior change.
+// Matches the CPU version's behavior when there are more matching pairs than
+// max_pairs: a UNIFORM random subsample of all matches, not just whichever
+// ones happened to be found first (which followed cell-sort order and so
+// was spatially clustered -- a real bias that could exclude the true
+// congruent set's diagonal pairs from the candidate pool entirely).
+//
+// Implemented via random-priority sampling: every (i, j) pair gets a
+// deterministic pseudo-random 64-bit priority from a hash of its indices and
+// a seed; keeping the max_pairs smallest priorities is exactly a uniform
+// random max_pairs-subset of all matches, without replacement -- the same
+// guarantee as the CPU's std::sample. distancePairsGPU runs the kernel
+// twice: once to count total matches (no writes), and -- only if that count
+// exceeds max_pairs -- again with Bernoulli thinning (keeping ~2*max_pairs
+// candidates, comfortably below the allocated buffer) followed by a
+// thrust::sort_by_key on priority to take the max_pairs smallest.
 // ===========================================================================
 
 struct IntPair { int a, b; };
+
+// Deterministic pseudo-random priority for an (i, j) pair -- splitmix64-style
+// finalizer over the packed indices XOR the seed. Keeping the N smallest
+// priorities is exactly a uniform random N-subset of all pairs.
+__device__ inline unsigned long long pairPriority(int i, int j, unsigned long long seed) {
+    unsigned long long z = ((((unsigned long long)(unsigned int)i) << 32) | (unsigned int)j) ^ seed;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
 
 namespace {
 
 __global__ void pairsInRangeKernel(
     const long long* sorted_keys, const int* sorted_indices, const float3* points, int n,
     float cell_size, float target_distance, float tolerance,
-    IntPair* d_pairs_out, int max_pairs, int* d_pair_count)
+    unsigned long long sample_seed, unsigned long long keep_threshold,
+    IntPair* d_pairs_out,                  // nullptr = count-only pass
+    unsigned long long* d_priorities_out,  // nullptr = don't record priorities
+    int buffer_capacity, int* d_pair_count)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= n) return;
@@ -632,9 +667,13 @@ __global__ void pairsInRangeKernel(
                     int j = sorted_indices[t];
                     if (j <= i) continue;  // undirected: avoid duplicates and self-pairs
                     float d = dist3(pi, points[j]);
-                    if (d >= min_d && d <= max_d) {
-                        int slot = atomicAdd(d_pair_count, 1);
-                        if (slot < max_pairs) d_pairs_out[slot] = {i, j};
+                    if (d < min_d || d > max_d) continue;
+                    unsigned long long pri = pairPriority(i, j, sample_seed);
+                    if (pri > keep_threshold) continue;
+                    int slot = atomicAdd(d_pair_count, 1);
+                    if (d_pairs_out != nullptr && slot < buffer_capacity) {
+                        d_pairs_out[slot] = {i, j};
+                        if (d_priorities_out != nullptr) d_priorities_out[slot] = pri;
                     }
                 }
         }
@@ -646,6 +685,7 @@ __global__ void pairsInRangeKernel(
 // the number of valid entries actually written (<= max_pairs).
 static cudaError_t distancePairsGPU(
     const DevicePointCloud& cloud, float target_distance, float tolerance, int max_pairs,
+    unsigned long long sample_seed,
     IntPair*& d_pairs_out, int& out_count, cudaStream_t stream)
 {
     d_pairs_out = nullptr;
@@ -656,27 +696,90 @@ static cudaError_t distancePairsGPU(
     cudaError_t err = buildSpatialGrid(cloud, fmaxf(target_distance + tolerance, 1e-3f), grid, stream);
     if (err != cudaSuccess) return err;
 
-    err = cudaMalloc(&d_pairs_out, max_pairs * sizeof(IntPair));
-    if (err != cudaSuccess) { freeDeviceSpatialGrid(grid); return err; }
-
     int* d_count = nullptr;
     err = cudaMalloc(&d_count, sizeof(int));
-    if (err != cudaSuccess) { freeDeviceSpatialGrid(grid); cudaFree(d_pairs_out); d_pairs_out = nullptr; return err; }
-    cudaMemsetAsync(d_count, 0, sizeof(int), stream);
+    if (err != cudaSuccess) { freeDeviceSpatialGrid(grid); return err; }
 
     int threads = 256;
     int blocks = (cloud.count + threads - 1) / threads;
+    const unsigned long long keep_all = ~0ULL;
+
+    // Pass 1: count every pair in the distance band (no writes).
+    cudaMemsetAsync(d_count, 0, sizeof(int), stream);
     pairsInRangeKernel<<<blocks, threads, 0, stream>>>(
         grid.d_sorted_keys, grid.d_sorted_indices, grid.d_points, grid.point_count,
-        grid.cell_size, target_distance, tolerance, d_pairs_out, max_pairs, d_count);
+        grid.cell_size, target_distance, tolerance,
+        sample_seed, keep_all, nullptr, nullptr, 0, d_count);
+    int total = 0;
     err = cudaGetLastError();
-    if (err == cudaSuccess) err = cudaMemcpyAsync(&out_count, d_count, sizeof(int), cudaMemcpyDeviceToHost, stream);
+    if (err == cudaSuccess) err = cudaMemcpyAsync(&total, d_count, sizeof(int), cudaMemcpyDeviceToHost, stream);
     if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess || total == 0) {
+        freeDeviceSpatialGrid(grid);
+        cudaFree(d_count);
+        return err;
+    }
+
+    if (total <= max_pairs) {
+        // Everything fits: keep every pair, no sampling involved.
+        err = cudaMalloc(&d_pairs_out, total * sizeof(IntPair));
+        if (err == cudaSuccess) {
+            cudaMemsetAsync(d_count, 0, sizeof(int), stream);
+            pairsInRangeKernel<<<blocks, threads, 0, stream>>>(
+                grid.d_sorted_keys, grid.d_sorted_indices, grid.d_points, grid.point_count,
+                grid.cell_size, target_distance, tolerance,
+                sample_seed, keep_all, d_pairs_out, nullptr, total, d_count);
+            err = cudaGetLastError();
+            if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+            if (err == cudaSuccess) out_count = total;
+        }
+    } else {
+        // Uniform subsample. Threshold targets ~2*max_pairs survivors; the
+        // buffer holds 3*max_pairs, ~15 standard deviations above that mean
+        // (binomial with p = 2/3 over the buffer capacity), so a clipped
+        // (order-biased) overflow is effectively impossible.
+        int buffer_capacity = 3 * max_pairs;
+        double keep_fraction = (2.0 * max_pairs) / (double)total;
+        unsigned long long keep_threshold = keep_fraction >= 1.0
+            ? keep_all
+            : (unsigned long long)(keep_fraction * (double)keep_all);
+
+        unsigned long long* d_priorities = nullptr;
+        err = cudaMalloc(&d_pairs_out, buffer_capacity * sizeof(IntPair));
+        if (err == cudaSuccess) err = cudaMalloc(&d_priorities, buffer_capacity * sizeof(unsigned long long));
+        if (err == cudaSuccess) {
+            cudaMemsetAsync(d_count, 0, sizeof(int), stream);
+            pairsInRangeKernel<<<blocks, threads, 0, stream>>>(
+                grid.d_sorted_keys, grid.d_sorted_indices, grid.d_points, grid.point_count,
+                grid.cell_size, target_distance, tolerance,
+                sample_seed, keep_threshold, d_pairs_out, d_priorities, buffer_capacity, d_count);
+            int survivors = 0;
+            err = cudaGetLastError();
+            if (err == cudaSuccess)
+                err = cudaMemcpyAsync(&survivors, d_count, sizeof(int), cudaMemcpyDeviceToHost, stream);
+            if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+            if (err == cudaSuccess) {
+                if (survivors > buffer_capacity) survivors = buffer_capacity;
+                if (survivors > max_pairs) {
+                    // The max_pairs smallest priorities = a uniform random
+                    // max_pairs-subset of all band pairs.
+                    thrust::device_ptr<unsigned long long> pri_ptr(d_priorities);
+                    thrust::device_ptr<IntPair> pair_ptr(d_pairs_out);
+                    thrust::sort_by_key(thrust::cuda::par.on(stream),
+                                         pri_ptr, pri_ptr + survivors, pair_ptr);
+                    err = cudaStreamSynchronize(stream);
+                    if (err == cudaSuccess) out_count = max_pairs;
+                } else {
+                    out_count = survivors;
+                }
+            }
+        }
+        if (d_priorities) cudaFree(d_priorities);
+    }
 
     freeDeviceSpatialGrid(grid);
     cudaFree(d_count);
-    if (out_count > max_pairs) out_count = max_pairs;
-    if (err != cudaSuccess) { cudaFree(d_pairs_out); d_pairs_out = nullptr; }
+    if (err != cudaSuccess && d_pairs_out) { cudaFree(d_pairs_out); d_pairs_out = nullptr; out_count = 0; }
     return err;
 }
 
@@ -711,6 +814,11 @@ __global__ void computeCrossingPointsKernel(
     d_direction_out[2 * k + 1] = make_int2(pr.b, pr.a);
 }
 
+// Capped first-N in scan order (not a random subsample) -- this matches
+// Python's find_congruent(), which also just breaks out of its candidate
+// loop once n_checked > max_candidates (four_pcs.py:289). Unlike the
+// distance-pairs cap below, this isn't a port divergence, so it's left as
+// a plain atomic-counted truncation.
 __global__ void matchCrossingPointsKernel(
     const long long* e1_sorted_keys, const int* e1_sorted_indices, const float3* e1_points, int n_e1,
     float cell_size, const int2* e1_directions,
@@ -752,14 +860,16 @@ static std::vector<CandidateQuad> findCongruentGPU(
     const DevicePointCloud& target,
     float ratio_a, float ratio_b, float diag_a, float diag_b,
     float distance_tol, float e_tol, int max_pairs_per_distance, int max_candidates,
-    cudaStream_t stream)
+    unsigned long long seed, cudaStream_t stream)
 {
     std::vector<CandidateQuad> result;
 
+    // Distinct seeds per reservoir (diag_a pairs, diag_b pairs, final
+    // candidate match) so the three subsamples aren't correlated draws.
     IntPair *d_pairs_a = nullptr, *d_pairs_b = nullptr;
     int n_pairs_a = 0, n_pairs_b = 0;
-    if (distancePairsGPU(target, diag_a, distance_tol, max_pairs_per_distance, d_pairs_a, n_pairs_a, stream) != cudaSuccess ||
-        distancePairsGPU(target, diag_b, distance_tol, max_pairs_per_distance, d_pairs_b, n_pairs_b, stream) != cudaSuccess ||
+    if (distancePairsGPU(target, diag_a, distance_tol, max_pairs_per_distance, seed, d_pairs_a, n_pairs_a, stream) != cudaSuccess ||
+        distancePairsGPU(target, diag_b, distance_tol, max_pairs_per_distance, seed ^ 0x9E3779B97F4A7C15ULL, d_pairs_b, n_pairs_b, stream) != cudaSuccess ||
         n_pairs_a == 0 || n_pairs_b == 0) {
         if (d_pairs_a) cudaFree(d_pairs_a);
         if (d_pairs_b) cudaFree(d_pairs_b);
@@ -832,6 +942,7 @@ RegistrationResult fourPointCongruentSetsGPU(
     float min_spread, float max_spread, float coplanar_tol,
     float distance_tol, float e_tol, unsigned long long seed,
     const float3* dominant_plane_normal, float dominant_plane_offset,
+    const float3* target_plane_normal, float plane_alignment_cos_thresh,
     float plane_reject_thresh, float plane_reject_angle_cos,
     cudaStream_t stream)
 {
@@ -900,7 +1011,8 @@ RegistrationResult fourPointCongruentSetsGPU(
 
         auto candidates = findCongruentGPU(
             target, (float)pairing.ratio_a, (float)pairing.ratio_b, (float)pairing.diag_a, (float)pairing.diag_b,
-            distance_tol, e_tol, /*max_pairs_per_distance=*/2000, /*max_candidates=*/250, stream);
+            distance_tol, e_tol, /*max_pairs_per_distance=*/2000, /*max_candidates=*/250,
+            host_rng(), stream);
 
         if (candidates.empty()) continue;
 
@@ -927,6 +1039,23 @@ RegistrationResult fourPointCongruentSetsGPU(
             }
             auto [rotation, translation] = kabsch(base_pts, matched_pts);
 
+            // Both robots stand on the same real floor -- a genuinely correct
+            // transform shouldn't rotate source's floor-normal far from
+            // target's own, independently-fitted floor-normal. Signed dot
+            // product (no fabs): both normals are pre-oriented toward their
+            // own cloud's frame origin (see export_four_pcs_test_data.py's
+            // canonicalize_plane_sign()), so a real match points the SAME
+            // way, not just along the same axis -- catches an upside-down
+            // flip, not only a 90-degree wall-to-floor tilt, before the
+            // expensive whole-cloud scoring pass below.
+            if (plane_active && target_plane_normal != nullptr) {
+                Eigen::Vector3d src_n(dominant_plane_normal->x, dominant_plane_normal->y, dominant_plane_normal->z);
+                Eigen::Vector3d tgt_n(target_plane_normal->x, target_plane_normal->y, target_plane_normal->z);
+                Eigen::Vector3d rotated_normal = rotation * src_n;
+                double cos_angle = rotated_normal.dot(tgt_n);
+                if (cos_angle < plane_alignment_cos_thresh) continue;
+            }
+
             RigidTransform xf;
             for (int r = 0; r < 3; r++)
                 for (int c = 0; c < 3; c++)
@@ -940,12 +1069,163 @@ RegistrationResult fourPointCongruentSetsGPU(
                 best_score = score;
                 best.rotation = rotation;
                 best.translation = translation;
+                best.score = best_score;
             }
         }
     }
 
     freeDeviceSpatialGrid(target_score_grid);
     if (d_source_off_plane) cudaFree(d_source_off_plane);
+    return best;
+}
+
+// ===========================================================================
+// ICP refinement (GPU port of icp() in icp_align.py). Correspondence search
+// (every source point against the whole target cloud) is the expensive part
+// and runs as a GPU kernel; kabsch() itself stays on the host (see
+// four-pcs-gpu.cuh's note on why that's safe here despite operating on
+// potentially thousands of points instead of exactly 4).
+// ===========================================================================
+
+namespace {
+
+// One thread per source point: transform it by the current running estimate,
+// then look up its nearest target point (within max_distance, or
+// max_distance_floor if it's a floor point per d_off_plane_mask) -- same
+// grid-lookup building block as scoreTransformKernel above, but this writes
+// out WHICH point matched, not just whether one did, since ICP needs the
+// actual correspondences to re-fit with kabsch().
+__global__ void findCorrespondencesKernel(
+    const float3* d_source, int n_source,
+    RigidTransform xf,
+    const long long* d_target_keys, const int* d_target_indices, const float3* d_target_points, int n_target,
+    float cell_size, float max_distance, float max_distance_floor,
+    const unsigned char* d_off_plane_mask,  // nullptr = every point uses max_distance
+    int* d_match_target_idx)  // -1 if no match within threshold
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_source) return;
+
+    float3 p = d_source[i];
+    float3 tp = make_float3(
+        xf.r[0] * p.x + xf.r[1] * p.y + xf.r[2] * p.z + xf.t[0],
+        xf.r[3] * p.x + xf.r[4] * p.y + xf.r[5] * p.z + xf.t[1],
+        xf.r[6] * p.x + xf.r[7] * p.y + xf.r[8] * p.z + xf.t[2]);
+
+    bool off_plane = (d_off_plane_mask == nullptr) || (d_off_plane_mask[i] != 0);
+    float threshold = off_plane ? max_distance : max_distance_floor;
+
+    d_match_target_idx[i] = gridNearestWithin(d_target_keys, d_target_indices, d_target_points, n_target,
+                                               cell_size, tp, threshold);
+}
+
+}  // namespace
+
+RegistrationResult icpGPU(
+    const DevicePointCloud& source, const DevicePointCloud& target,
+    const RegistrationResult& initial,
+    int max_iterations, float tolerance, float max_distance,
+    const float3* dominant_plane_normal, float dominant_plane_offset,
+    float max_distance_floor,
+    cudaStream_t stream)
+{
+    RegistrationResult best = initial;
+    if (source.count == 0 || target.count == 0) return best;
+
+    // source/target don't change across iterations, only the running
+    // transform does -- keep plain host copies instead of round-tripping
+    // through the GPU every iteration just to build kabsch()'s input.
+    std::vector<float3> h_source(source.count), h_target(target.count);
+    cudaMemcpy(h_source.data(), source.d_points, source.count * sizeof(float3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_target.data(), target.d_points, target.count * sizeof(float3), cudaMemcpyDeviceToHost);
+
+    DeviceSpatialGrid target_grid;
+    if (buildSpatialGrid(target, fmaxf(fmaxf(max_distance, max_distance_floor), 0.05f), target_grid, stream)
+            != cudaSuccess) {
+        return best;
+    }
+
+    bool plane_active = dominant_plane_normal != nullptr;
+    unsigned char* d_source_off_plane = nullptr;
+    if (plane_active) {
+        if (cudaMalloc(&d_source_off_plane, source.count * sizeof(unsigned char)) == cudaSuccess) {
+            int threads = 256, blocks = (source.count + threads - 1) / threads;
+            // 0.04f matches fourPointCongruentSetsGPU's plane_reject_thresh
+            // default -- "near enough to the fitted plane to count as floor".
+            markOffPlaneKernel<<<blocks, threads, 0, stream>>>(
+                source.d_points, source.count, *dominant_plane_normal, dominant_plane_offset,
+                /*threshold=*/0.04f, d_source_off_plane);
+        }
+    }
+
+    int* d_match_idx = nullptr;
+    cudaMalloc(&d_match_idx, source.count * sizeof(int));
+    std::vector<int> h_match_idx(source.count);
+
+    Eigen::Matrix3d rotation_total = initial.rotation;
+    Eigen::Vector3d translation_total = initial.translation;
+
+    int threads = 256;
+    int blocks = (source.count + threads - 1) / threads;
+
+    for (int it = 0; it < max_iterations; it++) {
+        RigidTransform xf;
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                xf.r[r * 3 + c] = (float)rotation_total(r, c);
+        xf.t[0] = (float)translation_total(0); xf.t[1] = (float)translation_total(1);
+        xf.t[2] = (float)translation_total(2);
+
+        findCorrespondencesKernel<<<blocks, threads, 0, stream>>>(
+            source.d_points, source.count, xf,
+            target_grid.d_sorted_keys, target_grid.d_sorted_indices, target_grid.d_points, target_grid.point_count,
+            target_grid.cell_size, max_distance, max_distance_floor, d_source_off_plane, d_match_idx);
+        cudaError_t err = cudaGetLastError();
+        if (err == cudaSuccess)
+            err = cudaMemcpyAsync(h_match_idx.data(), d_match_idx, source.count * sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream);
+        if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) break;
+
+        std::vector<Eigen::Vector3d> eval_pts_vec, matched_pts_vec;
+        eval_pts_vec.reserve(source.count);
+        matched_pts_vec.reserve(source.count);
+        for (int i = 0; i < source.count; i++) {
+            if (h_match_idx[i] < 0) continue;
+            float3 p = h_source[i];
+            Eigen::Vector3d transformed = rotation_total * Eigen::Vector3d(p.x, p.y, p.z) + translation_total;
+            float3 mp = h_target[h_match_idx[i]];
+            eval_pts_vec.push_back(transformed);
+            matched_pts_vec.push_back(Eigen::Vector3d(mp.x, mp.y, mp.z));
+        }
+
+        if ((int)eval_pts_vec.size() < 3) break;  // not enough correspondences, same as the CPU icp()
+
+        PointCloud eval_pts((long)eval_pts_vec.size(), 3), matched_pts((long)matched_pts_vec.size(), 3);
+        for (size_t k = 0; k < eval_pts_vec.size(); k++) {
+            eval_pts.row((long)k) = eval_pts_vec[k].transpose();
+            matched_pts.row((long)k) = matched_pts_vec[k].transpose();
+        }
+
+        auto [rotation_vec, translation_vec] = kabsch(eval_pts, matched_pts);
+
+        rotation_total = rotation_vec * rotation_total;
+        translation_total = rotation_vec * translation_total + translation_vec;
+        best.score = (long)eval_pts_vec.size();
+
+        if (translation_vec.norm() < tolerance &&
+            (rotation_vec - Eigen::Matrix3d::Identity()).norm() < tolerance) {
+            break;
+        }
+    }
+
+    best.rotation = rotation_total;
+    best.translation = translation_total;
+
+    cudaFree(d_match_idx);
+    if (d_source_off_plane) cudaFree(d_source_off_plane);
+    freeDeviceSpatialGrid(target_grid);
+
     return best;
 }
 
