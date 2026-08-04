@@ -4,6 +4,7 @@
 
 #include "spot-observer.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <opencv2/opencv.hpp>
@@ -56,8 +57,10 @@ static int32_t disconnect_from_spots(const int32_t spot_ids[], size_t num_spots)
 int main(int argc, char* argv[]) {
     using namespace std::chrono;
 
-    if (argc < 5 || argc > 6) {
-        std::cerr << "Usage: " << argv[0] << " <ROBOT1_IP> <ROBOT2_IP> <username> <password> [model_path]" << std::endl;
+    if (argc < 5 || argc > 7) {
+        std::cerr << "Usage: " << argv[0]
+                  << " <ROBOT1_IP> <ROBOT2_IP> <username> <password> [model_path] [model_kind]\n"
+                  << "  model_kind: 0 = single-shot (default), 1 = streaming (KV cache)" << std::endl;
         return 1;
     }
 
@@ -102,12 +105,17 @@ int main(int argc, char* argv[]) {
     // TODO: Setup a listener for ctrl-c to gracefully stop the connection
     // std::cout << "Press Ctrl-C to stop reading camera feeds..." << std::endl;
 
-    bool using_vision_pipeline = (argc == 6);
+    bool using_vision_pipeline = (argc >= 6);
+    const int32_t model_kind = (argc == 7) ? std::atoi(argv[6]) : SOb_MODEL_SINGLE_SHOT;
+    // Streaming models are batch-1 (their KV cache is one camera's sequence), so
+    // launch on the single-camera HAND stream (index 1) instead of the
+    // two-camera front stream (index 0).
+    const int32_t vp_stream_idx = (model_kind == SOb_MODEL_STREAMING) ? 1 : 0;
     SObModel model = nullptr;
     if (using_vision_pipeline) {
         const char* model_path = argv[5];
-        std::cout << "Loading model from: " << model_path << std::endl;
-        model = SOb_LoadModel(model_path, "cuda");
+        std::cout << "Loading model from: " << model_path << " (kind " << model_kind << ")" << std::endl;
+        model = SOb_LoadModelEx(model_path, "cuda", model_kind);
         if (!model) {
             std::cerr << "Failed to load model from: " << argv[5] << std::endl;
             disconnect_from_spots(spot_ids, 2);
@@ -120,8 +128,8 @@ int main(int argc, char* argv[]) {
         // Launch vision pipeline on both robots
         for (size_t i = 0; i < 2; i++) {
             if (spot_ids[i] < 0) continue;
-            // Launch vision pipeline only on the first camera stream
-            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][0], model);
+            // Launch vision pipeline only on the stream picked for this model kind
+            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][vp_stream_idx], model);
             if (!ret) {
                 std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
                 disconnect_from_spots(spot_ids, 2);
@@ -187,7 +195,7 @@ int main(int argc, char* argv[]) {
                 uint8_t** images_set = images[stream];
                 float** depths_set = depths[stream];
 
-                if (using_vision_pipeline && stream == 0) {
+                if (using_vision_pipeline && stream == vp_stream_idx) {
                     if (!SOb_GetNextVisionPipelineImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         continue;
