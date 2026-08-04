@@ -43,6 +43,19 @@ def main() -> int:
     model = onnx.load(src, load_external_data=False)
     graph = model.graph
 
+    # Preflight: every external-data file the graph references must sit next to
+    # the graph, under the exact name recorded inside it. Fail with the list
+    # rather than letting the checker produce a cryptic CWD-relative error.
+    referenced = {e.value for i in graph.initializer
+                  for e in i.external_data if e.key == "location"}
+    missing = sorted(loc for loc in referenced if not (src.parent / loc).exists())
+    if missing:
+        print("graph references external data files that are not next to it:", file=sys.stderr)
+        for loc in missing:
+            print(f"  expected: {src.parent / loc}", file=sys.stderr)
+        print("copy the .data file(s) into that directory with exactly those names", file=sys.stderr)
+        return 1
+
     cache_outputs = {v.name for v in graph.output if v.name.startswith("new_")}
     producer = {o: n for n in graph.node for o in n.output}
 
@@ -91,7 +104,16 @@ def main() -> int:
         print(f"patched {patched} of {N_CACHE} window constants -- aborting", file=sys.stderr)
         return 1
 
-    onnx.checker.check_model(model)
+    # The checker resolves external-data locations relative to the process CWD,
+    # not the graph -- pin it to the graph's directory so running the script
+    # from anywhere behaves the same.
+    import os
+    prev_cwd = os.getcwd()
+    os.chdir(src.parent)
+    try:
+        onnx.checker.check_model(model)
+    finally:
+        os.chdir(prev_cwd)
     onnx.save(model, dst)
 
     old = ", ".join(str(-v) for v in sorted(old_values))
