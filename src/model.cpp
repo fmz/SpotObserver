@@ -906,10 +906,14 @@ StreamingONNXModel::StreamingONNXModel(const std::string& model_path, const std:
             throw std::runtime_error("StreamingONNXModel requires CUDA; the KV cache must stay device-resident.");
         }
 
+        LogMessage("ONNXModel loading from: {}", model_path);
+
         // Weights live in a sibling .onnx.data file, so this reads several GB.
         auto load_start = std::chrono::high_resolution_clock::now();
         std::wstring wide_model_path = std::wstring(model_path.begin(), model_path.end());
         m_session = std::make_unique<Ort::Session>(m_env, wide_model_path.c_str(), m_sess_options);
+
+        LogMessage("Ort session created successfully.");
         auto load_end = std::chrono::high_resolution_clock::now();
 
         LogMessage("Streaming ONNX model loaded from {} in {} ms", model_path,

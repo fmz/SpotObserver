@@ -161,6 +161,7 @@ int main(int argc, char* argv[]) {
                 cv::destroyAllWindows();
                 return -1;
             }
+            SOb_SetDepthAveraging(spot_ids[i], cam_stream_ids[spot_ids[i]][vp_stream_idx], true);
             std::cout << "Vision pipeline launched on robot " << i
                       << " (stream idx " << vp_stream_idx << ")" << std::endl;
         }
