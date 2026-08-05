@@ -4,6 +4,7 @@
 
 #include "spot-observer.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <opencv2/opencv.hpp>
@@ -56,8 +57,13 @@ static int32_t disconnect_from_spots(const int32_t spot_ids[], size_t num_spots)
 int main(int argc, char* argv[]) {
     using namespace std::chrono;
 
-    if (argc < 5 || argc > 6) {
-        std::cerr << "Usage: " << argv[0] << " <ROBOT1_IP> <ROBOT2_IP> <username> <password> [model_path]" << std::endl;
+    if (argc < 5 || argc > 9) {
+        std::cerr << "Usage: " << argv[0]
+                  << " <ROBOT1_IP> <ROBOT2_IP> <username> <password>"
+                  << " [model_path] [model_kind] [model2_path] [model2_kind]\n"
+                  << "  model_kind: 0 = single-shot (default), 1 = streaming (KV cache)\n"
+                  << "  With model2 given, the pipeline live-switches between the two models\n"
+                  << "  every 15 s via SOb_SwitchVisionPipelineModel (both loaded up front)." << std::endl;
         return 1;
     }
 
@@ -66,6 +72,10 @@ int main(int argc, char* argv[]) {
     std::string password  = argv[4];
 
     //SOb_ToggleDebugDumps("./spot_dump");
+    // PERF (1): timing + memory lines only. Level 2 (ALL) additionally prints
+    // several LogMessage lines per camera frame -- useful when diagnosing a
+    // launch failure, but console I/O at that volume measurably drags the
+    // streaming threads. Bump to 2 temporarily when something fails silently.
     SOb_SetLogLevel(1);
 
     int32_t spot_ids[2] = {-1, -1};
@@ -102,34 +112,58 @@ int main(int argc, char* argv[]) {
     // TODO: Setup a listener for ctrl-c to gracefully stop the connection
     // std::cout << "Press Ctrl-C to stop reading camera feeds..." << std::endl;
 
-    bool using_vision_pipeline = (argc == 6);
-    SObModel model = nullptr;
+    bool using_vision_pipeline = (argc >= 6);
+    const int32_t model_kind  = (argc >= 7) ? std::atoi(argv[6]) : SOb_MODEL_SINGLE_SHOT;
+    const bool    switching   = (argc >= 8);
+    const int32_t model2_kind = (argc == 9) ? std::atoi(argv[8]) : SOb_MODEL_SINGLE_SHOT;
+    // Preferred pipeline stream: the two-camera front stream (index 0).
+    // Batch-capable streaming exports (dynamic or batch-2) run there directly; a
+    // fixed batch-1 export is refused by the native supportsBatch guard, and the
+    // launch loop falls back to the single-camera HAND stream (index 1).
+    int32_t vp_stream_idx = 0;
+
+    SObModel models[2] = {nullptr, nullptr};
+    int32_t  active_model = 0;
     if (using_vision_pipeline) {
-        const char* model_path = argv[5];
-        std::cout << "Loading model from: " << model_path << std::endl;
-        model = SOb_LoadModel(model_path, "cuda");
-        if (!model) {
-            std::cerr << "Failed to load model from: " << argv[5] << std::endl;
-            disconnect_from_spots(spot_ids, 2);
-            cv::destroyAllWindows();
-
-            return -1;
-        }
-        std::cout << "Model loaded successfully!" << std::endl;
-
-        // Launch vision pipeline on both robots
-        for (size_t i = 0; i < 2; i++) {
-            if (spot_ids[i] < 0) continue;
-            // Launch vision pipeline only on the first camera stream
-            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][0], model);
-            if (!ret) {
-                std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
+        // Preload every selectable model up front; switching later is
+        // handle-to-handle with no load in the hot path.
+        const int32_t n_models = switching ? 2 : 1;
+        for (int32_t m = 0; m < n_models; m++) {
+            const char* path = argv[5 + 2 * m];
+            const int32_t kind = (m == 0) ? model_kind : model2_kind;
+            std::cout << "Loading model " << m << " from: " << path << " (kind " << kind << ")" << std::endl;
+            models[m] = SOb_LoadModelEx(path, "cuda", kind);
+            if (!models[m]) {
+                std::cerr << "Failed to load model from: " << path << std::endl;
                 disconnect_from_spots(spot_ids, 2);
-                SOb_UnloadModel(model);
+                if (models[0]) SOb_UnloadModel(models[0]);
                 cv::destroyAllWindows();
                 return -1;
             }
-            std::cout << "Vision pipeline launched on robot " << i << std::endl;
+        }
+        std::cout << "Model(s) loaded successfully!" << std::endl;
+
+        // Launch vision pipeline on both robots. Try the front stream first;
+        // fall back to the HAND stream if the model can't take its batch (e.g.
+        // a fixed batch-1 streaming export against the two-camera front pair).
+        for (size_t i = 0; i < 2; i++) {
+            if (spot_ids[i] < 0) continue;
+            bool ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][vp_stream_idx], models[0]);
+            if (!ret && vp_stream_idx == 0 && cam_stream_ids[spot_ids[i]].size() > 1) {
+                std::cout << "Front-stream launch refused (see native log); trying HAND stream" << std::endl;
+                vp_stream_idx = 1;
+                ret = SOb_LaunchVisionPipeline(spot_ids[i], cam_stream_ids[spot_ids[i]][vp_stream_idx], models[0]);
+            }
+            if (!ret) {
+                std::cerr << "Failed to launch vision pipeline on robot " << i << std::endl;
+                disconnect_from_spots(spot_ids, 2);
+                for (auto m : models) if (m) SOb_UnloadModel(m);
+                cv::destroyAllWindows();
+                return -1;
+            }
+            SOb_SetDepthAveraging(spot_ids[i], cam_stream_ids[spot_ids[i]][vp_stream_idx], true);
+            std::cout << "Vision pipeline launched on robot " << i
+                      << " (stream idx " << vp_stream_idx << ")" << std::endl;
         }
     }
 
@@ -150,8 +184,24 @@ int main(int argc, char* argv[]) {
 
     bool new_images = false;
     time_point<high_resolution_clock> start_time = high_resolution_clock::now();
+    time_point<high_resolution_clock> last_switch_time = high_resolution_clock::now();
+    constexpr auto switch_interval = seconds(15);
     bool exit_requested = false;
     while (!exit_requested) {
+        // Live model switch: flip between the preloaded handles on a timer.
+        // The camera stream keeps running; only the inference side swaps.
+        if (using_vision_pipeline && switching &&
+            high_resolution_clock::now() - last_switch_time >= switch_interval) {
+            active_model ^= 1;
+            for (int32_t spot = 0; spot < 2; spot++) {
+                if (spot_ids[spot] < 0) continue;
+                bool ok = SOb_SwitchVisionPipelineModel(
+                    spot_ids[spot], cam_stream_ids[spot_ids[spot]][vp_stream_idx], models[active_model]);
+                std::cout << "Switched robot " << spot << " to model " << active_model
+                          << (ok ? "" : " -- FAILED") << std::endl;
+            }
+            last_switch_time = high_resolution_clock::now();
+        }
         if (new_images) {
             time_point<high_resolution_clock> end_time = high_resolution_clock::now();
             auto duration = duration_cast<microseconds>(end_time - start_time);
@@ -187,7 +237,7 @@ int main(int argc, char* argv[]) {
                 uint8_t** images_set = images[stream];
                 float** depths_set = depths[stream];
 
-                if (using_vision_pipeline && stream == 0) {
+                if (using_vision_pipeline && stream == vp_stream_idx) {
                     if (!SOb_GetNextVisionPipelineImageSet(spot_id, cam_stream_id, int32_t(num_images_requested), images_set, depths_set)) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         continue;
@@ -220,8 +270,13 @@ int main(int argc, char* argv[]) {
                     cv::cvtColor(image, image, cv::COLOR_RGBA2BGR);
                     cv::normalize(depth, depth, 0, 1, cv::NORM_MINMAX);
 
+                    // Make it unmistakable which depth is model output and which is
+                    // raw sensor depth -- the pipeline stream moves depending on
+                    // model kind, and raw registered depth masquerades convincingly.
+                    const bool is_model_stream = using_vision_pipeline && stream == vp_stream_idx;
+                    const std::string depth_tag = is_model_stream ? " Depth[MODEL]" : " Depth[RAW]";
                     cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " RGB" + std::to_string(i), image);
-                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + " Depth" + std::to_string(i), depth);
+                    cv::imshow("SPOT " + std::to_string(spot) + " Stream " + std::to_string(stream) + depth_tag + std::to_string(i), depth);
                 }
                 if (cv::waitKey(1) == 'q') {
                     exit_requested = true;
@@ -234,7 +289,7 @@ int main(int argc, char* argv[]) {
     disconnect_from_spots(spot_ids, 2);
     cv::destroyAllWindows();
 
-    if (model) SOb_UnloadModel(model);
+    for (auto m : models) if (m) SOb_UnloadModel(m);
     for (auto image_set : images) delete[] image_set;
     for (auto depth_set : depths) delete[] depth_set;
 

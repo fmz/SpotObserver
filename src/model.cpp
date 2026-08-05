@@ -877,4 +877,516 @@ std::string ONNXModel::getDevice() const {
     return m_use_cuda ? "cuda" : "cpu";
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Bytes per element for the types a KV cache is plausibly carried in.
+static size_t onnxElementSize(ONNXTensorElementDataType type) {
+    switch (type) {
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:    return 4;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: return 2;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:    return 1;
+        default:                                     return 0; // unknown; reported as 0 MB
+    }
+}
+
+StreamingONNXModel::StreamingONNXModel(const std::string& model_path, const std::string& device_type)
+    : m_env(ORT_LOGGING_LEVEL_WARNING, "StreamingONNXModel")
+    , m_sess_options()
+    , m_memory_info(Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator, OrtMemTypeDefault))
+{
+    if (!fs::exists(model_path)) {
+        throw std::runtime_error("Model " + model_path + " does not exist.");
+    }
+
+    try {
+        _setDevice(device_type);
+        if (!m_use_cuda) {
+            throw std::runtime_error("StreamingONNXModel requires CUDA; the KV cache must stay device-resident.");
+        }
+
+        LogMessage("ONNXModel loading from: {}", model_path);
+
+        // Weights live in a sibling .onnx.data file, so this reads several GB.
+        auto load_start = std::chrono::high_resolution_clock::now();
+        std::wstring wide_model_path = std::wstring(model_path.begin(), model_path.end());
+        m_session = std::make_unique<Ort::Session>(m_env, wide_model_path.c_str(), m_sess_options);
+
+        LogMessage("Ort session created successfully.");
+        auto load_end = std::chrono::high_resolution_clock::now();
+
+        LogMessage("Streaming ONNX model loaded from {} in {} ms", model_path,
+            std::chrono::duration_cast<std::chrono::milliseconds>(load_end - load_start).count());
+
+        _buildCacheNames();
+        _readGeometry();
+        _ensureScratch(m_cur_batch);
+
+        m_binding = std::make_unique<Ort::IoBinding>(*m_session);
+        resetState();
+
+        const double cache_mb_per_frame =
+            static_cast<double>(kNumCacheTensors) * m_num_heads * m_num_tokens * m_head_dim
+            * onnxElementSize(m_cache_type) / (1024.0 * 1024.0);
+        // The .onnx file is just the graph; the weights live in the external-data
+        // sibling, so include it or the log understates the footprint ~400x.
+        uintmax_t weight_bytes = fs::file_size(model_path);
+        const fs::path external_data = fs::path(model_path).concat(".data");
+        if (fs::exists(external_data)) {
+            weight_bytes += fs::file_size(external_data);
+        }
+        LogPerf("[mem] StreamingONNXModel: graph + weights {:.2f} MB on disk, KV cache {:.2f} MB per retained frame "
+                "(x2 live during Run)",
+                weight_bytes / (1024.0 * 1024.0), cache_mb_per_frame);
+
+    } catch (const Ort::Exception& e) {
+        // The destructor does not run for a partially constructed object, so any
+        // scratch already allocated has to be released here.
+        _freeScratch();
+        throw std::runtime_error("Error loading streaming ONNX model: " + std::string(e.what()));
+    } catch (...) {
+        _freeScratch();
+        throw;
+    }
+}
+
+StreamingONNXModel::~StreamingONNXModel() {
+    // m_cache is declared after m_session, so the cache tensors are released
+    // before the session and env they were allocated from.
+    _freeScratch();
+    LogMessage("StreamingONNXModel destroyed.");
+}
+
+void StreamingONNXModel::_freeScratch() {
+    if (m_d_rgb)   { cudaFree(m_d_rgb);   m_d_rgb = nullptr; }
+    if (m_d_depth) { cudaFree(m_d_depth); m_d_depth = nullptr; }
+    if (m_d_empty) { cudaFree(m_d_empty); m_d_empty = nullptr; }
+}
+
+void StreamingONNXModel::_setDevice(const std::string& device_type) {
+    std::string device_type_lower = device_type;
+    std::transform(device_type_lower.begin(), device_type_lower.end(), device_type_lower.begin(), ::tolower);
+
+    if (device_type_lower != "cuda" && device_type_lower != "gpu") {
+        LogMessage("StreamingONNXModel: unsupported device '{}'", device_type);
+        m_use_cuda = false;
+        return;
+    }
+
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        LogMessage("StreamingONNXModel: CUDA not available");
+        m_use_cuda = false;
+        return;
+    }
+
+    const auto& ort_api = Ort::GetApi();
+
+    // Every OrtStatus* must be checked and released: silently ignoring them would
+    // leave m_use_cuda true while the session actually ran on CPU, and device
+    // pointers would then be bound with CUDA MemoryInfo.
+    OrtCUDAProviderOptionsV2* cuda_options = nullptr;
+    if (OrtStatus* status = ort_api.CreateCUDAProviderOptions(&cuda_options)) {
+        LogMessage("StreamingONNXModel: CreateCUDAProviderOptions failed: {}",
+            ort_api.GetErrorMessage(status));
+        ort_api.ReleaseStatus(status);
+        m_use_cuda = false;
+        return;
+    }
+    std::unique_ptr<OrtCUDAProviderOptionsV2, decltype(ort_api.ReleaseCUDAProviderOptions)>
+        rel_cuda_options(cuda_options, ort_api.ReleaseCUDAProviderOptions);
+
+    // Arena strategy stays at the default (kNextPowerOfTwo) deliberately. The
+    // cache tensors grow to a NEW size every frame until the window clamps, and
+    // exact-size allocation (kSameAsRequested) can never reuse a freed chunk for
+    // the next, larger request -- the arena extends every frame and VRAM climbs
+    // ~quadratically until WDDM starts evicting (measured: 375 ms -> 14.8 s per
+    // frame at the cliff). Power-of-two rounding puts consecutive sizes in the
+    // same bucket, so freed generations actually get reused during growth.
+
+    // Deliberately no enable_cuda_graph here: graph capture requires static
+    // shapes, and the cache sequence axis grows for the first frames before the
+    // retention window clamps it.
+    if (OrtStatus* status = ort_api.SessionOptionsAppendExecutionProvider_CUDA_V2(
+            static_cast<OrtSessionOptions*>(m_sess_options),
+            rel_cuda_options.get())) {
+        LogMessage("StreamingONNXModel: registering the CUDA EP failed: {}",
+            ort_api.GetErrorMessage(status));
+        ort_api.ReleaseStatus(status);
+        m_use_cuda = false;
+        return;
+    }
+
+    m_memory_info = Ort::MemoryInfo("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
+    m_use_cuda = true;
+    LogMessage("StreamingONNXModel device set to: CUDA");
+}
+
+void StreamingONNXModel::_buildCacheNames() {
+    Ort::AllocatorWithDefaultOptions alloc;
+
+    const size_t num_inputs  = m_session->GetInputCount();
+    const size_t num_outputs = m_session->GetOutputCount();
+    const size_t expected    = kNumFixedInputs + kNumCacheTensors;
+
+    if (num_inputs != expected || num_outputs != expected) {
+        throw std::runtime_error("Expected " + std::to_string(expected) + " inputs and outputs, got " +
+            std::to_string(num_inputs) + " and " + std::to_string(num_outputs));
+    }
+
+    auto input_name  = [&](size_t i) { return std::string(m_session->GetInputNameAllocated(i, alloc).get()); };
+    auto output_name = [&](size_t i) { return std::string(m_session->GetOutputNameAllocated(i, alloc).get()); };
+
+    if (input_name(0) != "rgb" || input_name(1) != "sparse_depth") {
+        throw std::runtime_error("Expected inputs [rgb, sparse_depth], got [" +
+            input_name(0) + ", " + input_name(1) + "]");
+    }
+    if (output_name(0) != "depth" || output_name(1) != "depth_conf") {
+        throw std::runtime_error("Expected outputs [depth, depth_conf], got [" +
+            output_name(0) + ", " + output_name(1) + "]");
+    }
+
+    // Take the pairing from the graph's own ordering rather than reconstructing
+    // names, then assert the past_/new_ suffixes line up. A silent misalignment
+    // here would route one layer's K into another's V: no error, just wrong depth.
+    m_past_names.reserve(kNumCacheTensors);
+    m_new_names.reserve(kNumCacheTensors);
+    for (int32_t i = 0; i < kNumCacheTensors; ++i) {
+        std::string in_name  = input_name(kNumFixedInputs + i);
+        std::string out_name = output_name(kNumFixedOutputs + i);
+
+        if (in_name.rfind("past_", 0) != 0 || out_name.rfind("new_", 0) != 0) {
+            throw std::runtime_error("Cache tensor " + std::to_string(i) + " naming unexpected: " +
+                in_name + " / " + out_name);
+        }
+        if (in_name.substr(5) != out_name.substr(4)) {
+            throw std::runtime_error("Cache tensor " + std::to_string(i) + " misaligned: " +
+                in_name + " does not pair with " + out_name);
+        }
+
+        m_past_names.push_back(std::move(in_name));
+        m_new_names.push_back(std::move(out_name));
+    }
+
+    // Built only after the name vectors are final, so the pointers stay valid.
+    m_past_cstr.reserve(kNumCacheTensors);
+    m_new_cstr.reserve(kNumCacheTensors);
+    for (int32_t i = 0; i < kNumCacheTensors; ++i) {
+        m_past_cstr.push_back(m_past_names[i].c_str());
+        m_new_cstr.push_back(m_new_names[i].c_str());
+    }
+
+    LogMessage("StreamingONNXModel: {} cache tensors, {} <-> {} ... {} <-> {}",
+        kNumCacheTensors, m_past_names.front(), m_new_names.front(),
+        m_past_names.back(), m_new_names.back());
+}
+
+void StreamingONNXModel::_readGeometry() {
+    // TypeInfo owns the shape/type view, so each must outlive the view taken from it.
+    Ort::TypeInfo rgb_type_info       = m_session->GetInputTypeInfo(0);
+    Ort::TypeInfo depth_in_type_info  = m_session->GetInputTypeInfo(1);
+    Ort::TypeInfo depth_out_type_info = m_session->GetOutputTypeInfo(0);
+    Ort::TypeInfo cache_type_info     = m_session->GetInputTypeInfo(kNumFixedInputs);
+
+    // rgb: [B, 3, H, W]. H and W must be static; the batch dim may be a fixed
+    // value or symbolic (reported as -1), in which case any batch is accepted
+    // and each batch slot carries its own independent cache sequence.
+    auto rgb_info = rgb_type_info.GetTensorTypeAndShapeInfo();
+    auto rgb_shape = rgb_info.GetShape();
+    if (rgb_shape.size() != 4 || rgb_shape[2] <= 0 || rgb_shape[3] <= 0) {
+        throw std::runtime_error("rgb input must have [B,3,H,W] shape with static H and W");
+    }
+    m_model_h = rgb_shape[2];
+    m_model_w = rgb_shape[3];
+    m_graph_batch = rgb_shape[0] > 0 ? rgb_shape[0] : 0; // 0 = symbolic = any
+
+    // The image tensors are read and written directly by the fp32 resize kernels,
+    // so those must be fp32. Fail loudly here rather than reinterpret half floats
+    // as single and hand back plausible-looking garbage.
+    auto require_float = [](const auto& info, const char* what) {
+        if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            throw std::runtime_error(std::string(what) + " must be float32, got ONNX element type " +
+                std::to_string(static_cast<int>(info.GetElementType())) +
+                " (convert with keep_io_types=True to leave the image tensors fp32)");
+        }
+    };
+    require_float(rgb_info, "rgb input");
+    require_float(depth_in_type_info.GetTensorTypeAndShapeInfo(), "sparse_depth input");
+    require_float(depth_out_type_info.GetTensorTypeAndShapeInfo(), "depth output");
+
+    // past_k_00: [1, heads, n_frames, tokens, head_dim]; n_frames is symbolic (-1).
+    auto cache_info = cache_type_info.GetTensorTypeAndShapeInfo();
+    auto cache_shape = cache_info.GetShape();
+    if (cache_shape.size() != 5 || cache_shape[1] <= 0 || cache_shape[3] <= 0 || cache_shape[4] <= 0) {
+        throw std::runtime_error("cache input must have shape [1,heads,n_frames,tokens,head_dim]");
+    }
+    m_num_heads  = cache_shape[1];
+    m_num_tokens = cache_shape[3];
+    m_head_dim   = cache_shape[4];
+    // Any element type is fine here: the caches are opaque to this class.
+    m_cache_type = cache_info.GetElementType();
+
+    // The cache batch dim must agree with rgb's -- a graph that batches images
+    // but not cache sequences cannot stream per-view.
+    const int64_t cache_batch = cache_shape[0] > 0 ? cache_shape[0] : 0;
+    if (cache_batch != m_graph_batch) {
+        throw std::runtime_error("rgb and cache batch dims disagree (" +
+            std::to_string(m_graph_batch) + " vs " + std::to_string(cache_batch) + ")");
+    }
+
+    m_cur_batch = m_graph_batch > 0 ? m_graph_batch : 1;
+
+    LogMessage("StreamingONNXModel geometry: input {}x{}, batch {}, cache [B,{},n_frames,{},{}] element type {} ({} bytes)",
+        m_model_h, m_model_w, m_graph_batch == 0 ? "dynamic" : std::to_string(m_graph_batch),
+        m_num_heads, m_num_tokens, m_head_dim,
+        static_cast<int>(m_cache_type), onnxElementSize(m_cache_type));
+}
+
+void StreamingONNXModel::_ensureScratch(int64_t batch) {
+    if (batch <= m_alloc_batch) {
+        return;
+    }
+    // Scratch is only live within a single runInference call (which syncs before
+    // returning), so growing it between calls is safe.
+    if (m_d_rgb)   { cudaFree(m_d_rgb);   m_d_rgb = nullptr; }
+    if (m_d_depth) { cudaFree(m_d_depth); m_d_depth = nullptr; }
+    checkCudaError(cudaMalloc(&m_d_rgb, batch * 3 * m_model_h * m_model_w * sizeof(float)),
+        "cudaMalloc streaming model rgb scratch");
+    checkCudaError(cudaMalloc(&m_d_depth, batch * m_model_h * m_model_w * sizeof(float)),
+        "cudaMalloc streaming model depth scratch");
+    if (!m_d_empty) {
+        // Backing for the zero-length frame-0 caches. No elements are read; ORT
+        // just wants a valid device pointer.
+        checkCudaError(cudaMalloc(&m_d_empty, 256), "cudaMalloc streaming model empty cache backing");
+    }
+    m_alloc_batch = batch;
+}
+
+std::vector<Ort::Value> StreamingONNXModel::_makeEmptyCaches() const {
+    std::vector<int64_t> shape{m_cur_batch, m_num_heads, 0, m_num_tokens, m_head_dim};
+    std::vector<Ort::Value> caches;
+    caches.reserve(kNumCacheTensors);
+    for (int32_t i = 0; i < kNumCacheTensors; ++i) {
+        // Untyped overload so the caches are created in whatever type the graph
+        // declares. This is the only place cache dtype matters -- every later
+        // generation is an ORT-owned value we pass straight back in -- which is
+        // what makes an fp16 cache a ~10 line change rather than a rewrite.
+        // Byte count is 0: no element is ever read from m_d_empty.
+        caches.push_back(Ort::Value::CreateTensor(
+            m_memory_info,
+            m_d_empty,
+            0,
+            shape.data(),
+            shape.size(),
+            m_cache_type
+        ));
+    }
+    return caches;
+}
+
+bool StreamingONNXModel::acquire(const void* owner) {
+    const void* expected = nullptr;
+    if (m_owner.compare_exchange_strong(expected, owner)) {
+        return true;
+    }
+    // Re-acquiring from the same pipeline (e.g. stop/start) is fine.
+    return expected == owner;
+}
+
+void StreamingONNXModel::release(const void* owner) {
+    const void* expected = owner;
+    m_owner.compare_exchange_strong(expected, nullptr);
+}
+
+void StreamingONNXModel::resetState() {
+    if (m_binding) {
+        m_binding->ClearBoundInputs();
+        m_binding->ClearBoundOutputs();
+    }
+    m_cache = _makeEmptyCaches();
+    m_frames_seen = 0;
+    LogMessage("StreamingONNXModel: KV cache reset (next frame feeds zero-length caches)");
+}
+
+bool StreamingONNXModel::runInference(
+    const float* input_data,
+    const float* depth_data,
+    float*       output_data,
+    TensorShape  input_shape,
+    TensorShape  depth_shape,
+    TensorShape  output_shape
+) {
+    if (!m_session || !m_binding) {
+        LogMessage("StreamingONNXModel: session not initialized");
+        return false;
+    }
+    if (!input_data || !depth_data || !output_data) {
+        LogMessage("StreamingONNXModel: null input, depth, or output pointer");
+        return false;
+    }
+
+    auto time_start = std::chrono::high_resolution_clock::now();
+
+    // Batch = images per step, one independent cache sequence per slot.
+    const int64_t batch = static_cast<int64_t>(input_shape.N);
+    if (!supportsBatch(static_cast<int32_t>(batch))) {
+        LogMessage("StreamingONNXModel: batch {} not supported (graph batch: {})",
+            batch, m_graph_batch == 0 ? std::string("dynamic") : std::to_string(m_graph_batch));
+        return false;
+    }
+    if (batch != m_cur_batch) {
+        // The cache's batch dim is part of the sequence state; a different batch
+        // means a different set of view sequences, so restart rather than feed a
+        // mismatched cache into the graph.
+        LogMessage("StreamingONNXModel: batch changed {} -> {}, restarting sequence",
+            m_cur_batch, batch);
+        m_cur_batch = batch;
+        resetState();
+    }
+
+    try {
+        _ensureScratch(batch);
+
+        // Camera resolution -> model resolution, all batch slots in one pass:
+        // [B,3,H,W] is B*3 contiguous planes to the resampler. Depth is resampled
+        // sparsely so invalid (zero) pixels are never blended into valid ones.
+        // Range validation and orientation are handled inside the graph.
+        checkCudaError(resize_bilinear_chw(
+            input_data, m_d_rgb,
+            static_cast<int>(input_shape.H), static_cast<int>(input_shape.W),
+            static_cast<int>(m_model_h), static_cast<int>(m_model_w),
+            static_cast<int>(batch * 3), 0
+        ), "resize rgb to model resolution");
+
+        const size_t depth_in_elems  = depth_shape.H * depth_shape.W;
+        const size_t depth_mdl_elems = static_cast<size_t>(m_model_h * m_model_w);
+        for (int64_t b = 0; b < batch; ++b) {
+            checkCudaError(resize_sparse_depth(
+                depth_data + b * depth_in_elems, m_d_depth + b * depth_mdl_elems,
+                static_cast<int>(depth_shape.H), static_cast<int>(depth_shape.W),
+                static_cast<int>(m_model_h), static_cast<int>(m_model_w),
+                0
+            ), "resize sparse depth to model resolution");
+        }
+
+        // ORT runs on its own stream; make sure the resamples are visible first.
+        checkCudaError(cudaStreamSynchronize(0), "sync before streaming Run");
+
+        std::vector<int64_t> rgb_tensor_shape{batch, 3, m_model_h, m_model_w};
+        std::vector<int64_t> depth_tensor_shape{batch, 1, m_model_h, m_model_w};
+
+        Ort::Value rgb_tensor = Ort::Value::CreateTensor<float>(
+            m_memory_info, m_d_rgb, static_cast<size_t>(batch * 3 * m_model_h * m_model_w),
+            rgb_tensor_shape.data(), rgb_tensor_shape.size()
+        );
+        Ort::Value depth_tensor = Ort::Value::CreateTensor<float>(
+            m_memory_info, m_d_depth, static_cast<size_t>(batch * m_model_h * m_model_w),
+            depth_tensor_shape.data(), depth_tensor_shape.size()
+        );
+
+        m_binding->ClearBoundInputs();
+        m_binding->ClearBoundOutputs();
+
+        m_binding->BindInput("rgb", rgb_tensor);
+        m_binding->BindInput("sparse_depth", depth_tensor);
+        for (int32_t i = 0; i < kNumCacheTensors; ++i) {
+            m_binding->BindInput(m_past_cstr[i], m_cache[i]);
+        }
+
+        // Bound by MemoryInfo rather than to our own buffers: the graph decides
+        // n_frames_out, so ORT must allocate these device-side at the size it
+        // produced. The returned values are fed straight back in next frame --
+        // the cache never touches host memory.
+        m_binding->BindOutput("depth", m_memory_info);
+        m_binding->BindOutput("depth_conf", m_memory_info);
+        for (int32_t i = 0; i < kNumCacheTensors; ++i) {
+            m_binding->BindOutput(m_new_cstr[i], m_memory_info);
+        }
+
+        m_session->Run(Ort::RunOptions{nullptr}, *m_binding);
+
+        // Bind order, so index kNumFixedOutputs + i is m_new_names[i].
+        std::vector<Ort::Value> outputs = m_binding->GetOutputValues();
+        if (outputs.size() != static_cast<size_t>(kNumFixedOutputs + kNumCacheTensors)) {
+            LogMessage("StreamingONNXModel: expected {} outputs, got {}",
+                kNumFixedOutputs + kNumCacheTensors, outputs.size());
+            return false;
+        }
+
+        // Drop the previous generation's bindings before those tensors are freed.
+        m_binding->ClearBoundInputs();
+        m_binding->ClearBoundOutputs();
+
+        // depth is [B, H, W] in whatever orientation the graph emits; take the
+        // dims it reports rather than assuming them.
+        auto depth_out_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+        if (depth_out_shape.size() != 3 || depth_out_shape[0] != batch) {
+            LogMessage("StreamingONNXModel: unexpected depth output shape (rank {}, batch {})",
+                depth_out_shape.size(), depth_out_shape.empty() ? -1 : depth_out_shape[0]);
+            return false;
+        }
+        const int64_t src_h = depth_out_shape[1];
+        const int64_t src_w = depth_out_shape[2];
+
+        // All batch slots in one pass: [B,H,W] in and [B,H',W'] out are both
+        // contiguous single-channel planes.
+        checkCudaError(resize_bilinear_chw(
+            outputs[0].GetTensorData<float>(), output_data,
+            static_cast<int>(src_h), static_cast<int>(src_w),
+            static_cast<int>(output_shape.H), static_cast<int>(output_shape.W),
+            static_cast<int>(batch), 0
+        ), "resize model depth to output resolution");
+        checkCudaError(cudaStreamSynchronize(0), "sync after streaming depth resize");
+
+        auto cache_shape = outputs[kNumFixedOutputs].GetTensorTypeAndShapeInfo().GetShape();
+        if (cache_shape.size() != 5 || cache_shape[0] != batch) {
+            LogMessage("StreamingONNXModel: cache output shape unexpected (rank {}, batch {} vs {})",
+                cache_shape.size(), cache_shape.empty() ? -1 : cache_shape[0], batch);
+            resetState();
+            return false;
+        }
+        // The graph slices to its own retention window, so this is just reported.
+        const int64_t retained = cache_shape[2];
+
+        // This step's caches become the next step's inputs; assigning here frees
+        // the previous generation back to ORT's arena for reuse.
+        m_cache.clear();
+        m_cache.reserve(kNumCacheTensors);
+        for (int32_t i = 0; i < kNumCacheTensors; ++i) {
+            m_cache.push_back(std::move(outputs[kNumFixedOutputs + i]));
+        }
+
+        m_frames_seen++;
+
+        auto time_end = std::chrono::high_resolution_clock::now();
+        LogMessage("StreamingONNXModel frame {}: batch {}, {} frames retained, depth out [{}, {}], {} ms",
+            m_frames_seen, batch, retained, src_h, src_w,
+            std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count());
+
+    } catch (const std::exception& e) {
+        LogMessage("Error during streaming ONNX inference: {}", e.what());
+        // The cache generation is now indeterminate; restart the sequence rather
+        // than feeding a half-updated cache into the next frame.
+        resetState();
+        return false;
+    }
+
+    return true;
+}
+
+bool StreamingONNXModel::runInference(
+    const uint8_t* /*input_data*/,
+    const float*   /*depth_data*/,
+    float*         /*output_data*/,
+    TensorShape    /*input_shape*/,
+    TensorShape    /*depth_shape*/,
+    TensorShape    /*output_shape*/
+) {
+    LogMessage("StreamingONNXModel: uint8 input overload is not implemented; "
+               "the pipeline converts to float before inference.");
+    return false;
+}
+
 };

@@ -67,6 +67,34 @@ void convert_uint8_img_to_float_img(
 
 void loadImageToCudaFloatRGB(const std::string& path, int& outW, int& outH, float* d_image);
 
+// Resampling between the camera resolution and a model's native input size.
+// Neither axis is an integer ratio (e.g. 480->392, 640->518), so the integer
+// downscale in preprocess_depth_image2 does not cover this.
+
+// Planar CHW bilinear resample.
+cudaError_t resize_bilinear_chw(
+    const float* d_in,
+    float* d_out,
+    int in_h, int in_w,
+    int out_h, int out_w,
+    int channels,
+    cudaStream_t stream = 0
+);
+
+// Resample sparse metric depth. Bilinear is wrong here: 0 means "no sample", and
+// blending it with valid neighbours fabricates depth. Each output pixel takes the
+// nearest sampled pixel in its source footprint, which preserves sparse points
+// that plain nearest-neighbour would drop when downscaling.
+// Only 0 (and NaN) are treated as "no sample"; range validation belongs to the
+// consuming model, not to the resample.
+cudaError_t resize_sparse_depth(
+    const float* d_in,
+    float* d_out,
+    int in_h, int in_w,
+    int out_h, int out_w,
+    cudaStream_t stream = 0
+);
+
 // Running average depth maintenance
 cudaError_t prefill_invalid_depth(
     float* d_depth_data,

@@ -65,10 +65,33 @@ bool VisionPipeline::start() {
         return false;
     }
 
+    // A streaming model's cache has one sequence per batch slot, so the stream's
+    // camera count must be a batch size the graph accepts (fixed-batch exports
+    // pin it; dynamic-batch exports take any). Refusing here beats the silent
+    // cache corruption that a mismatched batch would cause.
+    if (!model_.supportsBatch(static_cast<int32_t>(output_shape_.N))) {
+        LogMessage("Model does not support {} images per step for this stream", output_shape_.N);
+        return false;
+    }
+
     if (!allocateCudaBuffers()) {
         LogMessage("Failed to allocate CUDA buffers");
         return false;
     }
+
+    // A streaming model's KV cache is one camera sequence's state, so refuse to
+    // let a second pipeline drive the same instance -- the two streams would
+    // interleave into one cache and corrupt it silently.
+    if (!model_.acquire(this)) {
+        LogMessage("Model instance is already driven by another pipeline");
+        deallocateCudaBuffers();
+        return false;
+    }
+
+    // Restarting the pipeline restarts the frame sequence, so any cached model
+    // state from a previous run is stale.
+    model_.resetState();
+    first_run_ = true;
 
     read_idx_.store(0);
     write_idx_ = 0;
@@ -95,6 +118,10 @@ void VisionPipeline::stop() {
         pipeline_thread_->join();
         LogMessage("Vision pipeline thread joined");
     }
+
+    // Released only after the worker is joined, so the model is free for another
+    // pipeline exactly when nothing can still be calling into it.
+    model_.release(this);
 }
 
 bool VisionPipeline::allocateCudaBuffers() {
@@ -270,13 +297,23 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
                 input_shape_float.W = input_shape_.H;
             }
 
+            // Streaming models take the raw sparse metric depth at sensor
+            // resolution and do their own resampling, range validation and
+            // orientation handling; the EMA prefill and the /4 downscale below
+            // are for the single-shot models only. The dims handed over describe
+            // the buffer exactly as it sits in memory -- what the model does with
+            // it from there is the model's business.
+            const bool full_res_depth = model_.wantsFullResDepth();
+
             TensorShape depth_shape = depth_shape_;
-            if (do_rotate_90_cw) {
-                depth_shape.H = depth_shape_.W / depth_scale_factor;
-                depth_shape.W = depth_shape_.H / depth_scale_factor;
-            } else {
-                depth_shape.H = depth_shape_.H / depth_scale_factor;
-                depth_shape.W = depth_shape_.W / depth_scale_factor;
+            if (!full_res_depth) {
+                if (do_rotate_90_cw) {
+                    depth_shape.H = depth_shape_.W / depth_scale_factor;
+                    depth_shape.W = depth_shape_.H / depth_scale_factor;
+                } else {
+                    depth_shape.H = depth_shape_.H / depth_scale_factor;
+                    depth_shape.W = depth_shape_.W / depth_scale_factor;
+                }
             }
 
             TensorShape output_shape = output_shape_;
@@ -302,7 +339,9 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
 
                 LogMessage("Starting pipeline for image {}. cur_rgb_ptr = {:#x}, cur_depth_ptr = {:#x}, cur_depth_output_ptr = {:#x}",
                            i, size_t(cur_rgb_input_ptr), size_t(cur_depth_input_ptr), size_t(cur_depth_output_ptr));
-                if (ema_enabled && !first_run_) {
+                if (full_res_depth) {
+                    // Nothing to do: the model reads d_depth_data_ directly.
+                } else if (ema_enabled && !first_run_) {
                     checkCudaError(prefill_invalid_depth(
                         cur_depth_input_ptr,
                         cur_preprocessed_depth_ptr,
@@ -366,7 +405,7 @@ void VisionPipeline::pipelineWorker(std::stop_token stop_token) {
             // TODO: Support running models on cuda_stream_
             bool inference_success = model_.runInference(
                 cuda_ws_.d_rgb_float_data_,
-                cuda_ws_.d_preprocessed_depth_data_,
+                full_res_depth ? cuda_ws_.d_depth_data_ : cuda_ws_.d_preprocessed_depth_data_,
                 d_depth_output_ptr,
                 input_shape_float,
                 depth_shape,

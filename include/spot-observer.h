@@ -94,10 +94,33 @@ UNITY_INTERFACE_EXPORT
 bool UNITY_INTERFACE_API SOb_PushNextVisionPipelineImageSetToUnityBuffers(int32_t robot_id, int32_t cam_stream_id);
 
 // Model stuff
+
+// Model families. The family cannot be inferred from the file: both the
+// single-shot and the streaming (KV-cache) depth models are .onnx.
+//   SOb_MODEL_SINGLE_SHOT - stateless model; one instance may be shared by
+//                           several pipelines (path-cached internally).
+//   SOb_MODEL_STREAMING   - autoregressive model with per-sequence state; every
+//                           load returns a fresh instance and each instance can
+//                           drive exactly one pipeline at a time.
+#define SOb_MODEL_SINGLE_SHOT 0
+#define SOb_MODEL_STREAMING   1
+
 UNITY_INTERFACE_EXPORT
 SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* backend);
+// Like SOb_LoadModel, with the model family stated explicitly (SOb_MODEL_*).
+// SOb_LoadModel is equivalent to kind = SOb_MODEL_SINGLE_SHOT.
+UNITY_INTERFACE_EXPORT
+SObModel UNITY_INTERFACE_API SOb_LoadModelEx(const char* modelPath, const char* backend, int32_t kind);
 UNITY_INTERFACE_EXPORT
 void UNITY_INTERFACE_API SOb_UnloadModel(SObModel model);
+
+// Live model switch: stops the vision pipeline on the given camera stream (if
+// one is running) and relaunches it with `model`. The camera stream keeps
+// running throughout; only the inference side is swapped. Intended pattern is to
+// load every selectable model once at startup and flip between the handles --
+// no load stall and no unload hazard at switch time.
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_SwitchVisionPipelineModel(int32_t robot_id, int32_t cam_stream_id, SObModel model);
 
 // Config calls
 UNITY_INTERFACE_EXPORT

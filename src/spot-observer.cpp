@@ -284,6 +284,29 @@ static SObModel loadONNXModel(const std::string& modelPath, const std::string& b
     return ret;
 }
 
+// Autoregressive KV-cache model. Deliberately not registered in
+// s_path_to_model_map: that map hands the same instance to every pipeline asking
+// for a path, and a streaming model's cache belongs to one camera's frame
+// sequence. Each load returns a fresh instance; s_model_to_path_map is still
+// populated so unloadModel can find it.
+static SObModel loadStreamingONNXModel(const std::string& modelPath, const std::string& device) {
+    LogMessage("Loading streaming ONNX model: {}", modelPath);
+    LogMessage("Using Provider: {}", device);
+
+    SObModel ret = nullptr;
+    try {
+        auto* model = new StreamingONNXModel(modelPath, device);
+        ret = reinterpret_cast<SObModel>(model);
+    } catch (const std::exception& e) {
+        LogMessage("Exception while loading streaming ONNX model: {}", e.what());
+        return nullptr;
+    }
+
+    s_model_to_path_map[ret] = modelPath;
+    LogMessage("Successfully loaded streaming ONNX model: {}", modelPath);
+    return ret;
+}
+
 static void unloadModel(SObModel model) {
     if (!model) {
         LogMessage("SOb::unloadModel: Model is null, nothing to unload");
@@ -297,7 +320,14 @@ static void unloadModel(SObModel model) {
     }
 
     std::string modelPath = it->second;
-    s_path_to_model_map.erase(modelPath);
+    // Streaming models are deliberately absent from the path map (each pipeline
+    // gets its own instance), so only erase an entry that maps back to this exact
+    // model. Erasing by path alone would deregister a different, still-live model
+    // loaded from the same file and orphan its session.
+    auto path_it = s_path_to_model_map.find(modelPath);
+    if (path_it != s_path_to_model_map.end() && path_it->second == model) {
+        s_path_to_model_map.erase(path_it);
+    }
     s_model_to_path_map.erase(it);
 
     delete reinterpret_cast<MLModel*>(model);
@@ -412,27 +442,48 @@ bool UNITY_INTERFACE_API SOb_DestroyCameraStream(int32_t robot_id, int32_t cam_s
 }
 
 
+// Model-family values, mirrored from include/spot-observer.h (this file follows
+// the existing convention of not including the public header).
+#define SOb_MODEL_SINGLE_SHOT 0
+#define SOb_MODEL_STREAMING   1
+
 UNITY_INTERFACE_EXPORT
-SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* backend) {
+SObModel UNITY_INTERFACE_API SOb_LoadModelEx(const char* modelPath, const char* backend, int32_t kind) {
     if (!modelPath || !backend) {
-        SOb::LogMessage("SOb_LoadModel: Invalid null pointer parameters");
+        SOb::LogMessage("SOb_LoadModelEx: Invalid null pointer parameters");
         return nullptr;
     }
-    
-    // If model filename ends with .onnx, use ONNX model loader
+
     std::string model_path_str(modelPath);
 
+    // The family is an explicit parameter rather than inferred: both families
+    // are .onnx files, and "backend" keeps its execution-provider meaning.
     SObModel ret = nullptr;
-    if (model_path_str.ends_with(".onnx")) {
-        ret = SOb::loadONNXModel(modelPath, backend);
-    } else {
-        ret = SOb::loadTorchModel(modelPath, backend);
-    }
-    if (!ret) {
-        SOb::LogMessage("Failed to load model: {} with backend: {}", modelPath, backend);
+    switch (kind) {
+        case SOb_MODEL_SINGLE_SHOT:
+            if (model_path_str.ends_with(".onnx")) {
+                ret = SOb::loadONNXModel(modelPath, backend);
+            } else {
+                ret = SOb::loadTorchModel(modelPath, backend);
+            }
+            break;
+        case SOb_MODEL_STREAMING:
+            ret = SOb::loadStreamingONNXModel(model_path_str, backend);
+            break;
+        default:
+            SOb::LogMessage("SOb_LoadModelEx: Unknown model kind {}", kind);
+            return nullptr;
     }
 
+    if (!ret) {
+        SOb::LogMessage("Failed to load model: {} (backend: {}, kind: {})", modelPath, backend, kind);
+    }
     return ret;
+}
+
+UNITY_INTERFACE_EXPORT
+SObModel UNITY_INTERFACE_API SOb_LoadModel(const char* modelPath, const char* backend) {
+    return SOb_LoadModelEx(modelPath, backend, SOb_MODEL_SINGLE_SHOT);
 }
 
 UNITY_INTERFACE_EXPORT
@@ -507,6 +558,53 @@ bool UNITY_INTERFACE_API SOb_StopVisionPipeline(int32_t robot_id, int32_t cam_st
 
     } catch (const std::exception& e) {
         LogMessage("SOb_StopVisionPipeline: Exception while stopping vision pipeline for robot ID {} @ stream-ID: {}",
+            robot_id, cam_stream_id, e.what());
+        return false;
+    }
+}
+
+// Live model switch. Tears down the running pipeline (worker joined and model
+// ownership released before this returns) and relaunches against `model`. The
+// camera stream keeps running throughout. With all selectable models preloaded,
+// this is the whole switch -- no load stall, nothing unloaded.
+UNITY_INTERFACE_EXPORT
+bool UNITY_INTERFACE_API SOb_SwitchVisionPipelineModel(int32_t robot_id, int32_t cam_stream_id, SObModel model) {
+    using namespace SOb;
+    try {
+        auto robot_it = __robot_connections.find(robot_id);
+        if (robot_it == __robot_connections.end()) {
+            LogMessage("SOb_SwitchVisionPipelineModel: Robot ID {} not found", robot_id);
+            return false;
+        }
+        if (!model) {
+            LogMessage("SOb_SwitchVisionPipelineModel: Invalid model provided");
+            return false;
+        }
+
+        SpotConnection& spot_connection = *robot_it->second;
+
+        // Absent pipeline is fine -- then this degenerates into a launch.
+        // ~VisionPipeline stops the worker and releases the old model.
+        if (spot_connection.getVisionPipeline(cam_stream_id) != nullptr &&
+            !spot_connection.removeVisionPipeline(cam_stream_id)) {
+            LogMessage("SOb_SwitchVisionPipelineModel: Failed to stop existing pipeline for robot ID {} @ stream-ID {}",
+                robot_id, cam_stream_id);
+            return false;
+        }
+
+        auto* ml_model = reinterpret_cast<MLModel*>(model);
+        if (!spot_connection.createVisionPipeline(*ml_model, cam_stream_id)) {
+            LogMessage("SOb_SwitchVisionPipelineModel: Failed to relaunch pipeline for robot ID {} @ stream-ID {}",
+                robot_id, cam_stream_id);
+            return false;
+        }
+
+        LogMessage("SOb_SwitchVisionPipelineModel: Switched model for robot ID {} @ stream-ID {}",
+            robot_id, cam_stream_id);
+        return true;
+
+    } catch (const std::exception& e) {
+        LogMessage("SOb_SwitchVisionPipelineModel: Exception for robot ID {} @ stream-ID {}: {}",
             robot_id, cam_stream_id, e.what());
         return false;
     }
