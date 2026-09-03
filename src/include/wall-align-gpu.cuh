@@ -74,7 +74,16 @@ struct WallAlignResult {
 // icp_iterations / icp_max_distance: per-candidate refinement depth. Keep
 //     iterations modest; the winner can always be re-refined longer by the
 //     caller.
-// plane_*: forwarded to fitDominantPlaneGPU for each cloud's floor fit.
+// plane_*: RANSAC settings for each cloud's floor fit. NOTE: this does NOT
+//     use fitDominantPlaneGPU -- that picks the plane with the most inliers
+//     regardless of orientation, and on real captures a large wall can beat
+//     the floor (observed on the Aug 4 capture: the wall won on one cloud,
+//     tilting the "gravity" alignment ~90 deg and wrecking everything
+//     downstream). The fit here only accepts near-HORIZONTAL hypotheses:
+// min_floor_normal_z: minimum |normal.z| (unit normal, body frame) for a
+//     hypothesis to count as a floor candidate. Default 0.85 allows ~32 deg
+//     of body tilt -- far more than a standing Spot ever has, while cleanly
+//     excluding walls (|normal.z| ~= 0).
 WallAlignResult wallAlignGPU(
     const DevicePointCloud& source, const DevicePointCloud& target,
     float structure_z_min = 0.15f, float structure_z_max = 2.5f,
@@ -83,6 +92,7 @@ WallAlignResult wallAlignGPU(
     int icp_iterations = 30, float icp_max_distance = 0.1f,
     int plane_hypotheses = 300, float plane_threshold = 0.04f,
     unsigned long long plane_seed = 0,
+    float min_floor_normal_z = 0.85f,
     cudaStream_t stream = 0);
 
 }  // namespace SOb

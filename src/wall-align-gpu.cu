@@ -281,6 +281,57 @@ void matTVec3(const float A[9], const float v[3], float out[3]) {  // A^T * v
         out[r] = A[0 * 3 + r] * v[0] + A[1 * 3 + r] * v[1] + A[2 * 3 + r] * v[2];
 }
 
+// Constrained floor fit: RANSAC over host copies of the (coarse) cloud, but
+// only accepting near-horizontal hypotheses (|unit normal z| >=
+// min_normal_z). fitDominantPlaneGPU is deliberately NOT used here -- it
+// maximizes inliers with no orientation constraint, and a large wall can
+// out-count the floor on real captures (which happened, and silently broke
+// the entire alignment). Host-side on purpose: the coarse clouds are ~10-20k
+// points, so 300 hypotheses x 20k checks is microseconds -- not worth a
+// kernel.
+bool constrainedFloorFit(
+    const std::vector<float3>& pts, int iterations, float threshold,
+    float min_normal_z, unsigned long long seed,
+    float3& out_normal, float& out_offset, int& out_inliers)
+{
+    if (pts.size() < 3) return false;
+    // splitmix64 -- tiny, deterministic, no <random> engine state to drag around
+    unsigned long long state = seed + 0x9E3779B97F4A7C15ULL;
+    auto next = [&state]() {
+        unsigned long long z = (state += 0x9E3779B97F4A7C15ULL);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    };
+
+    int best_count = -1;
+    for (int it = 0; it < iterations; it++) {
+        size_t i0 = next() % pts.size(), i1 = next() % pts.size(), i2 = next() % pts.size();
+        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+        const float3 &p0 = pts[i0], &p1 = pts[i1], &p2 = pts[i2];
+        float ax = p1.x - p0.x, ay = p1.y - p0.y, az = p1.z - p0.z;
+        float bx = p2.x - p0.x, by = p2.y - p0.y, bz = p2.z - p0.z;
+        float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+        float len = sqrtf(nx * nx + ny * ny + nz * nz);
+        if (len < 1e-8f) continue;
+        nx /= len; ny /= len; nz /= len;
+        if (fabsf(nz) < min_normal_z) continue;  // not floor-like; skip before counting
+        float offset = -(nx * p0.x + ny * p0.y + nz * p0.z);
+
+        int count = 0;
+        for (const float3& p : pts)
+            if (fabsf(nx * p.x + ny * p.y + nz * p.z + offset) < threshold) count++;
+        if (count > best_count) {
+            best_count = count;
+            out_normal = make_float3(nx, ny, nz);
+            out_offset = offset;
+        }
+    }
+    if (best_count < 3) return false;
+    out_inliers = best_count;
+    return true;
+}
+
 // Top-N peaks of a circular (mod 180) histogram with minimum separation,
 // after light smoothing -- host-side port of the prototype's peaks_of().
 std::vector<int> histogramPeaks(const std::vector<float>& hist, int n_peaks, int separation) {
@@ -320,6 +371,7 @@ WallAlignResult wallAlignGPU(
     int icp_iterations, float icp_max_distance,
     int plane_hypotheses, float plane_threshold,
     unsigned long long plane_seed,
+    float min_floor_normal_z,
     cudaStream_t stream)
 {
     WallAlignResult out;
@@ -328,14 +380,36 @@ WallAlignResult wallAlignGPU(
     const int threads = 256;
     auto blocksFor = [&](int n) { return (n + threads - 1) / threads; };
 
-    // ---- 1. floor plane per cloud ----
-    GpuPlaneFit plane_src, plane_tgt;
-    if (fitDominantPlaneGPU(source, plane_hypotheses, plane_threshold, plane_seed, plane_src, stream) != cudaSuccess ||
-        fitDominantPlaneGPU(target, plane_hypotheses, plane_threshold, plane_seed, plane_tgt, stream) != cudaSuccess ||
-        !plane_src.valid || !plane_tgt.valid) {
-        std::cerr << "wallAlignGPU: dominant-plane fit failed\n";
+    // ---- 1. floor plane per cloud (orientation-constrained -- see
+    //         constrainedFloorFit above for why fitDominantPlaneGPU is not
+    //         used here) ----
+    std::vector<float3> h_source_pts(source.count), h_target_pts(target.count);
+    if (cudaMemcpyAsync(h_source_pts.data(), source.d_points, source.count * sizeof(float3),
+                         cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+        cudaMemcpyAsync(h_target_pts.data(), target.d_points, target.count * sizeof(float3),
+                         cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+        std::cerr << "wallAlignGPU: cloud download for floor fit failed\n";
         return out;
     }
+
+    GpuPlaneFit plane_src, plane_tgt;
+    if (!constrainedFloorFit(h_source_pts, plane_hypotheses, plane_threshold, min_floor_normal_z,
+                              plane_seed, plane_src.normal, plane_src.offset, plane_src.inlier_count) ||
+        !constrainedFloorFit(h_target_pts, plane_hypotheses, plane_threshold, min_floor_normal_z,
+                              plane_seed, plane_tgt.normal, plane_tgt.offset, plane_tgt.inlier_count)) {
+        std::cerr << "wallAlignGPU: constrained floor fit failed -- no near-horizontal plane "
+                     "found (is the floor visible in both clouds?)\n";
+        return out;
+    }
+    plane_src.valid = plane_tgt.valid = true;
+
+    std::cout << "  [wall-align] source floor: normal=(" << plane_src.normal.x << ","
+              << plane_src.normal.y << "," << plane_src.normal.z << ") inliers="
+              << plane_src.inlier_count << "/" << source.count << "\n"
+              << "  [wall-align] target floor: normal=(" << plane_tgt.normal.x << ","
+              << plane_tgt.normal.y << "," << plane_tgt.normal.z << ") inliers="
+              << plane_tgt.inlier_count << "/" << target.count << "\n";
 
     // ---- 2. gravity-align both clouds (rotate floor normal to +Z) ----
     float R_A[9], R_B[9];
@@ -552,6 +626,49 @@ WallAlignResult wallAlignGPU(
             out.best.rotation = refined.rotation;
             out.best.translation = refined.translation;
             out.best_yaw_deg = (float)yaw;
+        }
+    }
+
+    // ---- 5. annealed final refinement of the winner ----
+    // The per-candidate ICP above runs at a single, tight max_distance --
+    // enough to rank candidates, but a tight radius can't correct residual
+    // rotation: a few degrees of yaw error displaces far points by more
+    // than max_distance (room-scale arm-length effect), so the very points
+    // carrying the strongest rotation signal never form correspondences.
+    // Re-refine the winner coarse-to-fine: a wide first radius recovers the
+    // far correspondences, then tightening restores precision. Measured on
+    // the Aug 4 capture: recovers ~4 deg of rotation single-radius ICP
+    // leaves behind, with better inlier fractions at both 10cm and 5cm.
+    if (out.best.score >= 0) {
+        RegistrationResult annealed = out.best;
+        for (float mult : {4.0f, 2.0f, 1.0f, 0.5f}) {
+            annealed = icpGPU(source, target, annealed,
+                               icp_iterations, 1e-6f, icp_max_distance * mult,
+                               &plane_src.normal, plane_src.offset, 0.5f, stream);
+        }
+
+        XForm xf{};
+        for (int r = 0; r < 3; r++)
+            for (int col = 0; col < 3; col++) xf.r[r * 3 + col] = (float)annealed.rotation(r, col);
+        xf.t[0] = (float)annealed.translation(0);
+        xf.t[1] = (float)annealed.translation(1);
+        xf.t[2] = (float)annealed.translation(2);
+
+        cudaMemsetAsync(d_score, 0, sizeof(unsigned int), stream);
+        scoreNonFloorKernel<<<blocksFor(source.count), threads, 0, stream>>>(
+            source.d_points, a_src.d_floor, source.count,
+            target_grid.d_sorted_keys, target_grid.d_sorted_indices,
+            target_grid.d_points, target_grid.point_count, target_grid.cell_size,
+            xf, icp_max_distance, d_score);
+        unsigned int h_score = 0;
+        cudaMemcpyAsync(&h_score, d_score, sizeof(unsigned int), cudaMemcpyDeviceToHost, stream);
+        if (cudaStreamSynchronize(stream) == cudaSuccess && (long)h_score >= out.best.score) {
+            out.best.rotation = annealed.rotation;
+            out.best.translation = annealed.translation;
+            out.best.score = (long)h_score;
+            std::cout << "  [wall-align] annealed refinement accepted, score=" << h_score << "\n";
+        } else {
+            std::cout << "  [wall-align] annealed refinement did not improve score; keeping single-radius result\n";
         }
     }
 
